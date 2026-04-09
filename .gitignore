@@ -35,3 +35,5 @@ extractors/__pycache__/
 # Editor/IDE
 # .idea/
 # .vscode/
+/loom-receiver
+/loom-shipper
