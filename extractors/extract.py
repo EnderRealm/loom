@@ -21,6 +21,7 @@ from pathlib import Path
 LOOM_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = LOOM_ROOT / "extractors" / "truth-extractor.md"
 KNOWLEDGE_ROOT = LOOM_ROOT / "knowledge" / "truths"
+EVAL_ROOT = LOOM_ROOT / "knowledge" / "truths-eval"
 # Import the pre-processor (sibling module)
 sys.path.insert(0, str(LOOM_ROOT / "extractors"))
 from preprocess import preprocess as preprocess_jsonl
@@ -55,7 +56,10 @@ Unlike summaries, raw transcripts do NOT have curated `### Discoveries` sections
 
 
 def load_reference_truths(scope: str) -> list[dict]:
-    scope_dir = KNOWLEDGE_ROOT / scope
+    return load_reference_truths_from(KNOWLEDGE_ROOT / scope)
+
+
+def load_reference_truths_from(scope_dir: Path) -> list[dict]:
     if not scope_dir.exists():
         return []
     truths = []
@@ -94,6 +98,8 @@ def parse_truth(text: str, source: str = "") -> dict:
         sections[current] = "\n".join(buf).strip()
 
     evidence_paths = re.findall(r"path:\s*(\S+)", fm_text)
+    # Extract source session IDs (may be multiple in the sources: block)
+    source_sessions = re.findall(r"session:\s*(\S+)", fm_text)
 
     has_verify = bool(sections.get("how_to_verify"))
     has_claim = bool(sections.get("claim"))
@@ -108,8 +114,35 @@ def parse_truth(text: str, source: str = "") -> dict:
         "verify": sections.get("how_to_verify", ""),
         "why": sections.get("why_it_matters", ""),
         "evidence_paths": evidence_paths,
+        "source_sessions": source_sessions,
         "raw": text,
     }
+
+
+def _extract_session_id(input_path: Path) -> str:
+    """Extract a session ID from the input file.
+
+    For summaries: parse session_id from YAML frontmatter.
+    For raw jsonl: the filename (minus extension) IS the session ID.
+    """
+    name = input_path.stem  # e.g. "c7dbbcca-forge-apr07" or "c7dbbcca-cceb-452b-aafd-993eb791e230"
+    if str(input_path).endswith(".jsonl"):
+        return name  # full UUID is the session ID
+
+    # Summary: try frontmatter first
+    try:
+        for line in input_path.read_text().splitlines()[:20]:
+            if line.startswith("session_id:"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
+    # Fallback: first segment of filename (before first dash-separated label)
+    # e.g. "c7dbbcca-forge-apr07" → "c7dbbcca"
+    parts = name.split("-")
+    if parts:
+        return parts[0]
+    return ""
 
 
 def build_prompt(template: str, refs: list[dict], input_text: str, today: str, input_format: str = "summary") -> str:
@@ -389,6 +422,9 @@ def main():
     p.add_argument("--judge-reasoning", default="low", choices=["low", "medium", "high", "xhigh"], help="codex reasoning effort for the judge")
     p.add_argument("--json-out", default="", help="write a structured json result to this path")
     p.add_argument("--raw-out", default="", help="write raw model output to this path")
+    p.add_argument("--benchmark", action="store_true",
+                    help="score against eval set (truths-eval/) instead of training set (truths/). "
+                         "Training refs are still shown as few-shot examples — eval refs are never shown.")
     args = p.parse_args()
 
     # Apply preset overrides (only if user didn't also set the individual flags)
@@ -405,9 +441,42 @@ def main():
         sys.exit(f"prompt not found: {PROMPT_PATH}")
 
     template = PROMPT_PATH.read_text()
-    refs = load_reference_truths(args.scope)
-    if not refs:
-        print(f"warning: no reference truths in {KNOWLEDGE_ROOT/args.scope}", file=sys.stderr)
+
+    # Training refs: always loaded, injected as few-shot examples in the prompt.
+    training_refs = load_reference_truths(args.scope)
+    if not training_refs:
+        print(f"warning: no training truths in {KNOWLEDGE_ROOT/args.scope}", file=sys.stderr)
+
+    # Scoring refs: what we score candidates against.
+    # --benchmark: score against eval set (never shown to model), filtered to
+    # truths sourced from the same session as the input artifact.
+    # default: score against training set (same as examples — legacy mode).
+    if args.benchmark:
+        eval_dir = EVAL_ROOT / args.scope
+        all_eval_refs = load_reference_truths_from(eval_dir)
+        if not all_eval_refs:
+            sys.exit(f"no eval truths in {eval_dir} — cannot benchmark without eval set")
+
+        # Extract session ID from input to filter eval refs.
+        # Summary: frontmatter session_id field. Raw: filename is the session ID.
+        input_session_id = _extract_session_id(input_path)
+        if input_session_id:
+            scoring_refs = [r for r in all_eval_refs
+                           if any(input_session_id.startswith(sid) or sid.startswith(input_session_id)
+                                  for sid in r.get("source_sessions", []))]
+            if not scoring_refs:
+                print(f"warning: no eval truths match session {input_session_id} — scoring against all {len(all_eval_refs)} eval refs", file=sys.stderr)
+                scoring_refs = all_eval_refs
+        else:
+            print(f"warning: could not extract session ID from input — scoring against all {len(all_eval_refs)} eval refs", file=sys.stderr)
+            scoring_refs = all_eval_refs
+
+        print(f"[extract] BENCHMARK mode: {len(training_refs)} training examples, {len(scoring_refs)} eval targets (filtered from {len(all_eval_refs)} total)", file=sys.stderr)
+    else:
+        scoring_refs = training_refs
+
+    # For prompt building, always use training refs as few-shot examples.
+    refs = training_refs
 
     # Determine input format
     input_format = args.input_format
@@ -470,8 +539,8 @@ def main():
         err = c.get("error", "missing required sections/fields")
         print(f"  ! <invalid>                                          {err}")
 
-    if not refs:
-        print("\n[extract] no reference truths to compare against — skipping scoring")
+    if not scoring_refs:
+        print("\n[extract] no scoring refs to compare against — skipping scoring")
         if args.json_out:
             Path(args.json_out).write_text(json.dumps({
                 "input": str(input_path),
@@ -491,9 +560,9 @@ def main():
     judge_start = time.time()
     if args.judge == "llm":
         print(f"[extract] judging with {args.judge_provider}:{args.judge_model}...", file=sys.stderr)
-        report = compare_llm(valid, refs, args.judge_provider, args.judge_model, args.judge_reasoning)
+        report = compare_llm(valid, scoring_refs, args.judge_provider, args.judge_model, args.judge_reasoning)
     else:
-        report = compare_keyword(valid, refs)
+        report = compare_keyword(valid, scoring_refs)
     judge_secs = time.time() - judge_start
     print()
     print(f"== Coverage vs reference ({args.judge} scoring) ==")
@@ -526,7 +595,9 @@ def main():
             "judge_secs": judge_secs,
             "candidates_valid": len(valid),
             "candidates_invalid": len(invalid),
-            "references_loaded": len(refs),
+            "benchmark": args.benchmark,
+            "training_refs": len(training_refs),
+            "references_loaded": len(scoring_refs),
             "reference_hits": sum(1 for r in report["results"] if r["score"] >= args.threshold),
             "mean_score": report["mean"],
             "verdict": verdict,
