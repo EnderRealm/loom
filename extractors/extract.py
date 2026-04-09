@@ -20,6 +20,7 @@ from pathlib import Path
 
 LOOM_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = LOOM_ROOT / "extractors" / "truth-extractor.md"
+SUMMARIZER_PATH = LOOM_ROOT / "extractors" / "summarizer.md"
 KNOWLEDGE_ROOT = LOOM_ROOT / "knowledge" / "truths"
 EVAL_ROOT = LOOM_ROOT / "knowledge" / "truths-eval"
 # Import the pre-processor (sibling module)
@@ -457,6 +458,11 @@ def main():
     p.add_argument("--judge-reasoning", default="low", choices=["low", "medium", "high", "xhigh"], help="codex reasoning effort for the judge")
     p.add_argument("--json-out", default="", help="write a structured json result to this path")
     p.add_argument("--raw-out", default="", help="write raw model output to this path")
+    p.add_argument("--summarize", action="store_true",
+                    help="two-stage pipeline for raw input: preprocess → summarize → extract. "
+                         "Adds one LLM call but improves extraction quality on raw transcripts.")
+    p.add_argument("--summarize-model", default="", help="model for summarization step (defaults to same as --model)")
+    p.add_argument("--summarize-provider", default="", help="provider for summarization step (defaults to same as --provider)")
     p.add_argument("--benchmark", action="store_true",
                     help="score against eval set (truths-eval/) instead of training set (truths/). "
                          "Training refs are still shown as few-shot examples — eval refs are never shown.")
@@ -525,6 +531,37 @@ def main():
         print(f"[extract] preprocessed: {len(input_text):,} chars", file=sys.stderr)
     else:
         input_text = input_path.read_text()
+
+    # Two-stage pipeline: summarize the preprocessed transcript before extraction.
+    # Only applies to raw input. Summary input is already compressed.
+    if args.summarize and input_format == "raw":
+        if not SUMMARIZER_PATH.exists():
+            sys.exit(f"summarizer prompt not found: {SUMMARIZER_PATH}")
+        sum_provider = args.summarize_provider or args.provider
+        sum_model = args.summarize_model or args.model
+        sum_template = SUMMARIZER_PATH.read_text()
+        sum_prompt = sum_template.replace("{INPUT}", input_text)
+        print(f"[extract] summarizing with {sum_provider}:{sum_model}...", file=sys.stderr)
+        sum_start = time.time()
+        summary_text = call_llm(sum_prompt, sum_provider, sum_model, args.reasoning)
+        sum_secs = time.time() - sum_start
+        print(f"[extract] summary: {len(summary_text):,} chars in {sum_secs:.1f}s", file=sys.stderr)
+
+        # Save intermediate summary if raw-out path is set
+        raw_path = args.raw_out
+        if not raw_path and args.json_out:
+            raw_path = args.json_out.replace(".json", ".raw.txt")
+        if raw_path:
+            sum_path = raw_path.replace(".raw.txt", ".summary.txt")
+            Path(sum_path).write_text(summary_text)
+            print(f"[extract] intermediate summary saved to {sum_path}", file=sys.stderr)
+
+        # Feed the summary (not the raw transcript) to the truth extractor.
+        # Switch input_format to "summary" so the extractor prompt uses summary guidance.
+        input_text = summary_text
+        input_format = "summary"
+    elif args.summarize and input_format != "raw":
+        print(f"[extract] --summarize ignored (input is already a summary)", file=sys.stderr)
 
     today = date.today().isoformat()
     prompt = build_prompt(template, refs, input_text, today, input_format)
