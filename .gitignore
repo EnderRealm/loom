@@ -32,6 +32,12 @@ extractors/results/
 extractors/results-raw/
 extractors/__pycache__/
 
+# Raw session transcripts (contain local paths, session URLs, internal data)
+extractors/eval-data/*.jsonl
+
+# macOS
+.DS_Store
+
 # Editor/IDE
 # .idea/
 # .vscode/
