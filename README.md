@@ -21,6 +21,7 @@ Transport is the only subsystem today. Anything else in this repo (`knowledge/`,
 ```
 loom/
   go.mod                               # module "loom"
+  install.sh                           # install/uninstall/status entry point
   internal/config/                     # loom-wide config (Home, config.json schema)
   transport/
     cmd/
@@ -30,18 +31,31 @@ loom/
   docs/  extractors/  knowledge/       # non-Go subsystems
 ```
 
-Build everything:
+Everything (build + launchd agent management) is driven by `./install.sh`. Run it with no arguments for usage.
 
 ```sh
-go build ./...
+./install.sh                           # help
+./install.sh --install-receiver        # server side
+./install.sh --install-shipper         # client side
+./install.sh --uninstall               # remove both launchd agents
+./install.sh --status                  # show state of both agents
 ```
 
-Build the two binaries to a stable location so launchd and your `$PATH` can find them:
+The script builds to `$LOOM_BIN_DIR` (default `~/.local/bin`, no sudo required), writes state under `$LOOM_HOME` (default `~/.loom`), and manages both launchd agents. Override either via environment:
 
 ```sh
-go build -o /usr/local/bin/loom-shipper  ./transport/cmd/loom-shipper
-go build -o /usr/local/bin/loom-receiver ./transport/cmd/loom-receiver
+LOOM_BIN_DIR=/usr/local/bin ./install.sh --install-shipper
+LOOM_HOME=/srv/loom         ./install.sh --install-receiver
 ```
+
+If you prefer to build manually (e.g., you don't want the launchd agent, or you're running the receiver in a container):
+
+```sh
+go build -o ~/.local/bin/loom-shipper  ./transport/cmd/loom-shipper
+go build -o ~/.local/bin/loom-receiver ./transport/cmd/loom-receiver
+```
+
+> If `~/.local/bin` isn't in your `$PATH`, add it to your shell rc file so you can invoke the binaries by name. launchd runs them by absolute path regardless, so this is purely for interactive use.
 
 ---
 
@@ -73,82 +87,47 @@ State lives per-user per-machine. Override the root with `LOOM_HOME=/some/path`.
 
 The server can be any Mac reachable from the client(s). It can be the same machine as the client for experimentation.
 
-### 1. Pick a shared bearer token
+### 1. Generate and export a shared bearer token
 
 ```sh
-openssl rand -hex 32
+export LOOM_RECEIVER_TOKEN="$(openssl rand -hex 32)"
 ```
 
-Write it down. The same value goes into the client config and the server env.
+The same value goes into the client's `~/.loom/config.json` on each shipping machine.
 
-### 2. Run the receiver
-
-Foreground, for development:
+### 2. Install the receiver agent
 
 ```sh
-LOOM_RECEIVER_TOKEN=<your-token> loom-receiver
+./install.sh --install-receiver
+```
+
+This:
+1. Builds `loom-receiver` to `$LOOM_BIN_DIR/loom-receiver`
+2. Creates `$LOOM_HOME/received/`
+3. Writes `~/Library/LaunchAgents/com.loom.receiver.plist` with `KeepAlive=true` (restarts on exit) and `RunAtLoad=true` (starts immediately)
+4. Bakes `LOOM_RECEIVER_TOKEN` and `LOOM_HOME` into the plist's `EnvironmentVariables`
+5. Validates the plist with `plutil -lint`
+6. Boots out any prior instance and bootstraps the new one into launchd
+7. Polls `http://127.0.0.1:8765/healthz` for up to 5s to confirm it came up
+
+For a remote server, replace `127.0.0.1` with its reachable address when verifying from elsewhere; also open port 8765 or set up a tunnel as needed.
+
+### Receiver flags (for manual runs)
+
+If you'd rather run the receiver manually (e.g., foreground in a tmux for debugging), skip `install.sh --install-receiver` and invoke the binary directly:
+
+```sh
+LOOM_RECEIVER_TOKEN=<token> loom-receiver
 # → listening on :8765, storage=/Users/<you>/.loom/received
 ```
-
-Flags (all optional):
 
 | Flag            | Default                          | Purpose                                  |
 | --------------- | -------------------------------- | ---------------------------------------- |
 | `--addr`        | `:8765`                          | Listen address                           |
-| `--storage`     | `$LOOM_HOME/received` (or `~/.loom/received`) | Where to write session files |
+| `--storage`     | `$LOOM_HOME/received`            | Where to write session files             |
 | `--auth-token`  | (empty; falls back to env)       | Shared bearer token; empty disables auth |
 
 Auth token can also come from `LOOM_RECEIVER_TOKEN`. If neither is set, the server accepts all requests (dev/localhost only).
-
-### 3. (Optional) Run the receiver as a launchd agent
-
-The shipper ships itself as a self-managed launchd agent. The receiver does not — it's expected to be long-running, not scheduled, so the shape is different. If you want it under launchd, create this plist by hand as `~/Library/LaunchAgents/com.loom.receiver.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.loom.receiver</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/loom-receiver</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>LOOM_RECEIVER_TOKEN</key>
-        <string>YOUR-TOKEN-HERE</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOU/.loom/receiver.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOU/.loom/receiver.log</string>
-</dict>
-</plist>
-```
-
-Replace `YOUR-TOKEN-HERE` and `/Users/YOU/` with real values. Then:
-
-```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loom.receiver.plist
-launchctl print gui/$(id -u)/com.loom.receiver    # confirm loaded
-```
-
-To uninstall: `launchctl bootout gui/$(id -u)/com.loom.receiver && rm ~/Library/LaunchAgents/com.loom.receiver.plist`.
-
-### 4. Verify the server is up
-
-```sh
-curl http://127.0.0.1:8765/healthz
-# → ok
-```
-
-For a remote server, replace `127.0.0.1` with its reachable address and open the port / set up a tunnel.
 
 ---
 
@@ -156,15 +135,7 @@ For a remote server, replace `127.0.0.1` with its reachable address and open the
 
 Each machine you want to ship sessions from runs its own `loom-shipper` + config + launchd agent.
 
-### 1. Install the shipper binary to a stable path
-
-```sh
-go build -o /usr/local/bin/loom-shipper ./transport/cmd/loom-shipper
-```
-
-This path gets pinned into the launchd plist at install time. As long as you rebuild to the same path, updates are transparent.
-
-### 2. Create `~/.loom/config.json`
+### 1. Create `~/.loom/config.json`
 
 ```json
 {
@@ -182,42 +153,65 @@ This path gets pinned into the launchd plist at install time. As long as you reb
 
 Permissions: `chmod 600 ~/.loom/config.json` — it contains the bearer token.
 
-### 3. First run (dry check)
-
-Run once by hand before installing the agent, so you catch config mistakes interactively:
+### 2. Install the shipper agent
 
 ```sh
-loom-shipper once
-# → loom-shipper: shipped=N skipped=M failed=K total=T
+./install.sh --install-shipper
 ```
 
-If `failed` is high, check `server_url`, `auth_token`, and that the receiver is actually running.
+This:
+1. Checks that `$LOOM_HOME/config.json` exists (errors out if not)
+2. Builds `loom-shipper` to `$LOOM_BIN_DIR/loom-shipper`
+3. Runs `loom-shipper once` as a dry check (warning only if it fails — lets you install the agent first and fix config later)
+4. Runs `loom-shipper install-agent`, which writes `~/Library/LaunchAgents/com.loom.shipper.plist` (interval baked in, binary path captured via `os.Executable()`), validates it with `plutil -lint`, and bootstraps it into launchd with `RunAtLoad=true`
+5. Prints the current status so you can confirm it's loaded
 
-### 4. Install the launchd agent
-
-```sh
-loom-shipper install-agent
-```
-
-This writes `~/Library/LaunchAgents/com.loom.shipper.plist`, validates it with `plutil -lint`, and bootstraps it into launchd. `RunAtLoad=true` means any backlog ships immediately on install and on login.
-
-### 5. Verify
+### 3. Verify
 
 ```sh
-loom-shipper status              # launchctl print output, or "not loaded"
+./install.sh --status
 tail -f ~/.loom/transport/shipper.log
 ```
 
 First run will walk every session under `~/.claude/projects/` and ship each one in full. Subsequent runs ship only new bytes per session.
 
-### Commands
+---
 
-| Command                     | What it does                                                             |
-| --------------------------- | ------------------------------------------------------------------------ |
-| `loom-shipper once`         | Single pass. Safe to run manually at any time; idempotent; reentrant.    |
-| `loom-shipper install-agent`| Generate plist, lint it, bootstrap into launchd.                         |
-| `loom-shipper uninstall-agent` | Bootout and remove the plist. Tolerates "not loaded".                 |
-| `loom-shipper status`       | `launchctl print` for the agent.                                         |
+## Uninstall
+
+```sh
+./install.sh --uninstall
+```
+
+Removes both launchd agents (tolerant of either being absent) and both plist files. **Preserves** `~/.loom/` state and the installed binaries. If you want a full wipe:
+
+```sh
+rm -rf ~/.loom
+rm -f ~/.local/bin/loom-shipper ~/.local/bin/loom-receiver
+```
+
+---
+
+## Commands reference
+
+**Install script** (`./install.sh`):
+
+| Command                  | What it does                                                          |
+| ------------------------ | --------------------------------------------------------------------- |
+| `--install-receiver`     | Build loom-receiver, write plist, bootstrap, verify `/healthz`.       |
+| `--install-shipper`      | Build loom-shipper, dry-run `once`, run `install-agent`, show status. |
+| `--uninstall`            | Remove both agents. Preserves state and binaries.                     |
+| `--status`               | Show launchd state for both agents + config presence.                 |
+| `--help` (or no args)    | Show usage.                                                           |
+
+**Shipper binary** (`loom-shipper`), for when you need fine control:
+
+| Command                        | What it does                                                         |
+| ------------------------------ | -------------------------------------------------------------------- |
+| `loom-shipper once`            | Single pass. Idempotent; reentrant; safe to run by hand any time.    |
+| `loom-shipper install-agent`   | Generate plist, lint, bootstrap into launchd.                        |
+| `loom-shipper uninstall-agent` | Bootout and remove the plist. Tolerates "not loaded".                |
+| `loom-shipper status`          | `launchctl print` for the agent.                                     |
 
 ---
 
@@ -225,38 +219,37 @@ First run will walk every session under `~/.claude/projects/` and ship each one 
 
 The key design fact: **the launchd plist pins an absolute binary path at install time**. If you rebuild to the same path, the next scheduled tick runs the new binary — no reinstall needed.
 
-### Client updates (rebuild only)
+### Simple updates (code change only)
+
+Easiest path — just re-run the install script. Both commands are idempotent and bootstrap-safe:
 
 ```sh
 cd ~/code/loom
 git pull
-go build -o /usr/local/bin/loom-shipper ./transport/cmd/loom-shipper
-# done — next tick (within interval_minutes) runs the new binary
+./install.sh --install-shipper     # on each client machine
+./install.sh --install-receiver    # on the server machine (needs LOOM_RECEIVER_TOKEN in env)
 ```
 
-### Client updates (reinstall required)
-
-Run `loom-shipper install-agent` again if any of these change:
-
-- The binary path (e.g., you moved from `/usr/local/bin` to `~/.local/bin`)
-- `interval_minutes` in `~/.loom/config.json` (the interval is baked into the plist)
-- `LOOM_HOME` (if non-default, it's baked into `EnvironmentVariables`)
-
-`install-agent` is idempotent — it boots out any existing agent with the same label before bootstrapping the new plist.
-
-### Server updates
+Alternatively, if nothing structural changed and you only want to swap the binary without touching the plist, rebuild in place:
 
 ```sh
 cd ~/code/loom
 git pull
-go build -o /usr/local/bin/loom-receiver ./transport/cmd/loom-receiver
-
-# If running under launchd:
-launchctl kickstart -k gui/$(id -u)/com.loom.receiver
-
-# If running in a terminal/tmux:
-# kill the old process, then start the new one
+go build -o ~/.local/bin/loom-shipper  ./transport/cmd/loom-shipper   # next tick runs it
+go build -o ~/.local/bin/loom-receiver ./transport/cmd/loom-receiver  # needs a restart
+launchctl kickstart -k gui/$(id -u)/com.loom.receiver                 # if running under launchd
 ```
+
+### When a reinstall is required
+
+Re-run `./install.sh --install-shipper` (or `--install-receiver`) when any of these change:
+
+- **Binary path** — you moved `LOOM_BIN_DIR` (the plist pins the absolute path)
+- **`interval_minutes`** in config — the interval is baked into the shipper plist
+- **`LOOM_HOME`** — if non-default, it's baked into `EnvironmentVariables` on both plists
+- **`LOOM_RECEIVER_TOKEN`** — baked into the receiver plist at install time
+
+`install-agent` (and the install script) boot out any prior instance with the same label before bootstrapping the new plist, so reinstall is always safe.
 
 ### Wire protocol changes
 
@@ -279,16 +272,20 @@ Nothing in the update flow requires wiping state. If an update ever did — for 
 
 ## Troubleshooting
 
-**`config not found at ~/.loom/config.json`** — client hasn't been configured. Create the file (see "Client setup" step 2).
+First stop for any issue: `./install.sh --status`. It reports which agents are loaded, whether the binaries and config exist, and prints key launchctl fields.
 
-**All POSTs return 401** — token mismatch. Check that `LOOM_RECEIVER_TOKEN` on the server equals `auth_token` in `~/.loom/config.json` on the client.
+**`config not found at ~/.loom/config.json`** — client hasn't been configured. Create the file (see "Client setup" step 1), then re-run `./install.sh --install-shipper`.
+
+**`LOOM_RECEIVER_TOKEN is not set`** (from `install.sh --install-receiver`) — export the token in your shell first: `export LOOM_RECEIVER_TOKEN="$(openssl rand -hex 32)"`, then re-run the install.
+
+**All POSTs return 401** — token mismatch. Check that `LOOM_RECEIVER_TOKEN` on the server matches `auth_token` in `~/.loom/config.json` on the client. A token change on the server requires `./install.sh --install-receiver` to rewrite the plist.
 
 **`loom-shipper: shipped=0 skipped=60 failed=0 total=60`** — nothing to ship. All cursors are at EOF for every session. This is the steady state.
 
-**`loom-shipper: shipped=0 skipped=0 failed=60 total=60`** — everything failed. Check `server_url` (is it reachable? `curl <url>/healthz`), check auth, check the receiver's log.
+**`loom-shipper: shipped=0 skipped=0 failed=60 total=60`** — everything failed. Check `server_url` (is it reachable? `curl <url>/healthz`), check auth, and check the receiver's log at `~/.loom/receiver.log`.
 
 **`another shipper is running, skipping`** — the flock is held. Either a long-running `once` hasn't finished yet, or a previous process crashed without releasing the lock. The lock releases automatically on process exit; if it's truly stuck, inspect `~/.loom/transport/shipper.lock` and, if no `loom-shipper` process exists, remove the file.
 
-**`launchctl print` says "Could not find service"** — the agent isn't loaded. Re-run `loom-shipper install-agent`, or check `~/Library/LaunchAgents/com.loom.shipper.plist` exists and is valid (`plutil -lint <path>`).
+**`launchctl print` says "Could not find service"** — the agent isn't loaded. Re-run `./install.sh --install-shipper` (or `--install-receiver`), or check the relevant plist exists under `~/Library/LaunchAgents/` and is valid (`plutil -lint <path>`).
 
 **Shipper runs but nothing appears on the server** — partial lines aren't shipped until the trailing `\n` arrives. If you're watching an active session, the last turn may lag the shipper by one tick. Confirm steady-state by reading the log a few ticks later.
