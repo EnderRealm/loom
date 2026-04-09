@@ -111,6 +111,30 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Integrity check: verify the data file is at least as large as the offset
+	// claims. If it's shorter, the offset file is ahead of the data — a crash or
+	// manual cleanup left them inconsistent. Refuse the request rather than
+	// silently accepting a replay that covers a gap in the data file.
+	if currentNext > 0 {
+		fi, statErr := os.Stat(sessionPath)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			http.Error(w, "stat session: "+statErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		dataSize := int64(0)
+		if fi != nil {
+			dataSize = fi.Size()
+		}
+		if dataSize < currentNext {
+			log.Printf("corruption from=%s session=%s offset=%d data_size=%d (offset ahead of data)",
+				r.RemoteAddr, req.SessionID, currentNext, dataSize)
+			http.Error(w,
+				fmt.Sprintf("offset/data mismatch: offset=%d but data file is %d bytes — manual repair needed", currentNext, dataSize),
+				http.StatusInternalServerError)
+			return
+		}
+	}
+
 	// Replay: client is sending data we've already accepted.
 	if req.FromOffset < currentNext {
 		if req.ToOffset <= currentNext {
@@ -153,6 +177,11 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "write: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		http.Error(w, "fsync: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 	if err := f.Close(); err != nil {
 		http.Error(w, "close: "+err.Error(), http.StatusInternalServerError)
