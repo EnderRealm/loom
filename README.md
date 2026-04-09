@@ -162,9 +162,10 @@ Permissions: `chmod 600 ~/.loom/config.json` — it contains the bearer token.
 This:
 1. Checks that `$LOOM_HOME/config.json` exists (errors out if not)
 2. Builds `loom-shipper` to `$LOOM_BIN_DIR/loom-shipper`
-3. Runs `loom-shipper once` as a dry check (warning only if it fails — lets you install the agent first and fix config later)
-4. Runs `loom-shipper install-agent`, which writes `~/Library/LaunchAgents/com.loom.shipper.plist` (interval baked in, binary path captured via `os.Executable()`), validates it with `plutil -lint`, and bootstraps it into launchd with `RunAtLoad=true`
-5. Prints the current status so you can confirm it's loaded
+3. Runs `loom-shipper install-agent`, which writes `~/Library/LaunchAgents/com.loom.shipper.plist` (interval baked in, binary path captured via `os.Executable()`), validates it with `plutil -lint`, and bootstraps it into launchd
+4. Kickstarts the agent immediately via `launchctl kickstart` so the first run happens now (through launchd, writing to the log file) rather than waiting for the first interval tick
+5. Tails the log to show the first run's output
+6. Prints the current status so you can confirm it's loaded
 
 ### 3. Verify
 

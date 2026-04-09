@@ -101,13 +101,19 @@ install_shipper() {
 
     build_shipper
 
-    log "dry check: loom-shipper once"
-    if ! "$SHIPPER_BIN" once; then
-        warn "dry check returned non-zero — inspect output above and the receiver log"
-    fi
-
     log "installing launchd agent"
     "$SHIPPER_BIN" install-agent
+
+    log "kickstarting first run"
+    launchctl kickstart "gui/$(id -u)/$SHIPPER_LABEL" 2>/dev/null || true
+    sleep 2
+
+    if [[ -f "$LOOM_HOME/transport/shipper.log" ]]; then
+        log "first run output:"
+        tail -5 "$LOOM_HOME/transport/shipper.log"
+    else
+        warn "no log output yet — check: tail $LOOM_HOME/transport/shipper.log"
+    fi
 
     log "shipper installed; current status:"
     "$SHIPPER_BIN" status 2>&1 | head -20 || true
