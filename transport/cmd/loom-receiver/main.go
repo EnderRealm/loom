@@ -123,7 +123,7 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr, req.SessionID, currentNext, req.FromOffset, req.ToOffset)
 		writeJSONStatus(w, http.StatusConflict, wire.IngestError{
 			Error:        "partial replay not supported",
-			ExpectedFrom: currentNext,
+			ExpectedFrom: &currentNext,
 		})
 		return
 	}
@@ -134,7 +134,7 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr, req.SessionID, currentNext, req.FromOffset)
 		writeJSONStatus(w, http.StatusConflict, wire.IngestError{
 			Error:        "gap: server expected lower from_offset",
-			ExpectedFrom: currentNext,
+			ExpectedFrom: &currentNext,
 		})
 		return
 	}

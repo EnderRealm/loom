@@ -2,6 +2,8 @@
 // Both sides import this package so the contract is defined in exactly one place.
 package wire
 
+import "fmt"
+
 // IngestRequest is the payload the shipper POSTs to the receiver for each
 // session delta. FromOffset/ToOffset are byte offsets into the source JSONL
 // file; the (SessionID, FromOffset) pair is the idempotency key.
@@ -24,6 +26,17 @@ type IngestResponse struct {
 // IngestError is returned with 4xx responses so the client can distinguish
 // a real failure from a recoverable state mismatch.
 type IngestError struct {
-	Error           string `json:"error"`
-	ExpectedFrom    int64  `json:"expected_from,omitempty"`
+	Error        string `json:"error"`
+	ExpectedFrom *int64 `json:"expected_from"`
+}
+
+// ResyncError wraps a 409 conflict from the receiver. The shipper should
+// reset its cursor to ExpectedFrom and retry on the next tick.
+type ResyncError struct {
+	ExpectedFrom int64
+	Detail       string
+}
+
+func (e *ResyncError) Error() string {
+	return fmt.Sprintf("resync needed: server expects offset %d (%s)", e.ExpectedFrom, e.Detail)
 }

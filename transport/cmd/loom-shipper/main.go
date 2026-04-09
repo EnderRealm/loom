@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -110,6 +111,17 @@ func runOnce() {
 		}
 		accepted, err := postIngest(cfg, req)
 		if err != nil {
+			var resyncErr *wire.ResyncError
+			if errors.As(err, &resyncErr) {
+				log.Printf("resync project=%s session=%s cursor=%d→%d (server expects %d: %s)",
+					s.Project, s.SessionID, from, resyncErr.ExpectedFrom, resyncErr.ExpectedFrom, resyncErr.Detail)
+				if wErr := cursor.Write(source.Agent, s.SessionID, resyncErr.ExpectedFrom); wErr != nil {
+					log.Printf("fail project=%s session=%s err=%q (cursor resync write)", s.Project, s.SessionID, wErr)
+					failed++
+				}
+				// Don't count as failed — cursor is corrected, next tick will succeed.
+				continue
+			}
 			log.Printf("fail project=%s session=%s offset=%d→%d lines=%d err=%q",
 				s.Project, s.SessionID, from, to, len(lines), err)
 			failed++
@@ -147,6 +159,17 @@ func postIngest(cfg *config.Config, req wire.IngestRequest) (int64, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		var ie wire.IngestError
+		if err := json.NewDecoder(resp.Body).Decode(&ie); err == nil && ie.ExpectedFrom != nil {
+			return 0, &wire.ResyncError{
+				ExpectedFrom: *ie.ExpectedFrom,
+				Detail:       ie.Error,
+			}
+		}
+		b, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("status 409: %s", strings.TrimSpace(string(b)))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		return 0, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
