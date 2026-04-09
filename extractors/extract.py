@@ -98,11 +98,29 @@ def parse_truth(text: str, source: str = "") -> dict:
         sections[current] = "\n".join(buf).strip()
 
     evidence_paths = re.findall(r"path:\s*(\S+)", fm_text)
+    evidence_commits = re.findall(r"commit:\s*(\S+)", fm_text)
     # Extract source session IDs (may be multiple in the sources: block)
     source_sessions = re.findall(r"session:\s*(\S+)", fm_text)
 
     has_verify = bool(sections.get("how_to_verify"))
     has_claim = bool(sections.get("claim"))
+
+    # Validation: hard requirements vs warnings
+    warnings = []
+    if not frontmatter.get("scope"):
+        warnings.append("missing scope")
+    if not frontmatter.get("type"):
+        warnings.append("missing type")
+    if not frontmatter.get("status"):
+        warnings.append("missing status")
+    if not evidence_paths and not evidence_commits:
+        warnings.append("no evidence (no path: or commit: entries)")
+    if not source_sessions:
+        warnings.append("no source session")
+    if not frontmatter.get("verified_at"):
+        warnings.append("missing verified_at")
+
+    evidence_count = len(evidence_paths) + len(evidence_commits)
 
     return {
         "source": source,
@@ -110,11 +128,16 @@ def parse_truth(text: str, source: str = "") -> dict:
         "id": frontmatter.get("id", ""),
         "title": frontmatter.get("title", ""),
         "scope": frontmatter.get("scope", ""),
+        "type": frontmatter.get("type", ""),
+        "status": frontmatter.get("status", ""),
         "claim": sections.get("claim", ""),
         "verify": sections.get("how_to_verify", ""),
         "why": sections.get("why_it_matters", ""),
         "evidence_paths": evidence_paths,
+        "evidence_commits": evidence_commits,
+        "evidence_count": evidence_count,
         "source_sessions": source_sessions,
+        "warnings": warnings,
         "raw": text,
     }
 
@@ -342,7 +365,19 @@ def compare_llm(candidates: list[dict], refs: list[dict], provider: str, model: 
         return {"results": [], "mean": 0.0, "extras": []}
 
     def fmt_truth(idx, label, t):
-        return f"{label}. id: {t['id']}\n   title: {t['title']}\n   claim: {t['claim'][:400]}"
+        lines = [
+            f"{label}. id: {t['id']}",
+            f"   title: {t['title']}",
+            f"   claim: {t['claim'][:400]}",
+        ]
+        ev_paths = t.get("evidence_paths", [])
+        ev_commits = t.get("evidence_commits", [])
+        if ev_paths or ev_commits:
+            ev_parts = [f"path:{p}" for p in ev_paths[:3]] + [f"commit:{c}" for c in ev_commits[:2]]
+            lines.append(f"   evidence: {', '.join(ev_parts)}")
+        else:
+            lines.append(f"   evidence: NONE")
+        return "\n".join(lines)
 
     refs_block = "\n\n".join(fmt_truth(i, str(i + 1), r) for i, r in enumerate(refs))
     cands_block = "\n\n".join(
@@ -532,12 +567,21 @@ def main():
     invalid = [c for c in candidates if not c.get("valid")]
     print(f"[extract] parsed {len(valid)} valid / {len(invalid)} invalid candidate(s)")
 
+    warned = 0
     for c in valid:
         title = c["title"][:70] or "<no title>"
-        print(f"  + {c['id'] or '<no id>':50} {title}")
+        ev = c.get("evidence_count", 0)
+        ev_tag = f" [ev:{ev}]" if ev else " [NO-EVIDENCE]"
+        print(f"  + {c['id'] or '<no id>':50} {title}{ev_tag}")
+        if c.get("warnings"):
+            warned += 1
+            for w in c["warnings"]:
+                print(f"    warn: {w}")
     for c in invalid:
         err = c.get("error", "missing required sections/fields")
         print(f"  ! <invalid>                                          {err}")
+    if warned:
+        print(f"  ({warned} candidate(s) with schema warnings)")
 
     if not scoring_refs:
         print("\n[extract] no scoring refs to compare against — skipping scoring")
@@ -553,7 +597,7 @@ def main():
                 "candidates_invalid": len(invalid),
                 "references_loaded": 0,
                 "verdict": "UNSCORED",
-                "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "claim": c.get("claim", ""), "verify": c.get("verify", "")} for c in valid],
+                "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
             }, indent=2))
         return
 
@@ -603,7 +647,7 @@ def main():
             "verdict": verdict,
             "references": report["results"],
             "extras": [valid[i]["id"] for i in report["extras"]],
-            "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "claim": c.get("claim", ""), "verify": c.get("verify", "")} for c in valid],
+            "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
         }, indent=2))
 
     sys.exit(0 if verdict == "PASS" else 1)
