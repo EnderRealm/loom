@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -53,7 +54,7 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 
-	fmt.Printf("loom-receiver listening on %s, storage=%s\n", *addr, *storage)
+	log.Printf("loom-receiver listening on %s storage=%s", *addr, *storage)
 	if err := http.ListenAndServe(*addr, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "listen:", err)
 		os.Exit(1)
@@ -66,24 +67,29 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !checkAuth(r) {
+		log.Printf("reject 401 from=%s", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var req wire.IngestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("reject 400 from=%s err=%q", r.RemoteAddr, err)
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.Agent == "" || req.Project == "" || req.SessionID == "" {
+		log.Printf("reject 400 from=%s reason=missing-fields", r.RemoteAddr)
 		http.Error(w, "missing required fields", http.StatusBadRequest)
 		return
 	}
 	if !safeComponent(req.Agent) || !safeComponent(req.Project) || !safeComponent(req.SessionID) {
+		log.Printf("reject 400 from=%s reason=invalid-identifier", r.RemoteAddr)
 		http.Error(w, "invalid identifier", http.StatusBadRequest)
 		return
 	}
 	if req.ToOffset < req.FromOffset {
+		log.Printf("reject 400 from=%s reason=bad-offsets", r.RemoteAddr)
 		http.Error(w, "to_offset must be >= from_offset", http.StatusBadRequest)
 		return
 	}
@@ -108,13 +114,13 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 	// Replay: client is sending data we've already accepted.
 	if req.FromOffset < currentNext {
 		if req.ToOffset <= currentNext {
-			// Fully replayed batch — no-op, just confirm.
+			log.Printf("replay from=%s agent=%s project=%s session=%s (no-op, already at %d)",
+				r.RemoteAddr, req.Agent, req.Project, req.SessionID, currentNext)
 			writeJSON(w, wire.IngestResponse{AcceptedToOffset: currentNext})
 			return
 		}
-		// Partial replay (request straddles currentNext). The shipper never
-		// produces this today (we always start at the cursor), so treat it as
-		// a conflict the caller needs to reconcile manually.
+		log.Printf("reject 409 from=%s session=%s reason=partial-replay expected=%d got=%d→%d",
+			r.RemoteAddr, req.SessionID, currentNext, req.FromOffset, req.ToOffset)
 		writeJSONStatus(w, http.StatusConflict, wire.IngestError{
 			Error:        "partial replay not supported",
 			ExpectedFrom: currentNext,
@@ -124,6 +130,8 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	// Gap: client has advanced past the server (server lost state?).
 	if req.FromOffset > currentNext {
+		log.Printf("reject 409 from=%s session=%s reason=gap expected=%d got=%d",
+			r.RemoteAddr, req.SessionID, currentNext, req.FromOffset)
 		writeJSONStatus(w, http.StatusConflict, wire.IngestError{
 			Error:        "gap: server expected lower from_offset",
 			ExpectedFrom: currentNext,
@@ -151,9 +159,12 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := writeOffsetFile(offsetPath, req.ToOffset); err != nil {
+		log.Printf("error from=%s session=%s err=%q (write offset)", r.RemoteAddr, req.SessionID, err)
 		http.Error(w, "write offset: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	log.Printf("ingest from=%s agent=%s project=%s session=%s offset=%d→%d lines=%d",
+		r.RemoteAddr, req.Agent, req.Project, req.SessionID, req.FromOffset, req.ToOffset, len(req.Lines))
 	writeJSON(w, wire.IngestResponse{AcceptedToOffset: req.ToOffset})
 }
 

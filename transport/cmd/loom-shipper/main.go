@@ -15,6 +15,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -85,13 +86,13 @@ func runOnce() {
 	for _, s := range sessions {
 		from, err := cursor.Read(source.Agent, s.SessionID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cursor read %s: %v\n", s.SessionID, err)
+			log.Printf("fail project=%s session=%s err=%q", s.Project, s.SessionID, err)
 			failed++
 			continue
 		}
 		lines, to, err := source.ReadDelta(s.Path, from)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "read delta %s: %v\n", s.SessionID, err)
+			log.Printf("fail project=%s session=%s err=%q", s.Project, s.SessionID, err)
 			failed++
 			continue
 		}
@@ -109,18 +110,21 @@ func runOnce() {
 		}
 		accepted, err := postIngest(cfg, req)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "POST %s: %v\n", s.SessionID, err)
+			log.Printf("fail project=%s session=%s offset=%d→%d lines=%d err=%q",
+				s.Project, s.SessionID, from, to, len(lines), err)
 			failed++
 			continue
 		}
 		if err := cursor.Write(source.Agent, s.SessionID, accepted); err != nil {
-			fmt.Fprintf(os.Stderr, "cursor write %s: %v\n", s.SessionID, err)
+			log.Printf("fail project=%s session=%s err=%q (cursor write)", s.Project, s.SessionID, err)
 			failed++
 			continue
 		}
+		log.Printf("ship project=%s session=%s offset=%d→%d lines=%d",
+			s.Project, s.SessionID, from, accepted, len(lines))
 		shipped++
 	}
-	fmt.Printf("loom-shipper: shipped=%d skipped=%d failed=%d total=%d\n", shipped, skipped, failed, len(sessions))
+	log.Printf("done shipped=%d skipped=%d failed=%d total=%d", shipped, skipped, failed, len(sessions))
 }
 
 func postIngest(cfg *config.Config, req wire.IngestRequest) (int64, error) {
