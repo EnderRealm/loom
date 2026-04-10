@@ -42,9 +42,20 @@ Remaining:
 - [ ] Dedup across sessions — the same truth extracted from 5 different sessions should result in one truth file with 5 source entries, not 5 files. Need a merge/dedup step after batch extraction.
 - [ ] Forward extraction hook — trigger extraction automatically when a new session summary lands in `forge-data/sessions/`. Could be a git hook, a watcher, or a cron job.
 
+## Knowledge wiki — STARTED
+
+Knowledge artifacts (truths, decisions, future runbooks) should form a navigable wiki with cross-references, an index, and an ingestion log. Pattern from Karpathy's LLM wiki: raw sources → LLM-maintained wiki pages → schema/config layer.
+
+- [x] `knowledge/index.md` — generated catalog of all artifacts with one-line summaries, organized by type and scope, with markdown links.
+- [ ] Cross-type linking — truths should link to related decisions and vice versa. Currently `related:` fields only reference siblings within the same type. Need a `## Related` section at the bottom of each file with rendered markdown links across types.
+- [ ] Auto-link discovery — when a new artifact is extracted, scan existing artifacts for overlapping claims/choices and suggest cross-links. Could use the LLM judge or keyword matching.
+- [ ] `knowledge/log.md` — append-only chronological record of extraction events. Format: `## [2026-04-09] session 88f1615b | forge | 5 truths, 3 decisions`. Updated by extract.py on each run.
+- [ ] Regeneration — index and cross-links should be regenerated on every extraction run, not manually maintained. `build-wiki.py` or a post-extraction hook.
+
 ## Knowledge layer growth
 
-- [ ] Runbooks — the overview identifies runbooks as a separate durable asset type. The Path A/B/C analysis pattern from the apr08 session is a clear runbook candidate. No extraction mechanism exists for runbooks yet.
-- [ ] Decisions — another durable asset type from the overview. Decisions with `(human)` tags in session summaries are extractable but need a different prompt/schema.
+- [ ] Runbooks — the overview identifies runbooks as a separate durable asset type. The Path A/B/C analysis pattern from the apr08 session is a clear runbook candidate. No extraction mechanism exists yet. Would follow the same `--extract-type runbook` pattern as truths and decisions.
+- [x] Decisions — extraction pipeline built. 6 training + 10 eval decisions across forge, ticket, tracker. Uses `--extract-type decision`.
+- [ ] Mental models — the most abstract asset type. "Sessions → raw history, Tickets → current intent, Truths → durable memory." No extraction mechanism yet — may be too abstract for automated extraction.
 - [ ] Universal truths — no truth has been promoted to `universal/` yet. The review-gates truth (found in forge apr08, forge mar14, and ticket mar25 independently) is the strongest candidate. Promotion requires rewriting the claim to be project-agnostic.
 - [ ] Truth staleness — `verified_at` dates exist but nothing checks them. A truth verified 6+ months ago should be flagged for re-verification. Could be a simple `find knowledge/truths -name "*.md" | xargs grep verified_at` + date comparison.
