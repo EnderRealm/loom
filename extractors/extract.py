@@ -463,6 +463,7 @@ def main():
                          "Adds one LLM call but improves extraction quality on raw transcripts.")
     p.add_argument("--summarize-model", default="", help="model for summarization step (defaults to same as --model)")
     p.add_argument("--summarize-provider", default="", help="provider for summarization step (defaults to same as --provider)")
+    p.add_argument("--summarize-reasoning", default="", help="reasoning effort for summarization step (defaults to same as --reasoning)")
     p.add_argument("--benchmark", action="store_true",
                     help="score against eval set (truths-eval/) instead of training set (truths/). "
                          "Training refs are still shown as few-shot examples — eval refs are never shown.")
@@ -539,11 +540,12 @@ def main():
             sys.exit(f"summarizer prompt not found: {SUMMARIZER_PATH}")
         sum_provider = args.summarize_provider or args.provider
         sum_model = args.summarize_model or args.model
+        sum_reasoning = args.summarize_reasoning or args.reasoning
         sum_template = SUMMARIZER_PATH.read_text()
         sum_prompt = sum_template.replace("{INPUT}", input_text)
-        print(f"[extract] summarizing with {sum_provider}:{sum_model}...", file=sys.stderr)
+        print(f"[extract] summarizing with {sum_provider}:{sum_model} (reasoning={sum_reasoning})...", file=sys.stderr)
         sum_start = time.time()
-        summary_text = call_llm(sum_prompt, sum_provider, sum_model, args.reasoning)
+        summary_text = call_llm(sum_prompt, sum_provider, sum_model, sum_reasoning)
         sum_secs = time.time() - sum_start
         print(f"[extract] summary: {len(summary_text):,} chars in {sum_secs:.1f}s", file=sys.stderr)
 
