@@ -16,13 +16,19 @@ Promotion from candidate to validated truth is fully manual.
 - [ ] Consensus detection script — scan matrix results for extras that appear across 2+ model configs. Currently done ad-hoc in the aggregator extras view; should be a first-class output with the full candidate text (claim + verify) ready for review.
 - [ ] `_candidates/` directory per scope for truths that pass extraction but haven't been human-reviewed. Currently candidates only exist in JSON result files.
 
-## Pre-extraction summarization pass
+## Pre-extraction summarization pass — DONE
 
-Truth extraction from forge's session summaries outperforms extraction from loom's raw preprocessed transcripts, despite the raw path having strictly more information. The summary acts as a free compression pass: implicit claims become explicit, signal is pre-organized into labeled sections (Discoveries, Decisions, Problems), and the truth extractor works on 500-1000 words instead of 10k-50k. Two focused LLM passes (summarize → extract) beat one broad pass (understand conversation + extract truths simultaneously).
+Two-stage pipeline (summarize → extract) is built and validated. `summarizer.md` compresses ~178K preprocessed transcripts into ~11-18K structured summaries with explicit Discoveries, Problems, Corrections, and Decisions sections. Key findings:
 
-- [ ] Design a lightweight summarization prompt for loom — not forge's full 8-section template, just enough to compress a preprocessed transcript into explicit claims. Focus on: what was discovered, what was decided, what went wrong and why. Skip the archival metadata (ticket IDs, outcome rating, metrics) — loom's transport already captures those quantitatively.
-- [ ] Wire it into the extraction pipeline: `preprocess.py` → summarize (one LLM call) → `extract.py` on the summary. Compare against direct raw extraction on the same sessions to validate the hypothesis holds for loom's preprocessor output specifically, not just forge's cruder transcript.
-- [ ] Evaluate whether the PreCompact hook approach (free inline summary during compaction) is worth adopting in loom. Cost is zero extra tokens, but it couples loom to Claude Code's hook system and only fires on sessions that compact.
+- Two-stage matches or beats single-pass on every metric (5/5 vs 3/5 applicable hits on apr08)
+- Summarizer model matters less than expected: haiku/sonnet/opus all tie at 5/7 on familiar sessions
+- On unfamiliar sessions, sonnet (0.72) and gpt-5.4 xhigh (0.75) lead; haiku is unreliable (produces chat responses instead of summaries)
+- Recommended config: sonnet summarize → gpt5-low extract
+- `--summarize`, `--summarize-provider`, `--summarize-model`, `--summarize-reasoning` flags all implemented
+
+Remaining:
+- [ ] Evaluate the PreCompact hook approach (free inline summary during compaction). Forge's pipeline uses this but only fires on sessions that compact — non-compacting sessions get no summary. Our post-hoc approach covers all sessions. Worth adopting as a bonus signal, not as the primary path.
+- [ ] Test whether forge's catch-up prompt (8-section template with friction tags) produces better summaries than our corrections/evidence-focused prompt when both run post-hoc. Current hypothesis: our Corrections section is the key differentiator (catches T4-style errors forge misses).
 
 ## Extractor improvements
 
