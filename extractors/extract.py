@@ -19,17 +19,29 @@ from datetime import date
 from pathlib import Path
 
 LOOM_ROOT = Path(__file__).resolve().parent.parent
-PROMPT_PATH = LOOM_ROOT / "extractors" / "truth-extractor.md"
 SUMMARIZER_PATH = LOOM_ROOT / "extractors" / "summarizer.md"
-KNOWLEDGE_ROOT = LOOM_ROOT / "knowledge" / "truths"
-EVAL_ROOT = LOOM_ROOT / "knowledge" / "truths-eval"
 # Import the pre-processor (sibling module)
 sys.path.insert(0, str(LOOM_ROOT / "extractors"))
 from preprocess import preprocess as preprocess_jsonl
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
-SENTINEL = "===END-OF-TRUTH==="
 EXAMPLE_DELIMITER = "\n\n===REFERENCE-EXAMPLE===\n\n"
+
+# Per-type configuration: prompt, directories, sentinel
+TYPE_CONFIG = {
+    "truth": {
+        "prompt": LOOM_ROOT / "extractors" / "truth-extractor.md",
+        "training": LOOM_ROOT / "knowledge" / "truths",
+        "eval": LOOM_ROOT / "knowledge" / "truths-eval",
+        "sentinel": "===END-OF-TRUTH===",
+    },
+    "decision": {
+        "prompt": LOOM_ROOT / "extractors" / "decision-extractor.md",
+        "training": LOOM_ROOT / "knowledge" / "decisions",
+        "eval": LOOM_ROOT / "knowledge" / "decisions-eval",
+        "sentinel": "===END-OF-DECISION===",
+    },
+}
 
 STOPWORDS = set("a an and are as at be but by for from has have if in is it of on or that the this to was were will with not no which when where who why how into over under across between".split())
 
@@ -105,6 +117,13 @@ def parse_truth(text: str, source: str = "") -> dict:
 
     has_verify = bool(sections.get("how_to_verify"))
     has_claim = bool(sections.get("claim"))
+    has_choice = bool(sections.get("choice"))
+    has_rationale = bool(sections.get("rationale"))
+
+    # Valid if it has id + either truth sections (claim+verify) or decision sections (choice+rationale)
+    is_truth = has_claim and has_verify
+    is_decision = has_choice and has_rationale
+    has_content = is_truth or is_decision
 
     # Validation: hard requirements vs warnings
     warnings = []
@@ -125,15 +144,19 @@ def parse_truth(text: str, source: str = "") -> dict:
 
     return {
         "source": source,
-        "valid": has_verify and has_claim and bool(frontmatter.get("id")),
+        "valid": has_content and bool(frontmatter.get("id")),
         "id": frontmatter.get("id", ""),
         "title": frontmatter.get("title", ""),
         "scope": frontmatter.get("scope", ""),
         "type": frontmatter.get("type", ""),
         "status": frontmatter.get("status", ""),
-        "claim": sections.get("claim", ""),
+        "claim": sections.get("claim", "") or sections.get("choice", ""),
         "verify": sections.get("how_to_verify", ""),
         "why": sections.get("why_it_matters", ""),
+        "choice": sections.get("choice", ""),
+        "alternatives": sections.get("alternatives", ""),
+        "rationale": sections.get("rationale", ""),
+        "principle": sections.get("principle", ""),
         "evidence_paths": evidence_paths,
         "evidence_commits": evidence_commits,
         "evidence_count": evidence_count,
@@ -240,15 +263,16 @@ def call_llm(prompt: str, provider: str, model: str, reasoning: str = "medium") 
     return call_claude(prompt, model)
 
 
-def parse_output(text: str) -> list[dict]:
+def parse_output(text: str, sentinel: str = "===END-OF-TRUTH===") -> list[dict]:
     text = text.strip()
-    if text == "NO_TRUTHS":
+    if text in ("NO_TRUTHS", "NO_DECISIONS"):
         return []
     # Tolerate model preambles, trailing commentary, or markdown code fences
     # around the output. Extract each `---\n...\n---\n<body>` block individually
     # via regex, regardless of the sentinel.
+    escaped_sentinel = re.escape(sentinel)
     truth_pattern = re.compile(
-        r"(?:^|\n)---\n(.*?)\n---\n(.*?)(?=\n---\n|\n===END-OF-TRUTH===|\Z)",
+        rf"(?:^|\n)---\n(.*?)\n---\n(.*?)(?=\n---\n|\n{escaped_sentinel}|\Z)",
         re.DOTALL,
     )
     results = []
@@ -256,7 +280,7 @@ def parse_output(text: str) -> list[dict]:
         fm_text = fm_match.group(1)
         body = fm_match.group(2)
         # Strip trailing sentinel if present
-        body = re.sub(r"\n?===END-OF-TRUTH===\s*$", "", body)
+        body = re.sub(rf"\n?{escaped_sentinel}\s*$", "", body)
         chunk = f"---\n{fm_text}\n---\n{body}"
         results.append(parse_truth(chunk))
     return results
@@ -441,6 +465,8 @@ def main():
         description=__doc__.splitlines()[0],
         epilog="Presets: --preset fast (gpt-5 low, default) | --preset deep (sonnet)",
     )
+    p.add_argument("--extract-type", default="truth", choices=list(TYPE_CONFIG),
+                    help="what to extract: truth or decision (default: truth)")
     p.add_argument("--input", required=True, help="path to session artifact (markdown or jsonl)")
     p.add_argument("--input-format", default="auto", choices=["auto", "summary", "raw"],
                     help="input format: summary (markdown), raw (jsonl), or auto (detect from extension)")
@@ -479,22 +505,29 @@ def main():
     if not input_path.exists():
         sys.exit(f"input not found: {input_path}")
 
-    if not PROMPT_PATH.exists():
-        sys.exit(f"prompt not found: {PROMPT_PATH}")
+    # Resolve type-specific config (prompt, directories, sentinel)
+    tcfg = TYPE_CONFIG[args.extract_type]
+    prompt_path = tcfg["prompt"]
+    knowledge_root = tcfg["training"]
+    eval_root = tcfg["eval"]
+    sentinel = tcfg["sentinel"]
 
-    template = PROMPT_PATH.read_text()
+    if not prompt_path.exists():
+        sys.exit(f"prompt not found: {prompt_path}")
+
+    template = prompt_path.read_text()
 
     # Training refs: always loaded, injected as few-shot examples in the prompt.
-    training_refs = load_reference_truths(args.scope)
+    training_refs = load_reference_truths_from(knowledge_root / args.scope)
     if not training_refs:
-        print(f"warning: no training truths in {KNOWLEDGE_ROOT/args.scope}", file=sys.stderr)
+        print(f"warning: no training {args.extract_type}s in {knowledge_root/args.scope}", file=sys.stderr)
 
     # Scoring refs: what we score candidates against.
     # --benchmark: score against eval set (never shown to model), filtered to
     # truths sourced from the same session as the input artifact.
     # default: score against training set (same as examples — legacy mode).
     if args.benchmark:
-        eval_dir = EVAL_ROOT / args.scope
+        eval_dir = eval_root / args.scope
         all_eval_refs = load_reference_truths_from(eval_dir)
         if not all_eval_refs:
             sys.exit(f"no eval truths in {eval_dir} — cannot benchmark without eval set")
@@ -572,6 +605,7 @@ def main():
         print(prompt)
         return
 
+    print(f"[extract] type: {args.extract_type}", file=sys.stderr)
     print(f"[extract] input: {input_path} ({input_format})", file=sys.stderr)
     print(f"[extract] scope: {args.scope}", file=sys.stderr)
     print(f"[extract] provider: {args.provider}", file=sys.stderr)
@@ -601,7 +635,7 @@ def main():
         print(output, file=sys.stderr)
         print("---END RAW OUTPUT---\n", file=sys.stderr)
 
-    candidates = parse_output(output)
+    candidates = parse_output(output, sentinel)
     valid = [c for c in candidates if c.get("valid")]
     invalid = [c for c in candidates if not c.get("valid")]
     print(f"[extract] parsed {len(valid)} valid / {len(invalid)} invalid candidate(s)")
