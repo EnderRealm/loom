@@ -30,7 +30,16 @@ go.work.sum
 # Extractor test results (generated data, not source)
 extractors/results/
 extractors/results-raw/
+extractors/results-summarizer/
+extractors/results-twostage/
 extractors/__pycache__/
+
+# Obsidian vault: per-user / churny state
+knowledge/.obsidian/workspace.json
+knowledge/.obsidian/workspace-mobile.json
+knowledge/.obsidian/cache
+knowledge/.obsidian/plugins/*/data.json
+knowledge/.trash/
 
 # Raw session transcripts (contain local paths, session URLs, internal data)
 extractors/eval-data/*.jsonl
