@@ -741,14 +741,7 @@ func printHealth() {
 		fmt.Println("  pending sessions:     0")
 	} else {
 		fmt.Printf("  pending sessions:     %d\n", pending)
-		keys := make([]string, 0, pending)
-		for k := range state.PendingSessions {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Printf("    %s\n", k)
-		}
+		printPendingByProject(state.PendingSessions)
 	}
 
 	if state.LastNotifiedTS.IsZero() {
@@ -764,6 +757,67 @@ func printHealth() {
 		fmt.Println("  failure active:       yes (next healthy tick will notify recovered)")
 	} else {
 		fmt.Println("  failure active:       no")
+	}
+}
+
+// printPendingByProject prints a "<agent> / <project>: <n>" row per distinct
+// (agent, project) pair, sorted and right-aligned on the count. PendingSessions
+// only carries agent+session_id; we recover project by scanning staging. A
+// session whose staging file is gone (e.g. manually cleaned) shows up under
+// "(unknown project)" so the total still adds up.
+func printPendingByProject(pending map[string]bool) {
+	type bucket struct {
+		agent, project string
+	}
+	counts := map[bucket]int{}
+
+	agents := map[string]bool{}
+	for k := range pending {
+		if i := strings.IndexByte(k, '/'); i > 0 {
+			agents[k[:i]] = true
+		}
+	}
+
+	// agent+session_id → project, built once per agent so we do at most one
+	// staging.List() call per agent regardless of pending count.
+	projectOf := map[string]string{}
+	for agent := range agents {
+		entries, err := staging.List(agent)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			projectOf[notify.SessionKey(e.Agent, e.SessionID)] = e.Project
+		}
+	}
+
+	for k := range pending {
+		i := strings.IndexByte(k, '/')
+		if i <= 0 {
+			counts[bucket{"(unknown)", "(unknown)"}]++
+			continue
+		}
+		agent := k[:i]
+		project := projectOf[k]
+		if project == "" {
+			project = "(unknown project)"
+		}
+		counts[bucket{agent, project}]++
+	}
+
+	keys := make([]bucket, 0, len(counts))
+	for b := range counts {
+		keys = append(keys, b)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].agent != keys[j].agent {
+			return keys[i].agent < keys[j].agent
+		}
+		return keys[i].project < keys[j].project
+	})
+
+	for _, b := range keys {
+		fmt.Printf("    %s / %s: %d\n", b.agent, b.project, counts[b])
 	}
 }
 
