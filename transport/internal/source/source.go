@@ -29,10 +29,11 @@ type Adapter interface {
 }
 
 // Adapters returns the set of enabled source adapters, in stable order.
-// v1 hardcodes Claude Code; per-adapter config gates arrive with the second
-// adapter.
+// Each adapter's List() is tolerant of its agent not being installed (missing
+// source dir → empty slice), so the set is static. Per-adapter opt-out is a
+// later concern.
 func Adapters() []Adapter {
-	return []Adapter{claudeAdapter{}}
+	return []Adapter{claudeAdapter{}, codexAdapter{}}
 }
 
 // ReadDeltaBytes returns the raw complete-line byte range [from, toOffset) of
