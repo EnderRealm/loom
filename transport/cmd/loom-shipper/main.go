@@ -1,5 +1,10 @@
-// loom-shipper walks agent session files, ships new bytes to the loom-receiver,
-// and persists per-session cursors so subsequent runs are incremental.
+// loom-shipper walks agent session files, stages their new bytes locally, and
+// ships staged deltas to the loom-receiver. Two-stage flow:
+//
+//  1. Capture: append new source bytes into ~/.loom/transport/staging so we
+//     survive the agent cleaning up its own session files.
+//  2. Ship: health-check the receiver, then post each staged session's delta
+//     with retry+backoff and classified error logging.
 //
 // Commands:
 //
@@ -17,17 +22,22 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"loom/internal/config"
 	"loom/transport/internal/cursor"
+	"loom/transport/internal/notify"
 	"loom/transport/internal/source"
+	"loom/transport/internal/staging"
 	"loom/transport/internal/wire"
 )
 
@@ -45,6 +55,8 @@ func main() {
 		uninstallAgent()
 	case "status":
 		statusAgent()
+	case "health":
+		printHealth()
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -60,12 +72,107 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "  loom-shipper once              ship any new session bytes and exit\n")
 	fmt.Fprintf(os.Stderr, "  loom-shipper install-agent     install launchd user agent using interval_minutes from config\n")
 	fmt.Fprintf(os.Stderr, "  loom-shipper uninstall-agent   remove the launchd user agent\n")
-	fmt.Fprintf(os.Stderr, "  loom-shipper status            show launchctl state for the agent\n\n")
+	fmt.Fprintf(os.Stderr, "  loom-shipper status            show launchctl state for the agent\n")
+	fmt.Fprintf(os.Stderr, "  loom-shipper health            show last-sync/pending-session state (from notify.state)\n\n")
 	fmt.Fprintf(os.Stderr, "config: %s\n", config.Path())
 	fmt.Fprintf(os.Stderr, "state:  %s\n", config.TransportDir())
 }
 
+// ---------- error classification ----------
+
+type errClass string
+
+const (
+	classNone   errClass = ""
+	classNet    errClass = "net"    // dial/timeout/EOF — retryable
+	class5xx    errClass = "5xx"    // server error — retryable
+	class4xx    errClass = "4xx"    // client error — NOT retryable
+	classResync errClass = "resync" // 409 — handled by cursor correction
+	classIO     errClass = "io"     // local file/cursor error
+)
+
+// httpError carries an HTTP status plus body snippet so classify() can bucket it.
+type httpError struct {
+	status int
+	body   string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("status %d: %s", e.status, e.body)
+}
+
+func classify(err error) errClass {
+	if err == nil {
+		return classNone
+	}
+	var re *wire.ResyncError
+	if errors.As(err, &re) {
+		return classResync
+	}
+	var he *httpError
+	if errors.As(err, &he) {
+		switch {
+		case he.status >= 500:
+			return class5xx
+		case he.status >= 400:
+			return class4xx
+		}
+	}
+	// net errors: timeouts, connection refused, DNS, EOF mid-response.
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return classNet
+	}
+	if isNetError(err) {
+		return classNet
+	}
+	return classIO
+}
+
+func isNetError(err error) bool {
+	msg := err.Error()
+	for _, s := range []string{"connection refused", "no such host", "EOF", "broken pipe", "i/o timeout", "connect: "} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------- once ----------
+
+type tickCounts struct {
+	captured      int // sessions with captured bytes this tick
+	captureFailed int
+	shipped       int
+	skipped       int
+	failed        int
+	byClass       map[errClass]int
+}
+
+func (t *tickCounts) addFail(c errClass) {
+	t.failed++
+	if t.byClass == nil {
+		t.byClass = map[errClass]int{}
+	}
+	t.byClass[c]++
+}
+
+func (t tickCounts) classBreakdown() string {
+	if len(t.byClass) == 0 {
+		return ""
+	}
+	parts := []string{}
+	for _, c := range []errClass{classNet, class5xx, class4xx, classIO} {
+		if n := t.byClass[c]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", c, n))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
 
 func runOnce() {
 	if err := acquireLock(); err != nil {
@@ -78,65 +185,248 @@ func runOnce() {
 		die(err)
 	}
 
-	sessions, err := source.ListClaudeSessions()
-	if err != nil {
-		die(err)
+	if err := cursor.Migrate(); err != nil {
+		log.Printf("fail stage=migrate err=%q", err)
 	}
 
-	shipped, skipped, failed := 0, 0, 0
-	for _, s := range sessions {
-		from, err := cursor.Read(source.Agent, s.SessionID)
+	state, err := notify.LoadState()
+	if err != nil {
+		log.Printf("fail stage=notify-load err=%q", err)
+		state = &notify.State{PendingSessions: map[string]bool{}}
+	}
+
+	counts := tickCounts{}
+	now := time.Now().UTC()
+
+	// Capture always runs — local only, independent of receiver state.
+	capturePass(&counts)
+
+	// Health-check before touching the receiver. On failure, skip ship pass
+	// but still refresh pending set from staging so the notification is accurate.
+	healthErr := healthCheck(cfg)
+	var shipSummary string
+	if healthErr != nil {
+		hClass := classify(healthErr)
+		log.Printf("fail stage=healthcheck class=%s err=%q", hClass, healthErr)
+		refreshPending(state)
+		maybeNotify(cfg, state, notify.Event{
+			Kind:    notify.KindReceiverDown,
+			Title:   "loom-shipper: receiver unavailable",
+			Summary: fmt.Sprintf("Receiver unreachable (%s)", hClass),
+			Now:     now,
+		})
+		shipSummary = "ship-skipped"
+	} else {
+		shipPass(cfg, &counts)
+		refreshPending(state)
+		shipSummary = fmt.Sprintf("shipped=%d skipped=%d failed=%d%s",
+			counts.shipped, counts.skipped, counts.failed, counts.classBreakdown())
+
+		// Any session failures? One notification covering them all.
+		if counts.failed > 0 {
+			maybeNotify(cfg, state, notify.Event{
+				Kind:    notify.KindShipFailed,
+				Title:   "loom-shipper: ship failures",
+				Summary: fmt.Sprintf("%d session%s failed to ship (%s)", counts.failed, pluralS(counts.failed), classSummary(counts.byClass)),
+				Now:     now,
+			})
+		} else if counts.captureFailed == 0 {
+			// Healthy tick: record success and fire recovery if appropriate.
+			state.LastSuccessTS = now
+			maybeNotify(cfg, state, notify.Event{
+				Kind:    notify.KindRecovered,
+				Title:   "loom-shipper: recovered",
+				Summary: "Shipping is healthy again",
+				Now:     now,
+			})
+		}
+	}
+
+	// Local/capture errors are independent of the receiver — notify once if any.
+	if counts.captureFailed > 0 {
+		maybeNotify(cfg, state, notify.Event{
+			Kind:    notify.KindLocalError,
+			Title:   "loom-shipper: local error",
+			Summary: fmt.Sprintf("%d session%s failed to capture", counts.captureFailed, pluralS(counts.captureFailed)),
+			Now:     now,
+		})
+	}
+
+	if err := state.Save(); err != nil {
+		log.Printf("fail stage=notify-save err=%q", err)
+	}
+
+	log.Printf("done captured=%d capture-failed=%d %s pending=%d",
+		counts.captured, counts.captureFailed, shipSummary, len(state.PendingSessions))
+}
+
+// ---------- capture pass ----------
+
+// capturePass walks every registered adapter and appends new source bytes into
+// staging. Each agent's source cursor advances only after a successful append
+// so a crash mid-tick replays, not loses.
+func capturePass(counts *tickCounts) {
+	for _, ad := range source.Adapters() {
+		agent := ad.Agent()
+		sessions, err := ad.List()
 		if err != nil {
-			log.Printf("fail project=%s session=%s err=%q", s.Project, s.SessionID, err)
-			failed++
+			log.Printf("fail stage=capture agent=%s class=io err=%q", agent, err)
+			counts.captureFailed++
 			continue
 		}
-		lines, to, err := source.ReadDelta(s.Path, from)
-		if err != nil {
-			log.Printf("fail project=%s session=%s err=%q", s.Project, s.SessionID, err)
-			failed++
-			continue
-		}
-		if len(lines) == 0 {
-			skipped++
-			continue
-		}
-		req := wire.IngestRequest{
-			Agent:      source.Agent,
-			Project:    s.Project,
-			SessionID:  s.SessionID,
-			FromOffset: from,
-			ToOffset:   to,
-			Lines:      lines,
-		}
-		accepted, err := postIngest(cfg, req)
-		if err != nil {
-			var resyncErr *wire.ResyncError
-			if errors.As(err, &resyncErr) {
-				log.Printf("resync project=%s session=%s cursor=%d→%d (server expects %d: %s)",
-					s.Project, s.SessionID, from, resyncErr.ExpectedFrom, resyncErr.ExpectedFrom, resyncErr.Detail)
-				if wErr := cursor.Write(source.Agent, s.SessionID, resyncErr.ExpectedFrom); wErr != nil {
-					log.Printf("fail project=%s session=%s err=%q (cursor resync write)", s.Project, s.SessionID, wErr)
-					failed++
-				}
-				// Don't count as failed — cursor is corrected, next tick will succeed.
+		for _, s := range sessions {
+			from, err := cursor.Read(cursor.KindSource, agent, s.SessionID)
+			if err != nil {
+				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q",
+					agent, s.Project, s.SessionID, err)
+				counts.captureFailed++
 				continue
 			}
-			log.Printf("fail project=%s session=%s offset=%d→%d lines=%d err=%q",
-				s.Project, s.SessionID, from, to, len(lines), err)
-			failed++
-			continue
+			data, to, err := source.ReadDeltaBytes(s.Path, from)
+			if err != nil {
+				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q",
+					agent, s.Project, s.SessionID, err)
+				counts.captureFailed++
+				continue
+			}
+			if len(data) == 0 {
+				continue
+			}
+			if err := staging.Append(agent, s.Project, s.SessionID, data); err != nil {
+				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q (append)",
+					agent, s.Project, s.SessionID, err)
+				counts.captureFailed++
+				continue
+			}
+			if err := cursor.Write(cursor.KindSource, agent, s.SessionID, to); err != nil {
+				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q (cursor)",
+					agent, s.Project, s.SessionID, err)
+				counts.captureFailed++
+				continue
+			}
+			log.Printf("capture agent=%s project=%s session=%s bytes=%d offset=%d→%d",
+				agent, s.Project, s.SessionID, len(data), from, to)
+			counts.captured++
 		}
-		if err := cursor.Write(source.Agent, s.SessionID, accepted); err != nil {
-			log.Printf("fail project=%s session=%s err=%q (cursor write)", s.Project, s.SessionID, err)
-			failed++
-			continue
-		}
-		log.Printf("ship project=%s session=%s offset=%d→%d lines=%d",
-			s.Project, s.SessionID, from, accepted, len(lines))
-		shipped++
 	}
-	log.Printf("done shipped=%d skipped=%d failed=%d total=%d", shipped, skipped, failed, len(sessions))
+}
+
+// ---------- ship pass ----------
+
+// shipPass drains every staged session (across all agents on disk, not just the
+// registered ones — so a disabled adapter's leftovers still flush). Retries
+// each session up to 3 times with jittered backoff on retryable errors.
+func shipPass(cfg *config.Config, counts *tickCounts) {
+	agents, err := staging.AgentDirs()
+	if err != nil {
+		log.Printf("fail stage=ship class=io err=%q", err)
+		counts.addFail(classIO)
+		return
+	}
+	for _, agent := range agents {
+		entries, err := staging.List(agent)
+		if err != nil {
+			log.Printf("fail stage=ship agent=%s class=io err=%q", agent, err)
+			counts.addFail(classIO)
+			continue
+		}
+		for _, e := range entries {
+			shipOne(cfg, e, counts)
+		}
+	}
+}
+
+func shipOne(cfg *config.Config, e staging.Entry, counts *tickCounts) {
+	from, err := cursor.Read(cursor.KindShip, e.Agent, e.SessionID)
+	if err != nil {
+		log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (cursor read)",
+			e.Agent, e.Project, e.SessionID, err)
+		counts.addFail(classIO)
+		return
+	}
+	lines, to, err := source.ReadDelta(e.Path, from)
+	if err != nil {
+		log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (read staging)",
+			e.Agent, e.Project, e.SessionID, err)
+		counts.addFail(classIO)
+		return
+	}
+	if len(lines) == 0 {
+		counts.skipped++
+		return
+	}
+	req := wire.IngestRequest{
+		Agent:      e.Agent,
+		Project:    e.Project,
+		SessionID:  e.SessionID,
+		FromOffset: from,
+		ToOffset:   to,
+		Lines:      lines,
+	}
+	accepted, err := postIngestWithRetry(cfg, req, e)
+	if err != nil {
+		class := classify(err)
+		// 409 resync: correct cursor and move on, not counted as failure.
+		var resyncErr *wire.ResyncError
+		if errors.As(err, &resyncErr) {
+			log.Printf("resync agent=%s project=%s session=%s cursor=%d→%d (server expects %d: %s)",
+				e.Agent, e.Project, e.SessionID, from, resyncErr.ExpectedFrom, resyncErr.ExpectedFrom, resyncErr.Detail)
+			if wErr := cursor.Write(cursor.KindShip, e.Agent, e.SessionID, resyncErr.ExpectedFrom); wErr != nil {
+				log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (cursor resync write)",
+					e.Agent, e.Project, e.SessionID, wErr)
+				counts.addFail(classIO)
+			}
+			return
+		}
+		log.Printf("fail stage=ship agent=%s project=%s session=%s class=%s offset=%d→%d lines=%d err=%q",
+			e.Agent, e.Project, e.SessionID, class, from, to, len(lines), err)
+		counts.addFail(class)
+		return
+	}
+	if err := cursor.Write(cursor.KindShip, e.Agent, e.SessionID, accepted); err != nil {
+		log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (cursor write)",
+			e.Agent, e.Project, e.SessionID, err)
+		counts.addFail(classIO)
+		return
+	}
+	log.Printf("ship agent=%s project=%s session=%s offset=%d→%d lines=%d",
+		e.Agent, e.Project, e.SessionID, from, accepted, len(lines))
+	counts.shipped++
+}
+
+// postIngestWithRetry makes up to 3 attempts with jittered backoff on net/5xx
+// errors. 4xx / 409 / io errors return immediately — retrying won't help.
+func postIngestWithRetry(cfg *config.Config, req wire.IngestRequest, e staging.Entry) (int64, error) {
+	backoffs := []time.Duration{0, 500 * time.Millisecond, 2 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt < len(backoffs); attempt++ {
+		if d := jitter(backoffs[attempt]); d > 0 {
+			time.Sleep(d)
+		}
+		accepted, err := postIngest(cfg, req)
+		if err == nil {
+			return accepted, nil
+		}
+		lastErr = err
+		class := classify(err)
+		if class != classNet && class != class5xx {
+			return 0, err
+		}
+		if attempt+1 < len(backoffs) {
+			log.Printf("retry agent=%s project=%s session=%s class=%s attempt=%d/%d err=%q",
+				e.Agent, e.Project, e.SessionID, class, attempt+1, len(backoffs), err)
+		}
+	}
+	return 0, lastErr
+}
+
+// jitter returns d scaled by a random factor in [0.7, 1.3].
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	factor := 0.7 + rand.Float64()*0.6
+	return time.Duration(float64(d) * factor)
 }
 
 func postIngest(cfg *config.Config, req wire.IngestRequest) (int64, error) {
@@ -168,17 +458,120 @@ func postIngest(cfg *config.Config, req wire.IngestRequest) (int64, error) {
 			}
 		}
 		b, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("status 409: %s", strings.TrimSpace(string(b)))
+		return 0, &httpError{status: 409, body: strings.TrimSpace(string(b))}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return 0, &httpError{status: resp.StatusCode, body: strings.TrimSpace(string(b))}
 	}
 	var out wire.IngestResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return 0, fmt.Errorf("decode response: %w", err)
 	}
 	return out.AcceptedToOffset, nil
+}
+
+// ---------- health check ----------
+
+// healthCheck issues a 2s GET /healthz. Any transport error, timeout, or
+// non-2xx response is treated as "receiver down".
+func healthCheck(cfg *config.Config) error {
+	url := strings.TrimRight(cfg.ServerURL, "/") + "/healthz"
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return &httpError{status: resp.StatusCode, body: strings.TrimSpace(string(b))}
+	}
+	return nil
+}
+
+// ---------- notifier helpers ----------
+
+// refreshPending rebuilds state.PendingSessions from on-disk cursors + staging
+// sizes. A session is pending iff ship_cursor < staging file size.
+func refreshPending(state *notify.State) {
+	pending := map[string]bool{}
+	agents, err := staging.AgentDirs()
+	if err != nil {
+		return
+	}
+	for _, agent := range agents {
+		sessions, err := cursor.ListSessions(cursor.KindShip, agent)
+		if err != nil {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, sid := range sessions {
+			seen[sid] = true
+		}
+		// Also include any staging entries that don't yet have a ship cursor.
+		entries, err := staging.List(agent)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			seen[e.SessionID] = true
+		}
+		for sid := range seen {
+			// Find project for this session via staging.List result.
+			var ent *staging.Entry
+			for i := range entries {
+				if entries[i].SessionID == sid {
+					ent = &entries[i]
+					break
+				}
+			}
+			if ent == nil {
+				// Cursor exists but staging gone — treat as not-pending.
+				continue
+			}
+			size, err := staging.Size(agent, ent.Project, sid)
+			if err != nil {
+				continue
+			}
+			shipOff, _ := cursor.Read(cursor.KindShip, agent, sid)
+			if shipOff < size {
+				pending[notify.SessionKey(agent, sid)] = true
+			}
+		}
+	}
+	state.PendingSessions = pending
+}
+
+func maybeNotify(cfg *config.Config, state *notify.State, ev notify.Event) {
+	emitted, err := state.Maybe(cfg, ev)
+	if err != nil {
+		log.Printf("fail stage=notify kind=%s err=%q", ev.Kind, err)
+		return
+	}
+	if emitted {
+		log.Printf("notify kind=%s title=%q", ev.Kind, ev.Title)
+	}
+}
+
+func classSummary(byClass map[errClass]int) string {
+	if len(byClass) == 0 {
+		return "unknown"
+	}
+	parts := []string{}
+	for _, c := range []errClass{classNet, class5xx, class4xx, classIO} {
+		if n := byClass[c]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", c, n))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // ---------- lock ----------
@@ -322,6 +715,56 @@ func statusAgent() {
 		return
 	}
 	fmt.Print(string(out))
+}
+
+// printHealth surfaces the same info carried in failure notifications: when
+// the shipper last succeeded, how many sessions are unsynced, and which kind
+// of failure (if any) is currently outstanding. install.sh --status calls this.
+func printHealth() {
+	state, err := notify.LoadState()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error reading notify state:", err)
+		os.Exit(1)
+	}
+	now := time.Now().UTC()
+
+	if state.LastSuccessTS.IsZero() {
+		fmt.Println("  last successful sync: never")
+	} else {
+		fmt.Printf("  last successful sync: %s (%s ago)\n",
+			state.LastSuccessTS.Local().Format("2006-01-02 15:04:05 MST"),
+			notify.FormatDuration(now.Sub(state.LastSuccessTS)))
+	}
+
+	pending := len(state.PendingSessions)
+	if pending == 0 {
+		fmt.Println("  pending sessions:     0")
+	} else {
+		fmt.Printf("  pending sessions:     %d\n", pending)
+		keys := make([]string, 0, pending)
+		for k := range state.PendingSessions {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("    %s\n", k)
+		}
+	}
+
+	if state.LastNotifiedTS.IsZero() {
+		fmt.Println("  last notification:    none")
+	} else {
+		fmt.Printf("  last notification:    %s at %s (%s ago)\n",
+			state.LastNotifiedKind,
+			state.LastNotifiedTS.Local().Format("2006-01-02 15:04:05 MST"),
+			notify.FormatDuration(now.Sub(state.LastNotifiedTS)))
+	}
+
+	if state.FailureActive {
+		fmt.Println("  failure active:       yes (next healthy tick will notify recovered)")
+	} else {
+		fmt.Println("  failure active:       no")
+	}
 }
 
 // buildPlist generates the LaunchAgent plist XML. Paths are XML-escaped so

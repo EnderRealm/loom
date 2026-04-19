@@ -255,6 +255,14 @@ status() {
     fi
 
     echo
+    echo "=== sync health ==="
+    if [[ -x "$SHIPPER_BIN" ]]; then
+        LOOM_HOME="$LOOM_HOME" "$SHIPPER_BIN" health 2>/dev/null || echo "  (shipper has not run yet — no notify.state)"
+    else
+        echo "  shipper binary not built — run install.sh --install-shipper first"
+    fi
+
+    echo
     echo "=== config ==="
     echo "  LOOM_HOME=$LOOM_HOME"
     echo "  LOOM_BIN_DIR=$LOOM_BIN_DIR"

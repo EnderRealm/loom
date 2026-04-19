@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 )
 
-const DefaultIntervalMinutes = 10
+const (
+	DefaultIntervalMinutes        = 10
+	DefaultNotifyCooldownMinutes  = 60
+)
 
 type Config struct {
 	// ServerURL is the base URL of the loom-receiver (no trailing /v1/ingest).
@@ -22,6 +25,25 @@ type Config struct {
 	// IntervalMinutes is how often install-cron will schedule the shipper to run.
 	// The shipper itself is stateless with respect to this value — cron owns the tick.
 	IntervalMinutes int `json:"interval_minutes"`
+
+	// NotifyOnFailure controls whether the shipper emits macOS notifications on
+	// health-check, ship, or local errors. Pointer so "unset" means default-on;
+	// explicit false disables.
+	NotifyOnFailure *bool `json:"notify_on_failure,omitempty"`
+
+	// NotifyCooldownMinutes is the minimum gap between two notifications of the
+	// same kind. Unset/0 defaults to DefaultNotifyCooldownMinutes; negative
+	// disables the cooldown (notify every tick). To silence all notifications
+	// set NotifyOnFailure: false.
+	NotifyCooldownMinutes int `json:"notify_cooldown_minutes"`
+}
+
+// NotifyEnabled returns whether failure notifications should fire.
+func (c *Config) NotifyEnabled() bool {
+	if c.NotifyOnFailure == nil {
+		return true
+	}
+	return *c.NotifyOnFailure
 }
 
 // Home returns the loom state root: $LOOM_HOME if set, else ~/.loom.
@@ -62,6 +84,9 @@ func Load() (*Config, error) {
 	}
 	if c.IntervalMinutes <= 0 {
 		c.IntervalMinutes = DefaultIntervalMinutes
+	}
+	if c.NotifyCooldownMinutes == 0 {
+		c.NotifyCooldownMinutes = DefaultNotifyCooldownMinutes
 	}
 	if c.ServerURL == "" {
 		return nil, fmt.Errorf("%s: server_url is required", Path())

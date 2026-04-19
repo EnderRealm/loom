@@ -1,24 +1,24 @@
-// Package source enumerates agent session files and reads deltas from them.
-// v1 hardcodes the Claude Code adapter; when a second agent appears we extract
-// an interface. YAGNI until then.
 package source
 
 import (
-	"bytes"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// Agent is the stable identifier we ship in IngestRequest.Agent for Claude sessions.
-const Agent = "claude-code"
+// ClaudeAgent is the Adapter.Agent() value for Claude Code.
+const ClaudeAgent = "claude-code"
 
-// Session is one Claude session file on disk.
-type Session struct {
-	Project   string // sanitized project dir name, e.g. "-Users-smacbeth-code-loom"
-	SessionID string // UUID parsed from the filename
-	Path      string // absolute path to the .jsonl file
+// Agent is the legacy alias for ClaudeAgent. Kept because older callers and
+// cursor files reference it. New code should prefer ClaudeAgent or adapter.Agent().
+const Agent = ClaudeAgent
+
+type claudeAdapter struct{}
+
+func (claudeAdapter) Agent() string { return ClaudeAgent }
+
+func (claudeAdapter) List() ([]Session, error) {
+	return ListClaudeSessions()
 }
 
 // claudeProjectsDir returns ~/.claude/projects.
@@ -31,6 +31,8 @@ func claudeProjectsDir() (string, error) {
 }
 
 // ListClaudeSessions enumerates every .jsonl session file under ~/.claude/projects/*/.
+// Kept as a package-level function so tests (and any direct callers) can invoke
+// it without going through the Adapter slice.
 func ListClaudeSessions() ([]Session, error) {
 	base, err := claudeProjectsDir()
 	if err != nil {
@@ -65,47 +67,4 @@ func ListClaudeSessions() ([]Session, error) {
 		}
 	}
 	return out, nil
-}
-
-// ReadDelta opens path, seeks to from, and returns only COMPLETE lines plus the
-// new safe offset (byte after the last \n). Any partial trailing line is left
-// for the next tick — guarantees we never ship a half-written JSON record.
-func ReadDelta(path string, from int64) (lines []string, toOffset int64, err error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, from, err
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, from, err
-	}
-	size := info.Size()
-	if from >= size {
-		return nil, from, nil
-	}
-	if _, err := f.Seek(from, io.SeekStart); err != nil {
-		return nil, from, err
-	}
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		return nil, from, err
-	}
-
-	lastNL := bytes.LastIndexByte(buf, '\n')
-	if lastNL < 0 {
-		// No complete line available yet.
-		return nil, from, nil
-	}
-	complete := buf[:lastNL+1]
-	raw := bytes.Split(bytes.TrimSuffix(complete, []byte("\n")), []byte("\n"))
-	lines = make([]string, 0, len(raw))
-	for _, l := range raw {
-		if len(l) == 0 {
-			continue
-		}
-		lines = append(lines, string(l))
-	}
-	return lines, from + int64(lastNL+1), nil
 }
