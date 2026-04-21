@@ -175,10 +175,13 @@ EOF
         err "launchctl bootstrap failed for $RECEIVER_LABEL"
     fi
 
+    # RunAtLoad alone can leave the job speculative; kickstart forces first run.
+    launchctl kickstart -p "gui/$(id -u)/$RECEIVER_LABEL" >/dev/null 2>&1 || true
+
     log "receiver installed; verifying health..."
     local addr="http://127.0.0.1:8765/healthz"
     local ok=0
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4 5 6 7 8 9 10; do
         if curl -sS --max-time 1 "$addr" >/dev/null 2>&1; then
             ok=1
             break
@@ -188,7 +191,7 @@ EOF
     if [[ $ok -eq 1 ]]; then
         log "healthz ok at $addr"
     else
-        warn "healthz did not respond at $addr within 5s — check: tail $RECEIVER_LOG"
+        warn "healthz did not respond at $addr within 10s — check: tail $RECEIVER_LOG"
     fi
 }
 
