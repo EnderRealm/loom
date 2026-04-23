@@ -217,6 +217,11 @@ func runOnce() {
 		})
 		shipSummary = "ship-skipped"
 	} else {
+		// Receiver is reachable — record the ping regardless of per-session ship
+		// outcomes. "Last successful sync" tracks connectivity, not whether every
+		// session shipped cleanly.
+		state.LastSuccessTS = now
+
 		shipPass(cfg, &counts)
 		refreshPending(state)
 		shipSummary = fmt.Sprintf("shipped=%d skipped=%d failed=%d%s",
@@ -231,8 +236,7 @@ func runOnce() {
 				Now:     now,
 			})
 		} else if counts.captureFailed == 0 {
-			// Healthy tick: record success and fire recovery if appropriate.
-			state.LastSuccessTS = now
+			// Fully-clean tick: fire recovery if we were previously in a failure.
 			maybeNotify(cfg, state, notify.Event{
 				Kind:    notify.KindRecovered,
 				Title:   "loom-shipper: recovered",
