@@ -940,6 +940,10 @@ func buildPlist(binaryPath string, intervalSeconds int, logPath, loomHome string
     </dict>`, xmlEscape(loomHome))
 	}
 
+	// ProcessType=Background + LowPriorityIO are the two knobs that keep
+	// StartInterval firing reliably on macOS 13+. Without them, the timer
+	// coalescer and Background Task Management layer can stretch a 10-minute
+	// interval into 24h+ on a loaded system.
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -954,6 +958,10 @@ func buildPlist(binaryPath string, intervalSeconds int, logPath, loomHome string
     <key>StartInterval</key>
     <integer>%d</integer>
     <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
     <true/>
     <key>StandardOutPath</key>
     <string>%s</string>
