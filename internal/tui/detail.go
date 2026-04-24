@@ -100,20 +100,53 @@ func (m detailModel) view() string {
 	b.WriteString(StyleSection.Render("TICKETS"))
 	b.WriteString("\n")
 	if p.Tickets == nil {
-		b.WriteString(StyleDim.Render("  no .tickets directory"))
+		b.WriteString(StyleDim.Render("  no tickets found for this project"))
 	} else {
-		b.WriteString(fmt.Sprintf("  %s  %s\n",
-			StyleBold.Render(fmt.Sprintf("%d total", p.Tickets.Total)),
-			StyleDim.Render(p.Tickets.Dir)))
+		t := p.Tickets
+		header := StyleBold.Render(fmt.Sprintf("%d total", t.Total))
+		if t.ProjectName != "" {
+			header = StyleAccent.Render(t.ProjectName) + "  " + header
+		}
+		if t.Dir != "" {
+			header += "  " + StyleDim.Render(shortenPath(t.Dir))
+		}
+		b.WriteString("  " + header + "\n")
+
 		b.WriteString("  ")
-		b.WriteString(renderStatusLine(p.Tickets.Status))
+		b.WriteString(renderStatusLine(t.Status))
 		b.WriteString("\n")
-		if len(p.Tickets.Type) > 0 {
+
+		if len(t.Priority) > 0 {
 			b.WriteString("  ")
-			b.WriteString(renderTypeLine(p.Tickets.Type))
+			b.WriteString(renderPriorityLine(t.Priority))
+			b.WriteString("\n")
+		}
+		if len(t.Type) > 0 {
+			b.WriteString("  ")
+			b.WriteString(renderTypeLine(t.Type))
+			b.WriteString("\n")
+		}
+
+		if len(t.OpenTop) > 0 {
+			b.WriteString("\n  ")
+			b.WriteString(StyleSection.Render("OPEN"))
+			b.WriteString("\n")
+			titleWidth := boxWidth - 18
+			if titleWidth < 20 {
+				titleWidth = 20
+			}
+			for _, tk := range t.OpenTop {
+				b.WriteString("  ")
+				b.WriteString(PriorityBadge(tk.Priority))
+				b.WriteString("  ")
+				b.WriteString(StyleDim.Render(ticketIDSuffix(tk.ID)))
+				b.WriteString("  ")
+				b.WriteString(truncate(tk.Title, titleWidth))
+				b.WriteString("\n")
+			}
 		}
 	}
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	// Sessions section.
 	b.WriteString(StyleSection.Render("SESSIONS"))
@@ -140,6 +173,31 @@ func renderStatusLine(counts map[string]int) string {
 		return StyleDim.Render("no active tickets")
 	}
 	return strings.Join(parts, StyleDim.Render(" · "))
+}
+
+func renderPriorityLine(counts map[int]int) string {
+	var parts []string
+	for p := 0; p <= 4; p++ {
+		if n, ok := counts[p]; ok && n > 0 {
+			parts = append(parts,
+				PriorityBadge(p)+
+					StyleDim.Render(":")+
+					lipgloss.NewStyle().Foreground(colorWhite).Render(fmt.Sprintf("%d", n)))
+		}
+	}
+	if len(parts) == 0 {
+		return StyleDim.Render("no priority data")
+	}
+	return strings.Join(parts, StyleDim.Render(" · "))
+}
+
+// ticketIDSuffix returns the 4-char hex suffix of a ticket ID (e.g. the
+// "1a2b" in "foo-1a2b"), or the full ID for namespaced forms.
+func ticketIDSuffix(id string) string {
+	if i := strings.LastIndex(id, "-"); i >= 0 && i+1 < len(id) {
+		return id[i+1:]
+	}
+	return id
 }
 
 func renderTypeLine(counts map[string]int) string {

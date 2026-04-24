@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,7 +10,7 @@ import (
 
 	"loom/internal/config"
 
-	"gopkg.in/yaml.v3"
+	"github.com/EnderRealm/ticket/pkg/ticket"
 )
 
 // Project aggregates session and ticket state for one captured cwd. Worktrees
@@ -49,12 +48,15 @@ type Session struct {
 	Modified     time.Time
 }
 
-// TicketSummary is the rollup for a project's .tickets directory.
+// TicketSummary is the rollup for one project's central ticket store.
 type TicketSummary struct {
-	Dir    string
-	Total  int
-	Status map[string]int
-	Type   map[string]int
+	ProjectName string
+	Dir         string
+	Total       int
+	Status      map[string]int
+	Type        map[string]int
+	Priority    map[int]int
+	OpenTop     []*ticket.Ticket
 }
 
 // LoadProjects walks the loom state tree and returns one Project per
@@ -275,71 +277,58 @@ func reconstructPath(slug string) string {
 	return ""
 }
 
+// loadTicketSummary resolves the central ticket store for projectPath via
+// ticket.ResolveStoreForRepo and rolls up the list into a summary. Returns
+// nil when the project can't be resolved (no config entry, no git remote,
+// unresolvable path) or when the store is empty.
 func loadTicketSummary(projectPath string) *TicketSummary {
 	if projectPath == "" {
 		return nil
 	}
-	dir := filepath.Join(projectPath, ".tickets")
-	entries, err := os.ReadDir(dir)
+	store, projectName, err := ticket.ResolveStoreForRepo(projectPath)
 	if err != nil {
 		return nil
 	}
+	tickets, err := store.List()
+	if err != nil || len(tickets) == 0 {
+		return nil
+	}
+	fs, _ := store.(*ticket.FileStore)
 	s := &TicketSummary{
-		Dir:    dir,
-		Status: map[string]int{},
-		Type:   map[string]int{},
+		ProjectName: projectName,
+		Status:      map[string]int{},
+		Type:        map[string]int{},
+		Priority:    map[int]int{},
 	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-			continue
-		}
-		fm, ok := readFrontmatter(filepath.Join(dir, e.Name()))
-		if !ok {
-			continue
-		}
+	if fs != nil {
+		s.Dir = fs.Dir
+	}
+	for _, t := range tickets {
 		s.Total++
-		if v, ok := fm["status"].(string); ok {
-			s.Status[v]++
-		}
-		if v, ok := fm["type"].(string); ok {
-			s.Type[v]++
+		s.Status[string(t.Status)]++
+		s.Type[string(t.Type)]++
+		s.Priority[t.Priority]++
+	}
+	// Top-N open/ready tickets, by priority asc then Created asc.
+	// Mirrors the Inbox() ordering used by the ticket TUI.
+	var open []*ticket.Ticket
+	for _, t := range tickets {
+		if t.Status == ticket.StatusOpen || t.Status == ticket.StatusReady {
+			open = append(open, t)
 		}
 	}
-	if s.Total == 0 {
-		return nil
+	sort.Slice(open, func(i, j int) bool {
+		if open[i].Priority != open[j].Priority {
+			return open[i].Priority < open[j].Priority
+		}
+		return open[i].Created.Before(open[j].Created)
+	})
+	const topN = 5
+	if len(open) > topN {
+		open = open[:topN]
 	}
+	s.OpenTop = open
 	return s
-}
-
-// readFrontmatter parses the YAML frontmatter block delimited by "---\n"
-// at the start of the file. Returns (nil, false) if the file has no block.
-func readFrontmatter(path string) (map[string]any, bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, false
-	}
-	defer f.Close()
-	r := bufio.NewReader(f)
-	first, err := r.ReadString('\n')
-	if err != nil || strings.TrimSpace(first) != "---" {
-		return nil, false
-	}
-	var buf strings.Builder
-	for {
-		line, err := r.ReadString('\n')
-		if strings.TrimSpace(line) == "---" {
-			break
-		}
-		buf.WriteString(line)
-		if err != nil {
-			return nil, false
-		}
-	}
-	out := map[string]any{}
-	if err := yaml.Unmarshal([]byte(buf.String()), &out); err != nil {
-		return nil, false
-	}
-	return out, true
 }
 
 func contains(ss []string, v string) bool {

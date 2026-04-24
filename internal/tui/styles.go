@@ -56,6 +56,34 @@ var ticketTypeColors = map[string]lipgloss.Color{
 	"epic":    colorMagenta,
 }
 
+// Priority palette matches ~/code/ticket/internal/tui/styles.go: P0 critical
+// (red), P1 high (yellow), P2 normal (white), P3/P4 low (gray).
+var ticketPriorityColors = map[int]lipgloss.Color{
+	0: colorRed,
+	1: colorYellow,
+	2: colorWhite,
+	3: colorGray,
+	4: colorGray,
+}
+
+// PriorityBadge renders a "P#" pill, matching the ticket TUI's badge style.
+func PriorityBadge(p int) string {
+	c, ok := ticketPriorityColors[p]
+	if !ok {
+		c = colorWhite
+	}
+	label := "P?"
+	if p >= 0 && p <= 4 {
+		label = string(rune('P')) + string(rune('0'+p))
+	}
+	return lipgloss.NewStyle().
+		Foreground(colorBlack).
+		Background(c).
+		Bold(true).
+		Padding(0, 1).
+		Render(label)
+}
+
 var (
 	StyleBold     = lipgloss.NewStyle().Bold(true)
 	StyleDim      = lipgloss.NewStyle().Foreground(colorMuted)
