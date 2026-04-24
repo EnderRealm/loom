@@ -742,10 +742,36 @@ func printHealth() {
 
 	pending := len(state.PendingSessions)
 	if pending == 0 {
-		fmt.Println("  pending sessions:     0")
+		fmt.Println("  unshipped sessions:   0")
 	} else {
-		fmt.Printf("  pending sessions:     %d\n", pending)
+		fmt.Printf("  unshipped sessions:   %d\n", pending)
 		printPendingByProject(state.PendingSessions)
+	}
+
+	// Uncaptured: source files with new bytes the capture pass hasn't seen yet.
+	// Different from "unshipped" (staged but not sent) — this is "on disk but not
+	// in the pipeline at all", which is what the user cares about when asking
+	// "is my current session safe?"
+	uncap := countUncapturedSessions()
+	if len(uncap) == 0 {
+		fmt.Println("  uncaptured sessions:  0")
+	} else {
+		total := 0
+		for _, c := range uncap {
+			total += c.sessions
+		}
+		fmt.Printf("  uncaptured sessions:  %d (%s not yet captured)\n",
+			total, humanBytes(sumBytes(uncap)))
+		sort.Slice(uncap, func(i, j int) bool {
+			if uncap[i].agent != uncap[j].agent {
+				return uncap[i].agent < uncap[j].agent
+			}
+			return uncap[i].project < uncap[j].project
+		})
+		for _, c := range uncap {
+			fmt.Printf("    %s / %s: %d session%s, %s\n",
+				c.agent, c.project, c.sessions, pluralS(c.sessions), humanBytes(c.bytes))
+		}
 	}
 
 	if state.LastNotifiedTS.IsZero() {
@@ -761,6 +787,79 @@ func printHealth() {
 		fmt.Println("  failure active:       yes (next healthy tick will notify recovered)")
 	} else {
 		fmt.Println("  failure active:       no")
+	}
+}
+
+// uncapturedBucket is one row of the uncaptured-by-project breakdown.
+type uncapturedBucket struct {
+	agent    string
+	project  string
+	sessions int
+	bytes    int64
+}
+
+// countUncapturedSessions enumerates every source session across registered
+// adapters and returns one bucket per (agent, project) with uncaptured bytes.
+// A session is "uncaptured" when its source file has more bytes than the
+// source cursor has recorded — i.e. the next tick's capture pass would pick
+// them up if it ran.
+func countUncapturedSessions() []uncapturedBucket {
+	byKey := map[string]*uncapturedBucket{}
+	for _, ad := range source.Adapters() {
+		agent := ad.Agent()
+		sessions, err := ad.List()
+		if err != nil {
+			continue
+		}
+		for _, s := range sessions {
+			size, err := source.Size(s.Path)
+			if err != nil {
+				continue
+			}
+			off, _ := cursor.Read(cursor.KindSource, agent, s.SessionID)
+			if size <= off {
+				continue
+			}
+			k := agent + "\x00" + s.Project
+			b, ok := byKey[k]
+			if !ok {
+				b = &uncapturedBucket{agent: agent, project: s.Project}
+				byKey[k] = b
+			}
+			b.sessions++
+			b.bytes += size - off
+		}
+	}
+	out := make([]uncapturedBucket, 0, len(byKey))
+	for _, b := range byKey {
+		out = append(out, *b)
+	}
+	return out
+}
+
+func sumBytes(bs []uncapturedBucket) int64 {
+	var n int64
+	for _, b := range bs {
+		n += b.bytes
+	}
+	return n
+}
+
+func humanBytes(n int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * 1024
+		gb = 1024 * 1024 * 1024
+	)
+	switch {
+	case n >= gb:
+		return fmt.Sprintf("%.1f GB", float64(n)/float64(gb))
+	case n >= mb:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(mb))
+	case n >= kb:
+		return fmt.Sprintf("%.1f KB", float64(n)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
 }
 
