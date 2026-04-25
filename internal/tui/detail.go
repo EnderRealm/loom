@@ -153,6 +153,14 @@ func (m detailModel) view() string {
 	b.WriteString("\n")
 	b.WriteString(m.renderSessionTable(boxWidth))
 
+	// Patterns section — only when summaries.db has anything for this project.
+	if patterns := m.renderPatterns(boxWidth); patterns != "" {
+		b.WriteString("\n")
+		b.WriteString(StyleSection.Render("PATTERNS"))
+		b.WriteString("\n")
+		b.WriteString(patterns)
+	}
+
 	content := b.String()
 	return StyleOverlayBorder.Width(boxWidth).Render(content)
 }
@@ -233,10 +241,13 @@ func (m detailModel) renderSessionTable(width int) string {
 	b.WriteString("  ")
 	b.WriteString(padRight(StyleColHeader.Render("AGENT"), 14))
 	b.WriteString(padRight(StyleColHeader.Render("SESSION"), 14))
-	b.WriteString(padRight(StyleColHeader.Render("WORKTREE"), 24))
-	b.WriteString(padRight(StyleColHeader.Render("SIZE"), 12))
-	b.WriteString(padRight(StyleColHeader.Render("PENDING"), 12))
-	b.WriteString(padRight(StyleColHeader.Render("FLAGS"), 10))
+	b.WriteString(padRight(StyleColHeader.Render("WORKTREE"), 22))
+	b.WriteString(padRight(StyleColHeader.Render("TURNS"), 7))
+	b.WriteString(padRight(StyleColHeader.Render("TOOLS"), 7))
+	b.WriteString(padRight(StyleColHeader.Render("ERRS"), 6))
+	b.WriteString(padRight(StyleColHeader.Render("SIZE"), 10))
+	b.WriteString(padRight(StyleColHeader.Render("PENDING"), 10))
+	b.WriteString(padRight(StyleColHeader.Render("FLAGS"), 8))
 	b.WriteString(StyleColHeader.Render("SEEN"))
 	b.WriteString("\n")
 
@@ -256,24 +267,43 @@ func (m detailModel) renderSessionTable(width int) string {
 		if wt == "" {
 			wt = StyleDim.Render("—")
 		} else {
-			wt = StyleInfo.Render(truncate(wt, 23))
+			wt = StyleInfo.Render(truncate(wt, 21))
 		}
-		b.WriteString(padRight(wt, 24))
+		b.WriteString(padRight(wt, 22))
+
+		// Per-session summary metrics. Empty cells when summarizer hasn't
+		// processed this session yet.
+		if s.Summary != nil {
+			b.WriteString(padRight(lipgloss.NewStyle().Foreground(colorWhite).Render(
+				fmt.Sprintf("%d", s.Summary.TurnCount)), 7))
+			b.WriteString(padRight(lipgloss.NewStyle().Foreground(colorGray).Render(
+				fmt.Sprintf("%d", s.Summary.ToolCallCount)), 7))
+			if s.Summary.ErrorCount > 0 {
+				b.WriteString(padRight(StyleWarning.Render(
+					fmt.Sprintf("%d", s.Summary.ErrorCount)), 6))
+			} else {
+				b.WriteString(padRight(StyleDim.Render("·"), 6))
+			}
+		} else {
+			b.WriteString(padRight(StyleDim.Render("·"), 7))
+			b.WriteString(padRight(StyleDim.Render("·"), 7))
+			b.WriteString(padRight(StyleDim.Render("·"), 6))
+		}
 
 		size := s.ReceivedSize
 		if s.StageSize > size {
 			size = s.StageSize
 		}
-		b.WriteString(padRight(lipgloss.NewStyle().Foreground(colorGray).Render(humanBytes(size)), 12))
+		b.WriteString(padRight(lipgloss.NewStyle().Foreground(colorGray).Render(humanBytes(size)), 10))
 
 		if s.Pending > 0 {
-			b.WriteString(padRight(StyleWarning.Render(humanBytes(s.Pending)), 12))
+			b.WriteString(padRight(StyleWarning.Render(humanBytes(s.Pending)), 10))
 		} else {
-			b.WriteString(padRight(StyleDim.Render("—"), 12))
+			b.WriteString(padRight(StyleDim.Render("—"), 10))
 		}
 
 		flags := sessionFlags(s)
-		b.WriteString(padRight(flags, 10))
+		b.WriteString(padRight(flags, 8))
 
 		if !s.Modified.IsZero() {
 			b.WriteString(StyleDim.Render(humanDuration(time.Since(s.Modified))))
@@ -284,6 +314,125 @@ func (m detailModel) renderSessionTable(width int) string {
 		b.WriteString(StyleDim.Render(fmt.Sprintf("  … %d more", len(sessions)-max)))
 	}
 	return b.String()
+}
+
+// renderPatterns shows project-level summary insight: top tools by call
+// count and by error rate, plus compaction count. Returns "" when there's
+// no summary data for this project (summarizer hasn't run, or DB missing).
+func (m detailModel) renderPatterns(width int) string {
+	if m.project == nil {
+		return ""
+	}
+	p := m.project
+	if p.TurnCount == 0 && p.ToolCallCount == 0 && len(p.TopTools) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Top-line aggregate row.
+	b.WriteString("  ")
+	b.WriteString(StyleFieldKey.Render("Turns"))
+	b.WriteString("  ")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorWhite).Render(
+		fmt.Sprintf("%d", p.TurnCount)))
+	b.WriteString(StyleDim.Render("  ·  "))
+	b.WriteString(StyleFieldKey.Render("Tool calls"))
+	b.WriteString("  ")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorWhite).Render(
+		fmt.Sprintf("%d", p.ToolCallCount)))
+	b.WriteString(StyleDim.Render("  ·  "))
+	b.WriteString(StyleFieldKey.Render("Errors"))
+	b.WriteString("  ")
+	if p.ErrorCount > 0 {
+		b.WriteString(StyleWarning.Render(fmt.Sprintf("%d", p.ErrorCount)))
+	} else {
+		b.WriteString(StyleDim.Render("0"))
+	}
+	if p.Compactions > 0 {
+		b.WriteString(StyleDim.Render("  ·  "))
+		b.WriteString(StyleFieldKey.Render("Compactions"))
+		b.WriteString("  ")
+		b.WriteString(lipgloss.NewStyle().Foreground(colorWhite).Render(
+			fmt.Sprintf("%d", p.Compactions)))
+	}
+	b.WriteString("\n\n")
+
+	// Top tools by call count (top 6, capped to fit the box).
+	if len(p.TopTools) > 0 {
+		b.WriteString("  ")
+		b.WriteString(StyleColHeader.Render(padRight("TOOL", 14)))
+		b.WriteString(StyleColHeader.Render(padRight("CALLS", 10)))
+		b.WriteString(StyleColHeader.Render(padRight("ERRORS", 14)))
+		b.WriteString(StyleColHeader.Render("AVG"))
+		b.WriteString("\n")
+
+		max := len(p.TopTools)
+		if max > 6 {
+			max = 6
+		}
+		for i := 0; i < max; i++ {
+			ts := p.TopTools[i]
+			b.WriteString("  ")
+			b.WriteString(padRight(
+				lipgloss.NewStyle().Foreground(colorWhite).Render(ts.Kind), 14))
+			b.WriteString(padRight(
+				lipgloss.NewStyle().Foreground(colorGray).Render(
+					fmt.Sprintf("%d", ts.Calls)), 10))
+
+			// Error count + rate, color-graded.
+			errCell := StyleDim.Render("·")
+			if ts.Errors > 0 {
+				rate := float64(ts.Errors) / float64(max1(ts.Calls)) * 100
+				rateStr := fmt.Sprintf("(%.0f%%)", rate)
+				style := StyleWarning
+				if rate >= 10 {
+					style = StyleDanger
+				}
+				errCell = style.Render(
+					fmt.Sprintf("%d ", ts.Errors)) +
+					StyleDim.Render(rateStr)
+			}
+			b.WriteString(padRight(errCell, 14))
+
+			b.WriteString(StyleDim.Render(humanShortDuration(ts.AvgMs)))
+			b.WriteString("\n")
+		}
+		// Shaved-off remainder line so users know when there's more.
+		if len(p.TopTools) > max {
+			b.WriteString(StyleDim.Render(fmt.Sprintf(
+				"  … %d more tool kind(s)\n", len(p.TopTools)-max)))
+		}
+	}
+
+	_ = width
+	return b.String()
+}
+
+// max1 floors at 1 so we never divide by zero when computing error rates.
+func max1(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// humanShortDuration formats a millisecond duration compactly: "8s", "2m",
+// "1h", "0".
+func humanShortDuration(ms int64) string {
+	if ms <= 0 {
+		return "0"
+	}
+	switch {
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	case ms < 60_000:
+		return fmt.Sprintf("%ds", ms/1000)
+	case ms < 3_600_000:
+		return fmt.Sprintf("%dm", ms/60_000)
+	default:
+		return fmt.Sprintf("%dh", ms/3_600_000)
+	}
 }
 
 func sessionFlags(s Session) string {

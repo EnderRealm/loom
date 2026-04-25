@@ -30,6 +30,14 @@ type Project struct {
 	PendingCount int
 	Sessions     []Session
 	Tickets      *TicketSummary
+
+	// Summary metrics rolled up from ~/.loom/summaries.db. Zero when the
+	// summarizer hasn't run yet for this project's sessions.
+	TurnCount     int
+	ToolCallCount int
+	ErrorCount    int
+	Compactions   int
+	TopTools      []ToolStat
 }
 
 // Session is one agent session tied to a project, with both on-disk
@@ -46,6 +54,10 @@ type Session struct {
 	ShipCursor   int64
 	Pending      int64
 	Modified     time.Time
+
+	// Summary metrics from ~/.loom/summaries.db. Zero when the summarizer
+	// hasn't processed this session yet (e.g. brand new or DB missing).
+	Summary *SessionMetrics
 }
 
 // TicketSummary is the rollup for one project's central ticket store.
@@ -204,6 +216,12 @@ func LoadProjects() ([]Project, error) {
 		return nil, err
 	}
 
+	// Pull summary metrics from ~/.loom/summaries.db, if it's been
+	// populated. Errors here are non-fatal — the dashboard renders the
+	// pre-summary fields the same way it always has when summarizer hasn't
+	// run yet.
+	summary, _ := LoadSummaryData()
+
 	out := make([]Project, 0, len(projects))
 	for _, p := range projects {
 		sort.Slice(p.Sessions, func(i, j int) bool {
@@ -213,6 +231,7 @@ func LoadProjects() ([]Project, error) {
 		sort.Strings(p.Worktrees)
 		sort.Strings(p.Slugs)
 		p.Tickets = loadTicketSummary(p.Path)
+		attachSummary(p, summary)
 		out = append(out, *p)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -462,6 +481,53 @@ func loadTicketSummary(projectPath string) *TicketSummary {
 	}
 	s.OpenTop = open
 	return s
+}
+
+// attachSummary joins a project's sessions with rows from summaries.db and
+// rolls per-session metrics into project-level aggregates. No-op when the
+// summary DB isn't available.
+func attachSummary(p *Project, d *SummaryData) {
+	if d == nil || !d.Available {
+		return
+	}
+	// Per-session lookup.
+	for i := range p.Sessions {
+		s := &p.Sessions[i]
+		if m, ok := d.BySession[sessionKey(s.Agent, s.SessionID)]; ok {
+			s.Summary = m
+			p.TurnCount += m.TurnCount
+			p.ToolCallCount += m.ToolCallCount
+			p.ErrorCount += m.ErrorCount
+		}
+	}
+	// Top tools across the project's slugs (root + worktrees) merged into
+	// one ranked list.
+	merged := map[string]*ToolStat{}
+	for _, slug := range p.Slugs {
+		for _, ts := range d.ToolStats[slug] {
+			cur, ok := merged[ts.Kind]
+			if !ok {
+				cp := ts
+				merged[ts.Kind] = &cp
+				continue
+			}
+			// Weighted-average duration by call count, summed counts.
+			totalCalls := cur.Calls + ts.Calls
+			if totalCalls > 0 {
+				cur.AvgMs = (cur.AvgMs*int64(cur.Calls) +
+					ts.AvgMs*int64(ts.Calls)) / int64(totalCalls)
+			}
+			cur.Calls = totalCalls
+			cur.Errors += ts.Errors
+		}
+		p.Compactions += d.CompactionsByProject[slug]
+	}
+	for _, ts := range merged {
+		p.TopTools = append(p.TopTools, *ts)
+	}
+	sort.Slice(p.TopTools, func(i, j int) bool {
+		return p.TopTools[i].Calls > p.TopTools[j].Calls
+	})
 }
 
 func contains(ss []string, v string) bool {

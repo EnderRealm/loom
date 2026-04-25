@@ -125,14 +125,15 @@ func (m dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 
 // Column widths for the dashboard table.
 const (
-	colProject   = 24
-	colWorktrees = 10
-	colAgents    = 22
-	colSessions  = 10
-	colSize      = 12
+	colProject   = 22
+	colWorktrees = 8
+	colAgents    = 16
+	colSessions  = 8
+	colActivity  = 18 // turns·tools·errors
+	colSize      = 10
 	colPending   = 10
 	colTickets   = 14
-	colAge       = 8
+	colAge       = 6
 )
 
 func (m dashboardModel) view() string {
@@ -147,6 +148,7 @@ func (m dashboardModel) view() string {
 	b.WriteString(padRight(StyleColHeader.Render("WORKTREES"), colWorktrees))
 	b.WriteString(padRight(StyleColHeader.Render("AGENTS"), colAgents))
 	b.WriteString(padRight(StyleColHeader.Render("SESSIONS"), colSessions))
+	b.WriteString(padRight(StyleColHeader.Render("ACTIVITY"), colActivity))
 	b.WriteString(padRight(StyleColHeader.Render("SIZE"), colSize))
 	b.WriteString(padRight(StyleColHeader.Render("PENDING"), colPending))
 	b.WriteString(padRight(StyleColHeader.Render("TICKETS"), colTickets))
@@ -196,6 +198,8 @@ func (m dashboardModel) renderRow(p Project, selected bool) string {
 
 	sessCell := padRightBg(selBg.Foreground(colorWhite).Render(fmt.Sprintf("%d", p.SessionCount)), colSessions, bg)
 
+	actCell := padRightBg(renderActivityCell(p, selBg), colActivity, bg)
+
 	sizeCell := padRightBg(selBg.Foreground(colorGray).Render(humanBytes(p.BytesTotal)), colSize, bg)
 
 	var pending string
@@ -228,7 +232,7 @@ func (m dashboardModel) renderRow(p Project, selected bool) string {
 	if selected {
 		sp = selBg.Render("  ")
 	}
-	line := sp + projCell + wtCell + agentCell + sessCell + sizeCell + pendCell + tkCell + age
+	line := sp + projCell + wtCell + agentCell + sessCell + actCell + sizeCell + pendCell + tkCell + age
 	if selected && m.width > 0 {
 		rendered := lipgloss.Width(line)
 		if rendered < m.width {
@@ -236,6 +240,41 @@ func (m dashboardModel) renderRow(p Project, selected bool) string {
 		}
 	}
 	return line
+}
+
+// renderActivityCell formats project-level summary metrics as
+// "turns·tools·errors" with errors highlighted when nonzero. Returns "—"
+// when the project has no summary data yet.
+func renderActivityCell(p Project, bg lipgloss.Style) string {
+	if p.TurnCount == 0 && p.ToolCallCount == 0 && p.ErrorCount == 0 {
+		return bg.Foreground(colorMuted).Render("—")
+	}
+	turns := bg.Foreground(colorWhite).Render(compactInt(p.TurnCount))
+	tools := bg.Foreground(colorGray).Render(compactInt(p.ToolCallCount))
+	dot := bg.Foreground(colorMuted).Render("·")
+	out := turns + dot + tools
+	if p.ErrorCount > 0 {
+		errStyle := bg.Foreground(colorWarning)
+		if rate := float64(p.ErrorCount) / float64(max(1, p.ToolCallCount)); rate >= 0.10 {
+			errStyle = bg.Foreground(colorDanger)
+		}
+		out += dot + errStyle.Render(compactInt(p.ErrorCount))
+	}
+	return out
+}
+
+// compactInt formats large counts with K/M suffixes so they stay narrow.
+func compactInt(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 10_000:
+		return fmt.Sprintf("%dk", n/1000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 func truncate(s string, n int) string {
