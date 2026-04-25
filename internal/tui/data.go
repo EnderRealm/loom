@@ -117,11 +117,11 @@ func LoadProjects() ([]Project, error) {
 	// basename — the wire-protocol-aware fix tracks that.
 	upsert := func(slug string) *Project {
 		root, worktree := splitWorktree(slug)
-		key := projectKeyFor(root, pathByRoot[root], knownBases)
+		key := projectKeyFor(root, pathByRoot[root], rootSlugs, knownBases)
 		p, ok := projects[key]
 		if !ok {
 			p = &Project{Slug: root, Path: pathByRoot[root]}
-			p.Name = projectName(p.Path, root)
+			p.Name = projectName(p.Path, key)
 			projects[key] = p
 			sessionIdx[key] = map[string]int{}
 		} else if p.Path == "" {
@@ -130,7 +130,7 @@ func LoadProjects() ([]Project, error) {
 			// and "open in tk" drill-down can work.
 			if path := pathByRoot[root]; path != "" {
 				p.Path = path
-				p.Name = projectName(path, root)
+				p.Name = projectName(path, key)
 			}
 		}
 		if !contains(p.Slugs, slug) {
@@ -143,7 +143,7 @@ func LoadProjects() ([]Project, error) {
 	}
 
 	addSession := func(p *Project, agent, sid, slug string) *Session {
-		key := projectKeyFor(p.Slug, pathByRoot[p.Slug], knownBases)
+		key := projectKeyFor(p.Slug, pathByRoot[p.Slug], rootSlugs, knownBases)
 		k := agent + "\x00" + sid
 		if i, ok := sessionIdx[key][k]; ok {
 			return &p.Sessions[i]
@@ -227,29 +227,69 @@ func LoadProjects() ([]Project, error) {
 // projectKeyFor returns the canonical grouping key for a root slug.
 // Precedence:
 //  1. If the slug resolved to a real local path, use that path's basename.
-//  2. Else, look for the longest '-'-aligned suffix that matches a known
-//     basename collected from sibling slugs that DID resolve. This handles
-//     "smacbeth/code/forge-data" (slug doesn't resolve) by spotting that
-//     "forge-data" is a known basename from "steve/code/forge-data".
-//  3. Else, fall back to the last '-' segment.
+//  2. Else, longest '-'-aligned suffix matching a basename learned from a
+//     locally-resolved slug (handles "smacbeth/code/forge-data" via
+//     "steve/code/forge-data").
+//  3. Else, longest "parent prefix" P removed from the slug. P qualifies if
+//     either it's itself a known root slug (someone ran an agent there —
+//     handles "smacbeth/code/moo/moo-rs" via the sibling "smacbeth/code/moo"
+//     slug) or P+"-" prefixes ≥2 other slugs (handles "smacbeth/code/X" via
+//     the many other slugs sharing the "smacbeth/code" container).
+//  4. Else, last '-' segment.
 //
 // The wire-protocol-aware fix replaces this with the captured git remote URL.
-func projectKeyFor(rootSlug, resolvedPath string, knownBases map[string]bool) string {
+func projectKeyFor(rootSlug, resolvedPath string, allSlugs, knownBases map[string]bool) string {
 	if resolvedPath != "" {
 		return strings.ToLower(filepath.Base(resolvedPath))
 	}
 	body := strings.TrimPrefix(rootSlug, "-")
 	parts := strings.Split(body, "-")
+
+	// (2) suffix match against known basenames.
 	for baseLen := len(parts); baseLen >= 1; baseLen-- {
 		cand := strings.ToLower(strings.Join(parts[len(parts)-baseLen:], "-"))
 		if knownBases[cand] {
 			return cand
 		}
 	}
+
+	// (3) longest parent-prefix removal.
+	for prefixLen := len(parts) - 1; prefixLen >= 1; prefixLen-- {
+		prefix := "-" + strings.Join(parts[:prefixLen], "-")
+		if isParentPrefix(prefix, rootSlug, allSlugs) {
+			return strings.ToLower(strings.Join(parts[prefixLen:], "-"))
+		}
+	}
+
+	// (4) fallback.
 	if len(parts) > 0 {
 		return strings.ToLower(parts[len(parts)-1])
 	}
 	return rootSlug
+}
+
+// isParentPrefix reports whether `prefix` looks like a path-segment parent of
+// `self`, given the full set of root slugs. Either prefix is itself a known
+// slug, or at least two other slugs start with prefix+"-" (so the prefix is
+// a shared container directory).
+func isParentPrefix(prefix, self string, allSlugs map[string]bool) bool {
+	if allSlugs[prefix] && prefix != self {
+		return true
+	}
+	count := 0
+	pfx := prefix + "-"
+	for s := range allSlugs {
+		if s == self {
+			continue
+		}
+		if strings.HasPrefix(s, pfx) {
+			count++
+			if count >= 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // splitWorktree separates a slug into its root-project slug and the worktree
@@ -265,20 +305,17 @@ func splitWorktree(slug string) (root, worktree string) {
 }
 
 // projectName picks a human label. Prefers the basename of the reconstructed
-// path (title-cased), falls back to the last non-empty slug segment.
-func projectName(path, slug string) string {
+// path (title-cased), falls back to the canonical grouping key.
+func projectName(path, key string) string {
 	if path != "" {
 		if base := filepath.Base(path); base != "" && base != "/" && base != "." {
 			return titleCase(base)
 		}
 	}
-	segs := strings.Split(strings.Trim(slug, "-"), "-")
-	for i := len(segs) - 1; i >= 0; i-- {
-		if segs[i] != "" {
-			return titleCase(segs[i])
-		}
+	if key != "" {
+		return titleCase(key)
 	}
-	return slug
+	return key
 }
 
 // titleCase uppercases the first rune and lowercases the rest. Good enough for
