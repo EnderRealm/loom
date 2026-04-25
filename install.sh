@@ -18,15 +18,20 @@ LOOM_BIN_DIR="${LOOM_BIN_DIR:-$HOME/.local/bin}"
 
 SHIPPER_BIN="$LOOM_BIN_DIR/loom-shipper"
 RECEIVER_BIN="$LOOM_BIN_DIR/loom-receiver"
+SUMMARIZER_BIN="$LOOM_BIN_DIR/loom-summarize"
 
 SHIPPER_LABEL="com.loom.shipper"
 RECEIVER_LABEL="com.loom.receiver"
+SUMMARIZER_LABEL="com.loom.summarizer"
 
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 SHIPPER_PLIST="$LAUNCH_AGENTS_DIR/$SHIPPER_LABEL.plist"
 RECEIVER_PLIST="$LAUNCH_AGENTS_DIR/$RECEIVER_LABEL.plist"
+SUMMARIZER_PLIST="$LAUNCH_AGENTS_DIR/$SUMMARIZER_LABEL.plist"
 
 RECEIVER_LOG="$LOOM_HOME/receiver.log"
+SUMMARIZER_LOG="$LOOM_HOME/summarizer.log"
+SUMMARY_DB="$LOOM_HOME/summaries.db"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -43,17 +48,19 @@ usage() {
 loom install script
 
 usage:
-  install.sh --install-receiver   Build loom-receiver, install launchd agent, verify health
-  install.sh --install-shipper    Build loom-shipper, install launchd agent, verify status
-  install.sh --uninstall          Remove both launchd agents (preserves state + binaries)
-  install.sh --status             Show launchd state for both agents and basic config
-  install.sh --help               Show this message
+  install.sh --install-server      Build + install all server-side agents (receiver + summarizer)
+  install.sh --install-receiver    Build loom-receiver, install launchd agent, verify health
+  install.sh --install-summarizer  Build loom-summarize, install launchd agent in watch mode
+  install.sh --install-shipper     Build loom-shipper, install launchd agent, verify status
+  install.sh --uninstall           Remove all loom launchd agents (preserves state + binaries)
+  install.sh --status              Show launchd state for installed components
+  install.sh --help                Show this message
 
 environment:
   LOOM_HOME=$LOOM_HOME
   LOOM_BIN_DIR=$LOOM_BIN_DIR
 
-before --install-receiver:
+before --install-server / --install-receiver:
   export LOOM_RECEIVER_TOKEN="\$(openssl rand -hex 32)"
 
 before --install-shipper:
@@ -77,6 +84,15 @@ ensure_dirs() {
     mkdir -p "$LAUNCH_AGENTS_DIR"
 }
 
+# ---------- component installed-state probes ----------
+#
+# A component is "installed" when its launchd plist exists. Used to make
+# --status and --uninstall behave conditionally.
+
+shipper_installed()    { [[ -f "$SHIPPER_PLIST" ]]; }
+receiver_installed()   { [[ -f "$RECEIVER_PLIST" ]]; }
+summarizer_installed() { [[ -f "$SUMMARIZER_PLIST" ]]; }
+
 # ---------- build ----------
 
 build_shipper() {
@@ -87,6 +103,11 @@ build_shipper() {
 build_receiver() {
     log "building loom-receiver → $RECEIVER_BIN"
     ( cd "$REPO_ROOT" && go build -o "$RECEIVER_BIN" ./transport/cmd/loom-receiver )
+}
+
+build_summarizer() {
+    log "building loom-summarize → $SUMMARIZER_BIN"
+    ( cd "$REPO_ROOT" && go build -o "$SUMMARIZER_BIN" ./cmd/loom-summarize )
 }
 
 # ---------- install shipper ----------
@@ -195,94 +216,203 @@ EOF
     fi
 }
 
-# ---------- uninstall (both) ----------
+# ---------- install summarizer ----------
+
+install_summarizer() {
+    check_prereqs
+    ensure_dirs
+
+    build_summarizer
+
+    log "writing plist: $SUMMARIZER_PLIST"
+    # Run in -watch mode: cold-start sweep handles catch-up, then a 30s
+    # ticker keeps the DB current. KeepAlive restarts on crash.
+    cat > "$SUMMARIZER_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${SUMMARIZER_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${SUMMARIZER_BIN}</string>
+        <string>-watch</string>
+        <string>-received</string>
+        <string>${LOOM_HOME}/received</string>
+        <string>-db</string>
+        <string>${SUMMARY_DB}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LOOM_HOME</key>
+        <string>${LOOM_HOME}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>${SUMMARIZER_LOG}</string>
+    <key>StandardErrorPath</key>
+    <string>${SUMMARIZER_LOG}</string>
+</dict>
+</plist>
+EOF
+
+    if ! plutil -lint "$SUMMARIZER_PLIST" >/dev/null; then
+        rm -f "$SUMMARIZER_PLIST"
+        err "plutil -lint rejected the generated plist"
+    fi
+
+    launchctl bootout "gui/$(id -u)/$SUMMARIZER_LABEL" 2>/dev/null || true
+    if ! launchctl bootstrap "gui/$(id -u)" "$SUMMARIZER_PLIST"; then
+        err "launchctl bootstrap failed for $SUMMARIZER_LABEL"
+    fi
+    launchctl kickstart -p "gui/$(id -u)/$SUMMARIZER_LABEL" >/dev/null 2>&1 || true
+
+    log "summarizer installed; first sweep is running in the background"
+    log "  log:  $SUMMARIZER_LOG"
+    log "  db:   $SUMMARY_DB"
+}
+
+# ---------- install server (receiver + summarizer) ----------
+
+install_server() {
+    install_receiver
+    echo
+    install_summarizer
+}
+
+# ---------- uninstall (all) ----------
 
 uninstall() {
     log "uninstalling loom launchd agents"
 
     # Shipper: prefer the binary's own uninstall-agent (handles the plist
     # tolerantly), fall back to manual cleanup if the binary is gone.
-    if [[ -x "$SHIPPER_BIN" ]]; then
-        "$SHIPPER_BIN" uninstall-agent || true
-    else
-        launchctl bootout "gui/$(id -u)/$SHIPPER_LABEL" 2>/dev/null || true
-        rm -f "$SHIPPER_PLIST"
+    if shipper_installed; then
+        if [[ -x "$SHIPPER_BIN" ]]; then
+            "$SHIPPER_BIN" uninstall-agent || true
+        else
+            launchctl bootout "gui/$(id -u)/$SHIPPER_LABEL" 2>/dev/null || true
+            rm -f "$SHIPPER_PLIST"
+        fi
+        log "shipper agent removed"
     fi
-    log "shipper agent removed (if present)"
 
-    # Receiver: managed entirely by this script.
-    launchctl bootout "gui/$(id -u)/$RECEIVER_LABEL" 2>/dev/null || true
-    rm -f "$RECEIVER_PLIST"
-    log "receiver agent removed (if present)"
+    if receiver_installed; then
+        launchctl bootout "gui/$(id -u)/$RECEIVER_LABEL" 2>/dev/null || true
+        rm -f "$RECEIVER_PLIST"
+        log "receiver agent removed"
+    fi
+
+    if summarizer_installed; then
+        launchctl bootout "gui/$(id -u)/$SUMMARIZER_LABEL" 2>/dev/null || true
+        rm -f "$SUMMARIZER_PLIST"
+        log "summarizer agent removed"
+    fi
 
     log "state preserved at $LOOM_HOME"
-    log "binaries preserved at $SHIPPER_BIN, $RECEIVER_BIN"
-    log "remove those manually if you want a full wipe"
+    log "binaries preserved in $LOOM_BIN_DIR — remove manually for a full wipe"
 }
 
 # ---------- status ----------
 
-status() {
+# print_launchd_block prints a block of fields from `launchctl print` for
+# one label. Used by the per-component status sections.
+print_launchd_block() {
+    local label="$1"
     local uid
     uid="$(id -u)"
-
-    echo "=== loom-receiver ==="
-    if launchctl print "gui/$uid/$RECEIVER_LABEL" >/dev/null 2>&1; then
-        launchctl print "gui/$uid/$RECEIVER_LABEL" | awk '
-            /^[[:space:]]*state[[:space:]]*=/ { print "  " $0 }
-            /^[[:space:]]*pid[[:space:]]*=/ { print "  " $0 }
-            /^[[:space:]]*program[[:space:]]*=/ { print "  " $0 }
+    if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+        launchctl print "gui/$uid/$label" | awk '
+            /^[[:space:]]*state[[:space:]]*=/         { print "  " $0 }
+            /^[[:space:]]*pid[[:space:]]*=/           { print "  " $0 }
+            /^[[:space:]]*program[[:space:]]*=/       { print "  " $0 }
             /^[[:space:]]*last exit code[[:space:]]*=/ { print "  " $0 }
+            /^[[:space:]]*run interval[[:space:]]*=/  { print "  " $0 }
         '
-        if [[ -f "$RECEIVER_PLIST" ]]; then
-            echo "  plist: $RECEIVER_PLIST"
-        fi
     else
-        echo "  not loaded"
+        echo "  installed but not loaded — try: launchctl bootstrap gui/$uid \$plist"
+    fi
+}
+
+status() {
+    local printed_any=0
+
+    if receiver_installed; then
+        printed_any=1
+        echo "=== loom-receiver ==="
+        print_launchd_block "$RECEIVER_LABEL"
+        echo "  plist: $RECEIVER_PLIST"
+        echo "  log:   $RECEIVER_LOG"
+        echo
     fi
 
-    echo
-    echo "=== loom-shipper ==="
-    if [[ -x "$SHIPPER_BIN" ]] && launchctl print "gui/$uid/$SHIPPER_LABEL" >/dev/null 2>&1; then
-        launchctl print "gui/$uid/$SHIPPER_LABEL" | awk '
-            /^[[:space:]]*state[[:space:]]*=/ { print "  " $0 }
-            /^[[:space:]]*last exit code[[:space:]]*=/ { print "  " $0 }
-            /^[[:space:]]*run interval[[:space:]]*=/ { print "  " $0 }
-            /^[[:space:]]*program[[:space:]]*=/ { print "  " $0 }
-        '
+    if shipper_installed; then
+        printed_any=1
+        echo "=== loom-shipper ==="
+        print_launchd_block "$SHIPPER_LABEL"
         if [[ -f "$SHIPPER_PLIST" ]]; then
             echo "  plist: $SHIPPER_PLIST"
         fi
-    else
-        echo "  not loaded"
+        echo
+        echo "=== sync health ==="
+        if [[ -x "$SHIPPER_BIN" ]]; then
+            LOOM_HOME="$LOOM_HOME" "$SHIPPER_BIN" health 2>/dev/null \
+                || echo "  (shipper has not run yet — no notify.state)"
+        else
+            echo "  shipper binary not built"
+        fi
+        echo
     fi
 
-    echo
-    echo "=== sync health ==="
-    if [[ -x "$SHIPPER_BIN" ]]; then
-        LOOM_HOME="$LOOM_HOME" "$SHIPPER_BIN" health 2>/dev/null || echo "  (shipper has not run yet — no notify.state)"
-    else
-        echo "  shipper binary not built — run install.sh --install-shipper first"
+    if summarizer_installed; then
+        printed_any=1
+        echo "=== loom-summarizer ==="
+        print_launchd_block "$SUMMARIZER_LABEL"
+        echo "  plist: $SUMMARIZER_PLIST"
+        echo "  log:   $SUMMARIZER_LOG"
+        if [[ -f "$SUMMARY_DB" ]]; then
+            local size
+            size="$(du -h "$SUMMARY_DB" | awk '{print $1}')"
+            echo "  db:    $SUMMARY_DB ($size)"
+            if command -v sqlite3 >/dev/null 2>&1; then
+                local sessions tools errors unknown
+                sessions="$(sqlite3 "$SUMMARY_DB" 'SELECT COUNT(*) FROM sessions' 2>/dev/null || echo "?")"
+                tools="$(sqlite3 "$SUMMARY_DB" 'SELECT COUNT(*) FROM tool_calls' 2>/dev/null || echo "?")"
+                errors="$(sqlite3 "$SUMMARY_DB" 'SELECT COUNT(*) FROM errors' 2>/dev/null || echo "?")"
+                unknown="$(sqlite3 "$SUMMARY_DB" 'SELECT COUNT(*) FROM unknown_records' 2>/dev/null || echo "?")"
+                echo "  sessions=$sessions tool_calls=$tools errors=$errors unknown_records=$unknown"
+            fi
+        else
+            echo "  db:    not yet created (first sweep may still be running)"
+        fi
+        echo
     fi
 
-    echo
+    if [[ $printed_any -eq 0 ]]; then
+        echo "no loom components installed"
+        echo "  install with one of:"
+        echo "    install.sh --install-server"
+        echo "    install.sh --install-shipper"
+        echo
+    fi
+
     echo "=== config ==="
     echo "  LOOM_HOME=$LOOM_HOME"
     echo "  LOOM_BIN_DIR=$LOOM_BIN_DIR"
     if [[ -f "$LOOM_HOME/config.json" ]]; then
         echo "  config.json: present"
-    else
+    elif shipper_installed; then
         echo "  config.json: missing ($LOOM_HOME/config.json)"
-    fi
-    if [[ -x "$SHIPPER_BIN" ]]; then
-        echo "  shipper binary: $SHIPPER_BIN"
-    else
-        echo "  shipper binary: not built"
-    fi
-    if [[ -x "$RECEIVER_BIN" ]]; then
-        echo "  receiver binary: $RECEIVER_BIN"
-    else
-        echo "  receiver binary: not built"
     fi
 }
 
@@ -295,11 +425,13 @@ main() {
     fi
 
     case "$1" in
-        --install-receiver) install_receiver ;;
-        --install-shipper)  install_shipper ;;
-        --uninstall)        uninstall ;;
-        --status)           status ;;
-        --help|-h)          usage ;;
+        --install-server)     install_server ;;
+        --install-receiver)   install_receiver ;;
+        --install-summarizer) install_summarizer ;;
+        --install-shipper)    install_shipper ;;
+        --uninstall)          uninstall ;;
+        --status)             status ;;
+        --help|-h)            usage ;;
         *)
             echo "unknown argument: $1" >&2
             echo
