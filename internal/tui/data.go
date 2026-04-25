@@ -67,20 +67,60 @@ func LoadProjects() ([]Project, error) {
 	received := filepath.Join(home, "received")
 	staging := filepath.Join(home, "transport", "staging")
 
+	// Pre-walk: collect every root slug so we can resolve paths once and
+	// learn which basenames are real (e.g. "forge-data" vs "data"). The
+	// resulting set disambiguates slugs from other machines that don't
+	// resolve locally.
+	rootSlugs := map[string]bool{}
+	collect := func(root string) {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return
+		}
+		for _, a := range entries {
+			if !a.IsDir() {
+				continue
+			}
+			slugs, err := os.ReadDir(filepath.Join(root, a.Name()))
+			if err != nil {
+				continue
+			}
+			for _, s := range slugs {
+				if !s.IsDir() {
+					continue
+				}
+				r, _ := splitWorktree(s.Name())
+				rootSlugs[r] = true
+			}
+		}
+	}
+	collect(received)
+	collect(staging)
+
+	knownBases := map[string]bool{}
+	pathByRoot := map[string]string{}
+	for r := range rootSlugs {
+		p := reconstructPath(r)
+		pathByRoot[r] = p
+		if p != "" {
+			knownBases[strings.ToLower(filepath.Base(p))] = true
+		}
+	}
+
 	projects := map[string]*Project{}
 	// projectKey -> (agent + "\x00" + sessionID) -> session index.
 	sessionIdx := map[string]map[string]int{}
 
-	// Group by lowercase basename of the root slug so the same logical
-	// project surfaces as one row across machines (steve/loom + smacbeth/loom
-	// both key on "loom"). False collisions are possible for two unrelated
-	// repos with the same basename — the wire-protocol-aware fix tracks that.
+	// Group by basename so the same logical project collapses across
+	// machines (steve/loom + smacbeth/loom both key on "loom"). False
+	// collisions are possible for two unrelated repos with the same
+	// basename — the wire-protocol-aware fix tracks that.
 	upsert := func(slug string) *Project {
 		root, worktree := splitWorktree(slug)
-		key := projectKey(root)
+		key := projectKeyFor(root, pathByRoot[root], knownBases)
 		p, ok := projects[key]
 		if !ok {
-			p = &Project{Slug: root, Path: reconstructPath(root)}
+			p = &Project{Slug: root, Path: pathByRoot[root]}
 			p.Name = projectName(p.Path, root)
 			projects[key] = p
 			sessionIdx[key] = map[string]int{}
@@ -88,7 +128,7 @@ func LoadProjects() ([]Project, error) {
 			// First slug we saw didn't resolve locally; if a later slug
 			// (same basename) does, prefer its path so the ticket lookup
 			// and "open in tk" drill-down can work.
-			if path := reconstructPath(root); path != "" {
+			if path := pathByRoot[root]; path != "" {
 				p.Path = path
 				p.Name = projectName(path, root)
 			}
@@ -103,7 +143,7 @@ func LoadProjects() ([]Project, error) {
 	}
 
 	addSession := func(p *Project, agent, sid, slug string) *Session {
-		key := projectKey(p.Slug)
+		key := projectKeyFor(p.Slug, pathByRoot[p.Slug], knownBases)
 		k := agent + "\x00" + sid
 		if i, ok := sessionIdx[key][k]; ok {
 			return &p.Sessions[i]
@@ -184,19 +224,32 @@ func LoadProjects() ([]Project, error) {
 	return out, nil
 }
 
-// projectKey is the canonical grouping key for a root slug. Today this is
-// the lowercase basename of the slug, which collapses the same project
-// across machines (steve/loom + smacbeth/loom both key on "loom"). The next
-// pass replaces this with the captured git remote URL (see ticket).
-func projectKey(rootSlug string) string {
-	trimmed := strings.Trim(rootSlug, "-")
-	if trimmed == "" {
-		return rootSlug
+// projectKeyFor returns the canonical grouping key for a root slug.
+// Precedence:
+//  1. If the slug resolved to a real local path, use that path's basename.
+//  2. Else, look for the longest '-'-aligned suffix that matches a known
+//     basename collected from sibling slugs that DID resolve. This handles
+//     "smacbeth/code/forge-data" (slug doesn't resolve) by spotting that
+//     "forge-data" is a known basename from "steve/code/forge-data".
+//  3. Else, fall back to the last '-' segment.
+//
+// The wire-protocol-aware fix replaces this with the captured git remote URL.
+func projectKeyFor(rootSlug, resolvedPath string, knownBases map[string]bool) string {
+	if resolvedPath != "" {
+		return strings.ToLower(filepath.Base(resolvedPath))
 	}
-	if i := strings.LastIndex(trimmed, "-"); i >= 0 {
-		trimmed = trimmed[i+1:]
+	body := strings.TrimPrefix(rootSlug, "-")
+	parts := strings.Split(body, "-")
+	for baseLen := len(parts); baseLen >= 1; baseLen-- {
+		cand := strings.ToLower(strings.Join(parts[len(parts)-baseLen:], "-"))
+		if knownBases[cand] {
+			return cand
+		}
 	}
-	return strings.ToLower(trimmed)
+	if len(parts) > 0 {
+		return strings.ToLower(parts[len(parts)-1])
+	}
+	return rootSlug
 }
 
 // splitWorktree separates a slug into its root-project slug and the worktree
@@ -286,21 +339,35 @@ func walkAgentSlugSessions(root string, fn func(agent, slug, sid, path string, i
 	return nil
 }
 
-// reconstructPath inverts the agent-specific slug sanitization enough to
-// find a .tickets directory. Claude replaces '/' with '-'. Codex also
-// replaces '.' with '_'. Both are lossy; we only surface tickets when the
-// best-effort reconstruction points at a real directory.
+// reconstructPath inverts the agent-specific slug sanitization. Claude
+// replaces '/' with '-'; Codex additionally replaces '.' with '_'. Both
+// are lossy: from the slug alone we can't tell whether a '-' was a path
+// separator or part of a directory name (e.g. "forge-data").
+//
+// To disambiguate, we try every possible split — keep the last N segments
+// joined by '-' as a single basename, treat the rest as path separators,
+// and stop at the first interpretation that resolves to a real directory.
+// Returns "" when nothing resolves.
 func reconstructPath(slug string) string {
-	candidates := []string{
-		filepath.Clean("/" + strings.ReplaceAll(slug, "-", "/")),
-		filepath.Clean("/" + strings.ReplaceAll(strings.ReplaceAll(slug, "_", "."), "-", "/")),
-	}
-	for _, c := range candidates {
-		if c == "/" || c == "." {
+	body := strings.TrimPrefix(slug, "-")
+	parts := strings.Split(body, "-")
+	for baseLen := 1; baseLen <= len(parts); baseLen++ {
+		prefix := parts[:len(parts)-baseLen]
+		base := strings.Join(parts[len(parts)-baseLen:], "-")
+		path := "/" + strings.Join(append(prefix, base), "/")
+		path = filepath.Clean(path)
+		if path == "/" || path == "." {
 			continue
 		}
-		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
-			return c
+		if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+			return path
+		}
+		// Codex variant: '_' was originally '.'.
+		if strings.Contains(path, "_") {
+			alt := strings.ReplaceAll(path, "_", ".")
+			if fi, err := os.Stat(alt); err == nil && fi.IsDir() {
+				return alt
+			}
 		}
 	}
 	return ""
