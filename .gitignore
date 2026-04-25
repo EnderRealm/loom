@@ -52,3 +52,4 @@ extractors/eval-data/*.jsonl
 # .vscode/
 /loom-receiver
 /loom-shipper
+/loom-summarize
