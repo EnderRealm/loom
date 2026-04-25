@@ -19,6 +19,7 @@ LOOM_BIN_DIR="${LOOM_BIN_DIR:-$HOME/.local/bin}"
 SHIPPER_BIN="$LOOM_BIN_DIR/loom-shipper"
 RECEIVER_BIN="$LOOM_BIN_DIR/loom-receiver"
 SUMMARIZER_BIN="$LOOM_BIN_DIR/loom-summarize"
+TUI_BIN="$LOOM_BIN_DIR/loom-tui"
 
 SHIPPER_LABEL="com.loom.shipper"
 RECEIVER_LABEL="com.loom.receiver"
@@ -48,10 +49,11 @@ usage() {
 loom install script
 
 usage:
-  install.sh --install-server      Build + install all server-side agents (receiver + summarizer)
+  install.sh --install-server      Build + install all server-side agents (receiver + summarizer + tui)
   install.sh --install-receiver    Build loom-receiver, install launchd agent, verify health
   install.sh --install-summarizer  Build loom-summarize, install launchd agent in watch mode
   install.sh --install-shipper     Build loom-shipper, install launchd agent, verify status
+  install.sh --install-tui         Build loom-tui to $LOOM_BIN_DIR (no launchd; runs interactively)
   install.sh --uninstall           Remove all loom launchd agents (preserves state + binaries)
   install.sh --status              Show launchd state for installed components
   install.sh --help                Show this message
@@ -108,6 +110,21 @@ build_receiver() {
 build_summarizer() {
     log "building loom-summarize → $SUMMARIZER_BIN"
     ( cd "$REPO_ROOT" && go build -o "$SUMMARIZER_BIN" ./cmd/loom-summarize )
+}
+
+build_tui() {
+    log "building loom-tui → $TUI_BIN"
+    ( cd "$REPO_ROOT" && go build -o "$TUI_BIN" ./cmd/loom-tui )
+}
+
+# install_tui builds the interactive dashboard binary into $LOOM_BIN_DIR.
+# No launchd agent — this is a foreground tool the user runs themselves.
+install_tui() {
+    check_prereqs
+    ensure_dirs
+    build_tui
+    log "loom-tui installed → $TUI_BIN"
+    log "  run it: $TUI_BIN"
 }
 
 # ---------- install shipper ----------
@@ -288,6 +305,8 @@ install_server() {
     install_receiver
     echo
     install_summarizer
+    echo
+    install_tui
 }
 
 # ---------- uninstall (all) ----------
@@ -429,6 +448,7 @@ main() {
         --install-receiver)   install_receiver ;;
         --install-summarizer) install_summarizer ;;
         --install-shipper)    install_shipper ;;
+        --install-tui)        install_tui ;;
         --uninstall)          uninstall ;;
         --status)             status ;;
         --help|-h)            usage ;;
