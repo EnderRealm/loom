@@ -68,17 +68,30 @@ func LoadProjects() ([]Project, error) {
 	staging := filepath.Join(home, "transport", "staging")
 
 	projects := map[string]*Project{}
-	// rootSlug -> (agent + "\x00" + sessionID) -> session index.
+	// projectKey -> (agent + "\x00" + sessionID) -> session index.
 	sessionIdx := map[string]map[string]int{}
 
+	// Group by lowercase basename of the root slug so the same logical
+	// project surfaces as one row across machines (steve/loom + smacbeth/loom
+	// both key on "loom"). False collisions are possible for two unrelated
+	// repos with the same basename — the wire-protocol-aware fix tracks that.
 	upsert := func(slug string) *Project {
 		root, worktree := splitWorktree(slug)
-		p, ok := projects[root]
+		key := projectKey(root)
+		p, ok := projects[key]
 		if !ok {
 			p = &Project{Slug: root, Path: reconstructPath(root)}
 			p.Name = projectName(p.Path, root)
-			projects[root] = p
-			sessionIdx[root] = map[string]int{}
+			projects[key] = p
+			sessionIdx[key] = map[string]int{}
+		} else if p.Path == "" {
+			// First slug we saw didn't resolve locally; if a later slug
+			// (same basename) does, prefer its path so the ticket lookup
+			// and "open in tk" drill-down can work.
+			if path := reconstructPath(root); path != "" {
+				p.Path = path
+				p.Name = projectName(path, root)
+			}
 		}
 		if !contains(p.Slugs, slug) {
 			p.Slugs = append(p.Slugs, slug)
@@ -90,8 +103,9 @@ func LoadProjects() ([]Project, error) {
 	}
 
 	addSession := func(p *Project, agent, sid, slug string) *Session {
+		key := projectKey(p.Slug)
 		k := agent + "\x00" + sid
-		if i, ok := sessionIdx[p.Slug][k]; ok {
+		if i, ok := sessionIdx[key][k]; ok {
 			return &p.Sessions[i]
 		}
 		_, worktree := splitWorktree(slug)
@@ -102,7 +116,7 @@ func LoadProjects() ([]Project, error) {
 			Worktree:  worktree,
 		})
 		i := len(p.Sessions) - 1
-		sessionIdx[p.Slug][k] = i
+		sessionIdx[key][k] = i
 		p.SessionCount++
 		if !contains(p.Agents, agent) {
 			p.Agents = append(p.Agents, agent)
@@ -168,6 +182,21 @@ func LoadProjects() ([]Project, error) {
 		return out[i].LastActivity.After(out[j].LastActivity)
 	})
 	return out, nil
+}
+
+// projectKey is the canonical grouping key for a root slug. Today this is
+// the lowercase basename of the slug, which collapses the same project
+// across machines (steve/loom + smacbeth/loom both key on "loom"). The next
+// pass replaces this with the captured git remote URL (see ticket).
+func projectKey(rootSlug string) string {
+	trimmed := strings.Trim(rootSlug, "-")
+	if trimmed == "" {
+		return rootSlug
+	}
+	if i := strings.LastIndex(trimmed, "-"); i >= 0 {
+		trimmed = trimmed[i+1:]
+	}
+	return strings.ToLower(trimmed)
 }
 
 // splitWorktree separates a slug into its root-project slug and the worktree
