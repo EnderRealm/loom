@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -57,5 +58,60 @@ func TestLoadProjectsWithSummary(t *testing.T) {
 			t.Logf("  %-12s calls=%d errors=%d avgMs=%d",
 				ts.Kind, ts.Calls, ts.Errors, ts.AvgMs)
 		}
+	}
+}
+
+// TestLoadKnowledge confirms the knowledge loader walks ~/.loom/knowledge/,
+// classifies validated vs candidate artifacts, and that the list view
+// renders without panicking.
+func TestLoadKnowledge(t *testing.T) {
+	arts, err := LoadKnowledge()
+	if err != nil {
+		t.Fatalf("LoadKnowledge: %v", err)
+	}
+	if len(arts) == 0 {
+		t.Skipf("no artifacts under %s — skip", KnowledgeRoot())
+	}
+
+	var nValidated, nCandidate, nTruth, nDecision int
+	scopes := map[string]int{}
+	for _, a := range arts {
+		switch a.Status {
+		case "validated":
+			nValidated++
+		case "candidate":
+			nCandidate++
+		}
+		switch a.Type {
+		case "truth":
+			nTruth++
+		case "decision":
+			nDecision++
+		}
+		scopes[a.Scope]++
+		if a.ID == "" {
+			t.Errorf("artifact at %s has empty ID", a.Path)
+		}
+	}
+	t.Logf("loaded=%d validated=%d candidate=%d truths=%d decisions=%d scopes=%v",
+		len(arts), nValidated, nCandidate, nTruth, nDecision, scopes)
+
+	// Render the list view to confirm it doesn't panic on real data.
+	m := knowledgeModel{}
+	m.setSize(120, 30)
+	m.setArtifacts(arts)
+	out := m.view()
+	if out == "" {
+		t.Errorf("knowledge list view rendered empty for %d artifacts", len(arts))
+	}
+	if !strings.Contains(out, "STATUS") {
+		t.Errorf("expected STATUS column header in list view")
+	}
+
+	// Render detail view for the selected artifact.
+	m.showDetail = true
+	det := m.view()
+	if det == "" {
+		t.Errorf("knowledge detail view rendered empty")
 	}
 }

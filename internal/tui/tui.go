@@ -20,11 +20,13 @@ type overlayID int
 const (
 	overlayNone overlayID = iota
 	overlayDetail
+	overlayKnowledge
 )
 
 type App struct {
 	dashboard dashboardModel
 	detail    detailModel
+	knowledge knowledgeModel
 	overlay   overlayID
 	width     int
 	height    int
@@ -38,6 +40,7 @@ func New() App {
 }
 
 type projectsLoadedMsg []Project
+type knowledgeLoadedMsg []Artifact
 type errMsg error
 type statusMsg string
 type clearStatusMsg struct{}
@@ -53,6 +56,16 @@ func loadCmd() tea.Cmd {
 	}
 }
 
+func loadKnowledgeCmd() tea.Cmd {
+	return func() tea.Msg {
+		arts, err := LoadKnowledge()
+		if err != nil {
+			return errMsg(err)
+		}
+		return knowledgeLoadedMsg(arts)
+	}
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(15*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -64,7 +77,7 @@ func clearStatusAfter(d time.Duration) tea.Cmd {
 }
 
 func (a App) Init() tea.Cmd {
-	return tea.Batch(loadCmd(), tickCmd())
+	return tea.Batch(loadCmd(), loadKnowledgeCmd(), tickCmd())
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -74,6 +87,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		a.dashboard.setSize(a.width, a.contentHeight())
 		a.detail.setSize(a.width, a.contentHeight())
+		a.knowledge.setSize(a.width, a.contentHeight())
 		return a, nil
 
 	case projectsLoadedMsg:
@@ -88,8 +102,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case knowledgeLoadedMsg:
+		a.knowledge.setArtifacts([]Artifact(msg))
+		return a, nil
+
 	case tickMsg:
-		return a, tea.Batch(loadCmd(), tickCmd())
+		return a, tea.Batch(loadCmd(), loadKnowledgeCmd(), tickCmd())
 
 	case errMsg:
 		a.err = msg
@@ -116,12 +134,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.detail, cmd = a.detail.update(msg)
 			return a, cmd
 		}
+		if a.overlay == overlayKnowledge {
+			// Detail sub-view consumes its own keys; only close the overlay
+			// from the list view, so 'q' inside detail doesn't quit unexpectedly.
+			if !a.knowledge.showDetail {
+				switch msg.String() {
+				case "esc", "q":
+					a.overlay = overlayNone
+					return a, nil
+				}
+			}
+			var cmd tea.Cmd
+			a.knowledge, cmd = a.knowledge.update(msg)
+			return a, cmd
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return a, tea.Quit
 		case "r":
 			a.status = "refreshing…"
-			return a, tea.Batch(loadCmd(), clearStatusAfter(2*time.Second))
+			return a, tea.Batch(loadCmd(), loadKnowledgeCmd(), clearStatusAfter(2*time.Second))
+		case "c":
+			a.overlay = overlayKnowledge
+			return a, loadKnowledgeCmd()
 		case "enter", "o", "l", "right":
 			if sel := a.dashboard.selected(); sel != nil {
 				a.detail = newDetailModel(sel, a.width, a.contentHeight())
@@ -137,6 +172,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.overlay == overlayDetail {
 		var cmd tea.Cmd
 		a.detail, cmd = a.detail.update(msg)
+		return a, cmd
+	}
+	if a.overlay == overlayKnowledge {
+		var cmd tea.Cmd
+		a.knowledge, cmd = a.knowledge.update(msg)
 		return a, cmd
 	}
 	var cmd tea.Cmd
@@ -191,6 +231,9 @@ func (a App) View() string {
 	if a.overlay == overlayDetail {
 		body = StyleDim.Render(body) + "\n" + a.detail.view()
 	}
+	if a.overlay == overlayKnowledge {
+		body = a.knowledge.view()
+	}
 	b.WriteString(body)
 
 	// Footer: status or help.
@@ -208,7 +251,13 @@ func (a App) helpLine() string {
 	if a.overlay == overlayDetail {
 		return "↑↓ scroll  │  t open in tk  │  esc/q close"
 	}
-	return "↑↓ select  │  enter open  │  r refresh  │  q quit"
+	if a.overlay == overlayKnowledge {
+		if a.knowledge.showDetail {
+			return "↑↓ scroll  │  esc/q back to list"
+		}
+		return "↑↓ select  │  enter view  │  esc/q close"
+	}
+	return "↑↓ select  │  enter open  │  c knowledge  │  r refresh  │  q quit"
 }
 
 // launchTk shells out to `tk ui --repo <path>` via tea.ExecProcess so the
