@@ -6,6 +6,7 @@ truths in knowledge/truths/<scope>/.
 Usage:
     ./extract.py --input <session.md> [--scope forge] [--model haiku] [--threshold 0.5]
 """
+from __future__ import annotations
 
 import argparse
 import json
@@ -15,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 LOOM_ROOT = Path(__file__).resolve().parent.parent
@@ -35,17 +36,22 @@ CLAUDE_BIN = "/opt/homebrew/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
 EXAMPLE_DELIMITER = "\n\n===REFERENCE-EXAMPLE===\n\n"
 
-# Per-type configuration: prompt, directories, sentinel
+# Per-type configuration: prompt, directories, sentinel.
+# `candidates` mirrors the validated tree's type-first layout
+# (_candidates/truths/<scope>/, _candidates/decisions/<scope>/) so the same
+# scope hierarchy applies on both sides of the human-review gate.
 TYPE_CONFIG = {
     "truth": {
         "prompt": LOOM_ROOT / "extractors" / "truth-extractor.md",
         "training": KNOWLEDGE_ROOT / "truths",
+        "candidates": KNOWLEDGE_ROOT / "_candidates" / "truths",
         "eval": LOOM_ROOT / "knowledge" / "truths-eval",
         "sentinel": "===END-OF-TRUTH===",
     },
     "decision": {
         "prompt": LOOM_ROOT / "extractors" / "decision-extractor.md",
         "training": KNOWLEDGE_ROOT / "decisions",
+        "candidates": KNOWLEDGE_ROOT / "_candidates" / "decisions",
         "eval": LOOM_ROOT / "knowledge" / "decisions-eval",
         "sentinel": "===END-OF-DECISION===",
     },
@@ -290,6 +296,68 @@ def parse_output(text: str, sentinel: str = "===END-OF-TRUTH===") -> list[dict]:
     return results
 
 
+def inject_frontmatter(raw: str, fields: dict) -> str:
+    """Append fields to a candidate's `---` frontmatter block.
+
+    The truth/decision parser is last-write-wins, so appended keys override
+    any earlier value (e.g., a model-emitted `status: validated` becomes
+    `status: candidate` once we re-write).
+    """
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.DOTALL)
+    if not m:
+        return raw
+    fm, body = m.group(1), m.group(2)
+    extra = "\n".join(f"{k}: {v}" for k, v in fields.items())
+    return f"---\n{fm}\n{extra}\n---\n{body}"
+
+
+def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
+                    provider: str, model: str, reasoning: str | None) -> list[Path]:
+    """Write each valid candidate to base_dir/scope/<id>--<timestamp>.md.
+
+    Adds `status: candidate`, `extracted_at`, `extracted_by` to frontmatter.
+    Filename suffix is the wall-clock timestamp at run start, so a re-run on
+    the same session produces a sibling rather than overwriting.
+    """
+    out_dir = base_dir / scope
+    out_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    timestamp_slug = now.strftime("%Y%m%d-%H%M%S")
+    extracted_by = f"{provider}:{model}"
+    if reasoning:
+        extracted_by += f":{reasoning}"
+    extracted_at = now.replace(microsecond=0).isoformat()
+
+    written = []
+    for c in candidates:
+        if not c.get("id"):
+            continue
+        body = inject_frontmatter(c["raw"], {
+            "status": "candidate",
+            "extracted_at": extracted_at,
+            "extracted_by": extracted_by,
+        })
+        path = out_dir / f"{c['id']}--{timestamp_slug}.md"
+        path.write_text(body)
+        written.append(path)
+    return written
+
+
+def append_extract_log(extract_type: str, scope: str, session_id: str, count: int) -> None:
+    """Append one entry to ~/.loom/knowledge/log.md per extraction run.
+
+    Skips silently if log.md doesn't exist — the file is bootstrapped at store
+    init, not by the extractor.
+    """
+    log_path = KNOWLEDGE_ROOT / "log.md"
+    if not log_path.exists():
+        return
+    today = date.today().isoformat()
+    short_session = session_id[:8] if session_id else "?"
+    with open(log_path, "a") as f:
+        f.write(f"\n## [{today}] extract {short_session} | {scope} | {count} {extract_type} candidate(s)\n")
+
+
 def keywords(text: str) -> set[str]:
     words = re.findall(r"[a-z][a-z0-9_-]{2,}", text.lower())
     return {w for w in words if w not in STOPWORDS}
@@ -497,6 +565,10 @@ def main():
     p.add_argument("--benchmark", action="store_true",
                     help="score against eval set (truths-eval/) instead of training set (truths/). "
                          "Training refs are still shown as few-shot examples — eval refs are never shown.")
+    p.add_argument("--no-emit-candidates", dest="emit_candidates", action="store_false",
+                    help="don't write candidate files to ~/.loom/knowledge/_candidates/<type>s/<scope>/. "
+                         "Useful for benchmark / debugging runs.")
+    p.set_defaults(emit_candidates=True)
     args = p.parse_args()
 
     # Apply preset overrides (only if user didn't also set the individual flags)
@@ -659,6 +731,16 @@ def main():
         print(f"  ! <invalid>                                          {err}")
     if warned:
         print(f"  ({warned} candidate(s) with schema warnings)")
+
+    # Persist candidates to the knowledge store unless explicitly disabled
+    # or running in benchmark mode (a measurement run, not production).
+    if args.emit_candidates and not args.benchmark and valid:
+        reasoning = args.reasoning if args.provider == "codex" else None
+        written = emit_candidates(valid, tcfg["candidates"], args.scope,
+                                  args.provider, args.model, reasoning)
+        print(f"[extract] wrote {len(written)} candidate(s) → {tcfg['candidates']}/{args.scope}/", file=sys.stderr)
+        append_extract_log(args.extract_type, args.scope,
+                           _extract_session_id(input_path), len(written))
 
     if not scoring_refs:
         print("\n[extract] no scoring refs to compare against — skipping scoring")
