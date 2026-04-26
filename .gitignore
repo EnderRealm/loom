@@ -50,6 +50,7 @@ extractors/eval-data/*.jsonl
 # Editor/IDE
 # .idea/
 # .vscode/
+/loom
 /loom-receiver
 /loom-shipper
 /loom-summarize
