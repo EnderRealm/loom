@@ -9,7 +9,7 @@ Loom is a minimal pipeline for capturing, storing, and (eventually) processing a
 | `transport` | v1, usable | Ships agent session JSONL files to a central receiver       |
 | everything else | not built yet | Extraction, storage, processing — deliberately deferred |
 
-Transport is the only subsystem today. Anything else in this repo (`knowledge/`, `extractors/`, `docs/`) is notes, prompts, or scaffolding.
+Transport is the only subsystem today. Anything else in this repo (`extractors/`, `docs/`, `knowledge/*-eval/`) is notes, prompts, or scaffolding. Durable extracted knowledge lives outside the repo at `~/.loom/knowledge/` (its own git repo); see that store's `SCHEMA.md`.
 
 ## Prerequisites
 
@@ -28,7 +28,8 @@ loom/
       loom-shipper/                    # client binary
       loom-receiver/                   # server binary
     internal/                          # transport-private packages (wire, cursor, source)
-  docs/  extractors/  knowledge/       # non-Go subsystems
+  docs/  extractors/                   # non-Go subsystems
+  knowledge/                           # eval fixtures only — durable store is ~/.loom/knowledge/
 ```
 
 Everything (build + launchd agent management) is driven by `./install.sh`. Run it with no arguments for usage.

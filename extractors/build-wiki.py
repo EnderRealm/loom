@@ -11,13 +11,19 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 LOOM_ROOT = Path(__file__).resolve().parent.parent
-KNOWLEDGE_DIR = LOOM_ROOT / "knowledge"
+
+# Knowledge store lives outside the loom repo. Override with LOOM_KNOWLEDGE_ROOT.
+KNOWLEDGE_DIR = Path(os.environ.get(
+    "LOOM_KNOWLEDGE_ROOT",
+    str(Path.home() / ".loom" / "knowledge"),
+)).expanduser()
 
 # Artifact type directories (training only — eval is not part of the wiki)
 ARTIFACT_TYPES = {

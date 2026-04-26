@@ -20,6 +20,14 @@ from pathlib import Path
 
 LOOM_ROOT = Path(__file__).resolve().parent.parent
 SUMMARIZER_PATH = LOOM_ROOT / "extractors" / "summarizer.md"
+
+# Knowledge store lives outside the loom repo so it survives reinstalls and
+# accumulates across projects. Eval fixtures stay in-repo as test data.
+KNOWLEDGE_ROOT = Path(os.environ.get(
+    "LOOM_KNOWLEDGE_ROOT",
+    str(Path.home() / ".loom" / "knowledge"),
+)).expanduser()
+
 # Import the pre-processor (sibling module)
 sys.path.insert(0, str(LOOM_ROOT / "extractors"))
 from preprocess import preprocess as preprocess_jsonl
@@ -31,13 +39,13 @@ EXAMPLE_DELIMITER = "\n\n===REFERENCE-EXAMPLE===\n\n"
 TYPE_CONFIG = {
     "truth": {
         "prompt": LOOM_ROOT / "extractors" / "truth-extractor.md",
-        "training": LOOM_ROOT / "knowledge" / "truths",
+        "training": KNOWLEDGE_ROOT / "truths",
         "eval": LOOM_ROOT / "knowledge" / "truths-eval",
         "sentinel": "===END-OF-TRUTH===",
     },
     "decision": {
         "prompt": LOOM_ROOT / "extractors" / "decision-extractor.md",
-        "training": LOOM_ROOT / "knowledge" / "decisions",
+        "training": KNOWLEDGE_ROOT / "decisions",
         "eval": LOOM_ROOT / "knowledge" / "decisions-eval",
         "sentinel": "===END-OF-DECISION===",
     },
@@ -66,10 +74,6 @@ Key patterns to watch for in raw transcripts:
 5. **Architecture statements**: "X is designed as Y", "agents are stateless text processors", "the dist bundle is what runs, not the source" — direct claims about how systems work.
 
 Unlike summaries, raw transcripts do NOT have curated `### Discoveries` sections. You must find the signal in the conversation flow. Expect more noise — but also richer evidence and corrections that summaries sometimes miss."""
-
-
-def load_reference_truths(scope: str) -> list[dict]:
-    return load_reference_truths_from(KNOWLEDGE_ROOT / scope)
 
 
 def load_reference_truths_from(scope_dir: Path) -> list[dict]:
