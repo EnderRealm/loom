@@ -24,8 +24,8 @@ func TestOpenFreshDB(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != "2" {
-		t.Errorf("schema_version: got %q, want %q", v, "2")
+	if v != "3" {
+		t.Errorf("schema_version: got %q, want %q", v, "3")
 	}
 }
 
@@ -41,7 +41,7 @@ func TestOpenOutdatedDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	if _, err := st.DB().Exec(`UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'`); err != nil {
+	if _, err := st.DB().Exec(`UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'`); err != nil {
 		t.Fatalf("downgrade: %v", err)
 	}
 	st.Close()

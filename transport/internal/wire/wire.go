@@ -7,6 +7,12 @@ import "fmt"
 // IngestRequest is the payload the shipper POSTs to the receiver for each
 // session delta. FromOffset/ToOffset are byte offsets into the source JSONL
 // file; the (SessionID, FromOffset) pair is the idempotency key.
+//
+// Project is the legacy slug-encoded path segment used as the storage
+// directory; ProjectIdentity carries the authoritative identity fields
+// (git remote, raw cwd) that downstream readers use to group sessions
+// across machines. ProjectIdentity is optional for backward compatibility
+// — a request from a pre-identity client just leaves it zero.
 type IngestRequest struct {
 	Agent      string   `json:"agent"`
 	Project    string   `json:"project"`
@@ -14,6 +20,19 @@ type IngestRequest struct {
 	FromOffset int64    `json:"from_offset"`
 	ToOffset   int64    `json:"to_offset"`
 	Lines      []string `json:"lines"`
+
+	ProjectIdentity *ProjectIdentity `json:"project_identity,omitempty"`
+}
+
+// ProjectIdentity carries the authoritative identity for a session's
+// project. GitRemote is the canonical handle when present (origin URL,
+// normalized); Cwd is the raw, unsanitized working directory the agent
+// reported; RootSlug echoes IngestRequest.Project so the receiver can
+// re-derive the same value without parsing the slug.
+type ProjectIdentity struct {
+	GitRemote string `json:"git_remote,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
+	RootSlug  string `json:"root_slug,omitempty"`
 }
 
 // IngestResponse tells the shipper which offset the server has accepted up to.

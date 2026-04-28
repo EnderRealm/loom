@@ -2,13 +2,19 @@
 // agent's source directory and the receiver. Capture appends source bytes
 // here; ship reads from here. Once bytes are captured the agent can delete
 // its own files without data loss.
+//
+// A sibling .meta.json carries the session's authoritative project
+// identity (git remote + raw cwd) so the ship pass can include it in the
+// wire payload even when the agent's source file is gone.
 package staging
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"loom/internal/config"
 )
@@ -23,6 +29,20 @@ func Path(agent, project, sessionID string) string {
 	return filepath.Join(Dir(), agent, project, sessionID+".jsonl")
 }
 
+// metaPath returns the sidecar meta.json path for one session.
+func metaPath(agent, project, sessionID string) string {
+	return filepath.Join(Dir(), agent, project, sessionID+".meta.json")
+}
+
+// Identity is the project-identity sidecar written next to each staged
+// session. Mirrors wire.ProjectIdentity but stays in this package so the
+// staging layer doesn't depend on the wire package.
+type Identity struct {
+	GitRemote string `json:"git_remote,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
+	RootSlug  string `json:"root_slug,omitempty"`
+}
+
 // Entry describes one staged session, used by the ship pass and notifier to
 // walk staging without re-listing source files.
 type Entry struct {
@@ -30,6 +50,7 @@ type Entry struct {
 	Project   string
 	SessionID string
 	Path      string
+	Identity  Identity
 }
 
 // Append copies data into the staging file for (agent, project, sessionID),
@@ -94,16 +115,64 @@ func List(agent string) ([]Entry, error) {
 			if f.IsDir() || filepath.Ext(f.Name()) != ".jsonl" {
 				continue
 			}
+			// Skip sidecar meta files masquerading via .jsonl extension
+			// (none today, but cheap guard against a future rename).
+			if strings.HasSuffix(f.Name(), ".meta.json") {
+				continue
+			}
 			sessionID := f.Name()[:len(f.Name())-len(".jsonl")]
+			id, _ := ReadIdentity(agent, p.Name(), sessionID)
 			out = append(out, Entry{
 				Agent:     agent,
 				Project:   p.Name(),
 				SessionID: sessionID,
 				Path:      filepath.Join(agentDir, p.Name(), f.Name()),
+				Identity:  id,
 			})
 		}
 	}
 	return out, nil
+}
+
+// WriteIdentity persists or updates the per-session meta sidecar. Safe
+// to call repeatedly: the file is rewritten atomically via temp+rename.
+// Empty Identity is a no-op so the ship pass doesn't accidentally erase
+// a sidecar written by an earlier capture pass.
+func WriteIdentity(agent, project, sessionID string, id Identity) error {
+	if id == (Identity{}) {
+		return nil
+	}
+	p := metaPath(agent, project, sessionID)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(id)
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// ReadIdentity returns the meta sidecar for one session. Missing file
+// returns the zero Identity with no error — pre-identity sessions stage
+// without it and ship under the legacy slug-only wire shape.
+func ReadIdentity(agent, project, sessionID string) (Identity, error) {
+	data, err := os.ReadFile(metaPath(agent, project, sessionID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Identity{}, nil
+		}
+		return Identity{}, err
+	}
+	var id Identity
+	if err := json.Unmarshal(data, &id); err != nil {
+		return Identity{}, fmt.Errorf("parse meta %s: %w", metaPath(agent, project, sessionID), err)
+	}
+	return id, nil
 }
 
 // AgentDirs returns the set of agent subdirectories that exist under staging.

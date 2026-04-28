@@ -11,10 +11,18 @@ import (
 )
 
 // Session is one agent session file on disk, as produced by an Adapter.
+//
+// Project is the slug that becomes the storage directory; Cwd is the
+// raw, unsanitized working directory the agent reported. Cwd is the
+// authoritative project handle and feeds wire.ProjectIdentity. Cwd may
+// be empty when the adapter cannot resolve it (e.g. a Claude session
+// whose first line hasn't been written yet); the capture pass treats
+// empty Cwd as "check back next tick".
 type Session struct {
-	Project   string // adapter-chosen project segment; "_default" when the agent has no project notion
-	SessionID string // stable across ticks for the same source file
-	Path      string // absolute path to the source .jsonl
+	Project   string
+	SessionID string
+	Path      string
+	Cwd       string
 }
 
 // Adapter is one agent's source-file enumerator.

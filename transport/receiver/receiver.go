@@ -229,9 +229,36 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write offset: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Persist the per-session identity sidecar when the client supplied
+	// it. Missing field is fine: pre-identity clients ship under the
+	// legacy slug-only shape and downstream readers fall back to the
+	// directory name. Failures here don't block ingest — the raw bytes
+	// are already on disk.
+	if req.ProjectIdentity != nil && *req.ProjectIdentity != (wire.ProjectIdentity{}) {
+		metaPath := filepath.Join(dir, req.SessionID+".meta.json")
+		if err := writeProjectIdentity(metaPath, req.ProjectIdentity); err != nil {
+			log.Printf("warn from=%s session=%s err=%q (write meta)", r.RemoteAddr, req.SessionID, err)
+		}
+	}
+
 	log.Printf("ingest from=%s agent=%s project=%s session=%s offset=%d→%d lines=%d",
 		r.RemoteAddr, req.Agent, req.Project, req.SessionID, req.FromOffset, req.ToOffset, len(req.Lines))
 	writeJSON(w, wire.IngestResponse{AcceptedToOffset: req.ToOffset})
+}
+
+// writeProjectIdentity writes the sidecar atomically via temp+rename so
+// a partial write never leaves a corrupt JSON file behind.
+func writeProjectIdentity(path string, id *wire.ProjectIdentity) error {
+	data, err := json.Marshal(id)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (s *server) checkAuth(r *http.Request) bool {

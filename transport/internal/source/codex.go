@@ -70,6 +70,7 @@ func (codexAdapter) List() ([]Session, error) {
 			Project:   encodeProjectPath(cwd),
 			SessionID: sid,
 			Path:      path,
+			Cwd:       cwd,
 		})
 		return nil
 	})

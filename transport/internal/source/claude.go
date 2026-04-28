@@ -1,6 +1,10 @@
 package source
 
 import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +32,36 @@ func claudeProjectsDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".claude", "projects"), nil
+}
+
+// readClaudeCwd reads the first record's `cwd` field. Empty return
+// means "not yet available" (file is empty or first line isn't \n-
+// terminated yet); a parse error is returned so the caller can skip
+// the session this tick rather than emit a Session with no Cwd.
+func readClaudeCwd(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", nil
+	}
+	defer f.Close()
+
+	r := bufio.NewReader(f)
+	line, err := r.ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	if len(line) == 0 || line[len(line)-1] != '\n' {
+		return "", nil
+	}
+	var probe struct {
+		Cwd string `json:"cwd"`
+	}
+	if err := json.Unmarshal(line[:len(line)-1], &probe); err != nil {
+		// Malformed first line — caller skips; capture log will surface
+		// it as drift on the next pass once the line completes.
+		return "", err
+	}
+	return probe.Cwd, nil
 }
 
 // ListClaudeSessions enumerates every .jsonl session file under ~/.claude/projects/*/.
@@ -59,10 +93,18 @@ func ListClaudeSessions() ([]Session, error) {
 			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
 				continue
 			}
+			path := filepath.Join(base, project, f.Name())
+			cwd, err := readClaudeCwd(path)
+			if err != nil {
+				// Parse failure on the first line of an active session is
+				// a transient state (interleaved write); skip and retry next tick.
+				continue
+			}
 			out = append(out, Session{
 				Project:   project,
 				SessionID: strings.TrimSuffix(f.Name(), ".jsonl"),
-				Path:      filepath.Join(base, project, f.Name()),
+				Path:      path,
+				Cwd:       cwd,
 			})
 		}
 	}

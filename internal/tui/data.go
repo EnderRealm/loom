@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,15 +14,20 @@ import (
 	"github.com/EnderRealm/ticket/pkg/ticket"
 )
 
-// Project aggregates session and ticket state for one captured cwd. Worktrees
-// (e.g. Forge's <project>/.claude/worktrees/<branch>) roll up under their
-// parent project, so a single Project can span multiple slugs.
+// Project aggregates session and ticket state for one identity-keyed
+// project. Identity precedence: GitRemote > Cwd > slug. Worktrees (e.g.
+// Forge's <project>/.claude/worktrees/<branch>) roll up under their
+// parent project via GitRemote, so a single Project can span multiple
+// slugs and worktrees.
 type Project struct {
-	Name         string // display name, e.g. "Forge"
-	Slug         string // root slug on disk
-	Path         string // reconstructed root path, "" if unresolvable
+	Name      string // display name, e.g. "Loom"
+	Slug      string // representative slug; one of many in Slugs
+	Path      string // local cwd if it resolves to a real directory, else ""
+	GitRemote string // origin URL when a meta sidecar / summary row carried one
+	Cwd       string // raw cwd from sidecar / summary; authoritative when no remote
+
 	Slugs        []string
-	Worktrees    []string // non-root slugs contributing sessions
+	Worktrees    []string // display-only labels parsed from worktree-shaped slugs
 	Agents       []string
 	SessionCount int
 	BytesTotal   int64
@@ -72,95 +78,119 @@ type TicketSummary struct {
 }
 
 // LoadProjects walks the loom state tree and returns one Project per
-// root-slug, sorted by most-recent activity. Worktree slugs roll up under
-// their parent project.
+// authoritative identity (git remote, then raw cwd, then slug as
+// fallback for legacy sessions), sorted by most-recent activity.
+//
+// Identity precedence is what makes cross-machine grouping correct:
+// `steve/code/loom` and `smacbeth/code/loom` shipped from different
+// laptops resolve to the same git remote and roll up into one project.
+// Pre-identity sessions (legacy capture, no meta sidecar, no DB row
+// yet) keep the old slug-only behavior — they just don't merge across
+// machines until they're re-summarized after this binary runs.
 func LoadProjects() ([]Project, error) {
 	home := config.Home()
 	received := filepath.Join(home, "received")
 	staging := filepath.Join(home, "transport", "staging")
 
-	// Pre-walk: collect every root slug so we can resolve paths once and
-	// learn which basenames are real (e.g. "forge-data" vs "data"). The
-	// resulting set disambiguates slugs from other machines that don't
-	// resolve locally.
-	rootSlugs := map[string]bool{}
-	collect := func(root string) {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			return
-		}
-		for _, a := range entries {
-			if !a.IsDir() {
-				continue
-			}
-			slugs, err := os.ReadDir(filepath.Join(root, a.Name()))
-			if err != nil {
-				continue
-			}
-			for _, s := range slugs {
-				if !s.IsDir() {
-					continue
-				}
-				r, _ := splitWorktree(s.Name())
-				rootSlugs[r] = true
-			}
-		}
-	}
-	collect(received)
-	collect(staging)
-
-	knownBases := map[string]bool{}
-	pathByRoot := map[string]string{}
-	for r := range rootSlugs {
-		p := reconstructPath(r)
-		pathByRoot[r] = p
-		if p != "" {
-			knownBases[strings.ToLower(filepath.Base(p))] = true
-		}
-	}
+	// Pull summary metrics first so their identity columns drive the
+	// grouping decision, not the slug we're about to walk past.
+	summary, _ := LoadSummaryData()
 
 	projects := map[string]*Project{}
 	// projectKey -> (agent + "\x00" + sessionID) -> session index.
 	sessionIdx := map[string]map[string]int{}
 
-	// Group by basename so the same logical project collapses across
-	// machines (steve/loom + smacbeth/loom both key on "loom"). False
-	// collisions are possible for two unrelated repos with the same
-	// basename — the wire-protocol-aware fix tracks that.
-	upsert := func(slug string) *Project {
-		root, worktree := splitWorktree(slug)
-		key := projectKeyFor(root, pathByRoot[root], rootSlugs, knownBases)
+	// resolveIdentity returns the authoritative (key, gitRemote, cwd,
+	// displayName, localPath) for a session, drawing from summaries.db
+	// (preferred) and the on-disk meta sidecar (fallback for sessions
+	// the summarizer hasn't folded yet).
+	resolveIdentity := func(agent, slug, sid, jsonlPath string) (key, gitRemote, cwd, name, localPath string) {
+		if summary != nil {
+			if m, ok := summary.BySession[sessionKey(agent, sid)]; ok {
+				if m.GitRemote != "" {
+					gitRemote = m.GitRemote
+				}
+				if m.CwdRaw != "" {
+					cwd = m.CwdRaw
+				} else if m.Cwd != "" {
+					cwd = m.Cwd
+				}
+			}
+		}
+		if gitRemote == "" || cwd == "" {
+			if g, c := readSidecarIdentity(jsonlPath); gitRemote == "" || cwd == "" {
+				if gitRemote == "" {
+					gitRemote = g
+				}
+				if cwd == "" {
+					cwd = c
+				}
+			}
+		}
+		switch {
+		case gitRemote != "":
+			key = "remote:" + normalizeRemote(gitRemote)
+		case cwd != "":
+			key = "cwd:" + cwd
+		default:
+			// Legacy path: no identity, group by slug + agent so the
+			// dashboard still renders rows. Pre-collapse slug rules
+			// stay only as a tiebreaker for sessions that predate
+			// wire-level identity.
+			key = "slug:" + slug
+		}
+		if cwd != "" {
+			if fi, err := os.Stat(cwd); err == nil && fi.IsDir() {
+				localPath = cwd
+			}
+		}
+		name = displayName(gitRemote, cwd, slug)
+		return
+	}
+
+	upsert := func(agent, slug, sid, jsonlPath string) (*Project, *Session) {
+		key, remote, cwd, name, path := resolveIdentity(agent, slug, sid, jsonlPath)
 		p, ok := projects[key]
 		if !ok {
-			p = &Project{Slug: root, Path: pathByRoot[root]}
-			p.Name = projectName(p.Path, key)
+			p = &Project{
+				Slug:      slug,
+				Name:      name,
+				Path:      path,
+				GitRemote: remote,
+				Cwd:       cwd,
+			}
 			projects[key] = p
 			sessionIdx[key] = map[string]int{}
-		} else if p.Path == "" {
-			// First slug we saw didn't resolve locally; if a later slug
-			// (same basename) does, prefer its path so the ticket lookup
-			// and "open in tk" drill-down can work.
-			if path := pathByRoot[root]; path != "" {
+		} else {
+			// Patch in fields we learned from a later session in the
+			// same group (e.g. the first one had no remote, the second
+			// did).
+			if p.GitRemote == "" && remote != "" {
+				p.GitRemote = remote
+			}
+			if p.Cwd == "" && cwd != "" {
+				p.Cwd = cwd
+			}
+			if p.Path == "" && path != "" {
 				p.Path = path
-				p.Name = projectName(path, key)
+				p.Name = name
 			}
 		}
 		if !contains(p.Slugs, slug) {
 			p.Slugs = append(p.Slugs, slug)
 		}
-		if worktree != "" && !contains(p.Worktrees, worktree) {
-			p.Worktrees = append(p.Worktrees, worktree)
+		// Worktree label is display-only now; surface it when the slug
+		// shape clearly identifies one (Forge's `.claude/worktrees/foo`
+		// convention) so the detail panel can show it.
+		if _, wt := splitDisplayWorktree(slug); wt != "" && !contains(p.Worktrees, wt) {
+			p.Worktrees = append(p.Worktrees, wt)
 		}
-		return p
-	}
 
-	addSession := func(p *Project, agent, sid, slug string) *Session {
-		key := projectKeyFor(p.Slug, pathByRoot[p.Slug], rootSlugs, knownBases)
 		k := agent + "\x00" + sid
 		if i, ok := sessionIdx[key][k]; ok {
-			return &p.Sessions[i]
+			return p, &p.Sessions[i]
 		}
-		_, worktree := splitWorktree(slug)
+		_, worktree := splitDisplayWorktree(slug)
 		p.Sessions = append(p.Sessions, Session{
 			Agent:     agent,
 			SessionID: sid,
@@ -173,13 +203,11 @@ func LoadProjects() ([]Project, error) {
 		if !contains(p.Agents, agent) {
 			p.Agents = append(p.Agents, agent)
 		}
-		return &p.Sessions[i]
+		return p, &p.Sessions[i]
 	}
 
-	// Received side.
 	if err := walkAgentSlugSessions(received, func(agent, slug, sid, path string, info os.FileInfo) {
-		p := upsert(slug)
-		s := addSession(p, agent, sid, slug)
+		p, s := upsert(agent, slug, sid, path)
 		s.Received = true
 		s.ReceivedSize = info.Size()
 		if info.ModTime().After(s.Modified) {
@@ -193,10 +221,8 @@ func LoadProjects() ([]Project, error) {
 		return nil, err
 	}
 
-	// Staging side. Attach ship cursor so we can surface pending bytes.
 	if err := walkAgentSlugSessions(staging, func(agent, slug, sid, path string, info os.FileInfo) {
-		p := upsert(slug)
-		s := addSession(p, agent, sid, slug)
+		p, s := upsert(agent, slug, sid, path)
 		s.Staged = true
 		s.StageSize = info.Size()
 		if info.ModTime().After(s.Modified) {
@@ -215,12 +241,6 @@ func LoadProjects() ([]Project, error) {
 	}); err != nil {
 		return nil, err
 	}
-
-	// Pull summary metrics from ~/.loom/summaries.db, if it's been
-	// populated. Errors here are non-fatal — the dashboard renders the
-	// pre-summary fields the same way it always has when summarizer hasn't
-	// run yet.
-	summary, _ := LoadSummaryData()
 
 	out := make([]Project, 0, len(projects))
 	for _, p := range projects {
@@ -243,79 +263,83 @@ func LoadProjects() ([]Project, error) {
 	return out, nil
 }
 
-// projectKeyFor returns the canonical grouping key for a root slug.
-// Precedence:
-//  1. If the slug resolved to a real local path, use that path's basename.
-//  2. Else, longest '-'-aligned suffix matching a basename learned from a
-//     locally-resolved slug (handles "smacbeth/code/forge-data" via
-//     "steve/code/forge-data").
-//  3. Else, longest "parent prefix" P removed from the slug. P qualifies if
-//     either it's itself a known root slug (someone ran an agent there —
-//     handles "smacbeth/code/moo/moo-rs" via the sibling "smacbeth/code/moo"
-//     slug) or P+"-" prefixes ≥2 other slugs (handles "smacbeth/code/X" via
-//     the many other slugs sharing the "smacbeth/code" container).
-//  4. Else, last '-' segment.
-//
-// The wire-protocol-aware fix replaces this with the captured git remote URL.
-func projectKeyFor(rootSlug, resolvedPath string, allSlugs, knownBases map[string]bool) string {
-	if resolvedPath != "" {
-		return strings.ToLower(filepath.Base(resolvedPath))
+// readSidecarIdentity reads the meta sidecar next to a session JSONL.
+// The receiver writes it under received/, the shipper under staging/.
+// Missing or malformed sidecar is silent — pre-identity sessions just
+// fall back to slug grouping.
+func readSidecarIdentity(jsonlPath string) (gitRemote, cwd string) {
+	metaPath := strings.TrimSuffix(jsonlPath, ".jsonl") + ".meta.json"
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return "", ""
 	}
-	body := strings.TrimPrefix(rootSlug, "-")
+	var m struct {
+		GitRemote string `json:"git_remote"`
+		Cwd       string `json:"cwd"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return "", ""
+	}
+	return m.GitRemote, m.Cwd
+}
+
+// normalizeRemote collapses common URL variants of the same origin to
+// one key. We strip a trailing ".git", lowercase, and convert SSH-style
+// "git@host:owner/repo" to "host/owner/repo" so HTTPS and SSH clones
+// of the same repo group together.
+func normalizeRemote(url string) string {
+	s := strings.TrimSpace(url)
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
+	switch {
+	case strings.HasPrefix(s, "git@"):
+		// git@github.com:owner/repo → github.com/owner/repo
+		s = strings.TrimPrefix(s, "git@")
+		s = strings.Replace(s, ":", "/", 1)
+	case strings.HasPrefix(s, "ssh://"):
+		s = strings.TrimPrefix(s, "ssh://")
+		s = strings.TrimPrefix(s, "git@")
+	case strings.HasPrefix(s, "https://"):
+		s = strings.TrimPrefix(s, "https://")
+	case strings.HasPrefix(s, "http://"):
+		s = strings.TrimPrefix(s, "http://")
+	}
+	return strings.ToLower(s)
+}
+
+// displayName picks a human label for a project. Prefers the repo
+// basename from a git remote (e.g. "EnderRealm/loom" → "Loom"), then
+// the cwd basename, then the slug's last segment.
+func displayName(gitRemote, cwd, slug string) string {
+	if gitRemote != "" {
+		s := normalizeRemote(gitRemote)
+		// host/owner/repo or owner/repo — take the last component.
+		if i := strings.LastIndex(s, "/"); i >= 0 {
+			s = s[i+1:]
+		}
+		if s != "" {
+			return titleCase(s)
+		}
+	}
+	if cwd != "" {
+		base := filepath.Base(cwd)
+		if base != "" && base != "/" && base != "." {
+			return titleCase(base)
+		}
+	}
+	body := strings.TrimPrefix(slug, "-")
 	parts := strings.Split(body, "-")
-
-	// (2) suffix match against known basenames.
-	for baseLen := len(parts); baseLen >= 1; baseLen-- {
-		cand := strings.ToLower(strings.Join(parts[len(parts)-baseLen:], "-"))
-		if knownBases[cand] {
-			return cand
-		}
-	}
-
-	// (3) longest parent-prefix removal.
-	for prefixLen := len(parts) - 1; prefixLen >= 1; prefixLen-- {
-		prefix := "-" + strings.Join(parts[:prefixLen], "-")
-		if isParentPrefix(prefix, rootSlug, allSlugs) {
-			return strings.ToLower(strings.Join(parts[prefixLen:], "-"))
-		}
-	}
-
-	// (4) fallback.
 	if len(parts) > 0 {
-		return strings.ToLower(parts[len(parts)-1])
+		return titleCase(parts[len(parts)-1])
 	}
-	return rootSlug
+	return slug
 }
 
-// isParentPrefix reports whether `prefix` looks like a path-segment parent of
-// `self`, given the full set of root slugs. Either prefix is itself a known
-// slug, or at least two other slugs start with prefix+"-" (so the prefix is
-// a shared container directory).
-func isParentPrefix(prefix, self string, allSlugs map[string]bool) bool {
-	if allSlugs[prefix] && prefix != self {
-		return true
-	}
-	count := 0
-	pfx := prefix + "-"
-	for s := range allSlugs {
-		if s == self {
-			continue
-		}
-		if strings.HasPrefix(s, pfx) {
-			count++
-			if count >= 2 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// splitWorktree separates a slug into its root-project slug and the worktree
-// label beneath it. Forge worktrees live at <project>/.claude/worktrees/<branch>,
-// which sanitizes to "<root>--claude-worktrees-<branch>". For slugs without that
-// marker, worktree is "" and root is the full slug.
-func splitWorktree(slug string) (root, worktree string) {
+// splitDisplayWorktree separates a slug into root + worktree label for
+// the detail panel. Forge stores worktrees at <project>/.claude/worktrees/
+// <branch>, which sanitizes into "<root>--claude-worktrees-<branch>".
+// Used for display only — grouping is driven by GitRemote/Cwd above.
+func splitDisplayWorktree(slug string) (root, worktree string) {
 	const marker = "--claude-worktrees-"
 	if i := strings.Index(slug, marker); i > 0 {
 		return slug[:i], slug[i+len(marker):]

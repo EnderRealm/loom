@@ -14,17 +14,21 @@ import (
 // SessionMetrics is the per-session view of summaries.db rows that the TUI
 // surfaces on the dashboard and detail page.
 type SessionMetrics struct {
-	Agent          string
-	SessionID      string
-	Model          string
-	TurnCount      int
-	ToolCallCount  int
-	ErrorCount     int
-	Compacted      bool
-	InputTokens    int64
-	OutputTokens   int64
+	Agent           string
+	SessionID       string
+	Project         string // legacy slug
+	Cwd             string // parsed from JSONL
+	CwdRaw          string // sidecar-captured raw cwd
+	GitRemote       string // sidecar-captured git remote
+	Model           string
+	TurnCount       int
+	ToolCallCount   int
+	ErrorCount      int
+	Compacted       bool
+	InputTokens     int64
+	OutputTokens    int64
 	CacheReadTokens int64
-	DurationMs     int64
+	DurationMs      int64
 }
 
 // SummaryData is the bundle of metrics the TUI needs per refresh. Indexed by
@@ -104,7 +108,7 @@ func sessionKey(agent, sessionID string) string {
 
 func loadSessions(db *sql.DB, d *SummaryData) error {
 	rows, err := db.Query(`
-		SELECT session_id, agent, project, model,
+		SELECT session_id, agent, project, cwd, cwd_raw, git_remote, model,
 		       turn_count, tool_call_count, error_count, compacted,
 		       input_tokens, output_tokens, cache_read_tokens, duration_ms
 		FROM sessions
@@ -116,18 +120,33 @@ func loadSessions(db *sql.DB, d *SummaryData) error {
 
 	for rows.Next() {
 		var (
-			m       SessionMetrics
-			project sql.NullString
-			model   sql.NullString
-			compact sql.NullInt64
+			m         SessionMetrics
+			project   sql.NullString
+			cwd       sql.NullString
+			cwdRaw    sql.NullString
+			gitRemote sql.NullString
+			model     sql.NullString
+			compact   sql.NullInt64
 		)
 		if err := rows.Scan(
-			&m.SessionID, &m.Agent, &project, &model,
+			&m.SessionID, &m.Agent, &project, &cwd, &cwdRaw, &gitRemote, &model,
 			&m.TurnCount, &m.ToolCallCount, &m.ErrorCount, &compact,
 			&m.InputTokens, &m.OutputTokens, &m.CacheReadTokens,
 			&m.DurationMs,
 		); err != nil {
 			return err
+		}
+		if project.Valid {
+			m.Project = project.String
+		}
+		if cwd.Valid {
+			m.Cwd = cwd.String
+		}
+		if cwdRaw.Valid {
+			m.CwdRaw = cwdRaw.String
+		}
+		if gitRemote.Valid {
+			m.GitRemote = gitRemote.String
 		}
 		if model.Valid {
 			m.Model = model.String

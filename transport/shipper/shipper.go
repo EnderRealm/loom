@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -257,6 +258,10 @@ func Daemon(ctx context.Context) error {
 // ---------- capture pass ----------
 
 func capturePass(counts *tickCounts) {
+	// One git-remote resolution per cwd per tick. Saves a fork+exec per
+	// session when many sessions share the same repo.
+	gitCache := map[string]string{}
+
 	for _, ad := range source.Adapters() {
 		agent := ad.Agent()
 		sessions, err := ad.List()
@@ -289,6 +294,24 @@ func capturePass(counts *tickCounts) {
 				counts.captureFailed++
 				continue
 			}
+			// Refresh the identity sidecar on every successful capture
+			// so receiver and downstream readers see the latest cwd /
+			// git remote even if the working tree was moved.
+			if s.Cwd != "" {
+				remote, ok := gitCache[s.Cwd]
+				if !ok {
+					remote = resolveGitRemote(s.Cwd)
+					gitCache[s.Cwd] = remote
+				}
+				if err := staging.WriteIdentity(agent, s.Project, s.SessionID, staging.Identity{
+					GitRemote: remote,
+					Cwd:       s.Cwd,
+					RootSlug:  s.Project,
+				}); err != nil {
+					log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q (meta)",
+						agent, s.Project, s.SessionID, err)
+				}
+			}
 			if err := cursor.Write(cursor.KindSource, agent, s.SessionID, to); err != nil {
 				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q (cursor)",
 					agent, s.Project, s.SessionID, err)
@@ -300,6 +323,23 @@ func capturePass(counts *tickCounts) {
 			counts.captured++
 		}
 	}
+}
+
+// resolveGitRemote runs `git -C cwd remote get-url origin`. Returns the
+// trimmed URL on success, "" on any failure (no repo, no origin remote,
+// git not installed, cwd doesn't exist). Best effort — the receiver
+// persists whatever identity we send; missing remote just means project
+// grouping falls back to cwd.
+func resolveGitRemote(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", cwd, "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // ---------- ship pass ----------
@@ -350,6 +390,13 @@ func shipOne(cfg *config.Config, e staging.Entry, counts *tickCounts) {
 		FromOffset: from,
 		ToOffset:   to,
 		Lines:      lines,
+	}
+	if e.Identity != (staging.Identity{}) {
+		req.ProjectIdentity = &wire.ProjectIdentity{
+			GitRemote: e.Identity.GitRemote,
+			Cwd:       e.Identity.Cwd,
+			RootSlug:  e.Identity.RootSlug,
+		}
 	}
 	accepted, err := postIngestWithRetry(cfg, req, e)
 	if err != nil {

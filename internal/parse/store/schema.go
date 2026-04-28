@@ -4,11 +4,17 @@ package store
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 3: sessions gains git_remote and cwd_raw columns sourced
+// from the per-session meta sidecar (~/.loom/received/<agent>/<project>/
+// <session>.meta.json) the receiver writes when the wire payload carries
+// project identity. These are the authoritative project handle —
+// downstream readers should prefer git_remote over cwd_raw over slug.
+//
 // schemaVersion 2: session identity is composite (agent, session_id) end to
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -21,6 +27,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id        TEXT NOT NULL,
     project           TEXT,
     cwd               TEXT,
+    cwd_raw           TEXT,
+    git_remote        TEXT,
     git_branch        TEXT,
     cli_version       TEXT,
     model_provider    TEXT,
@@ -47,6 +55,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time);
+CREATE INDEX IF NOT EXISTS idx_sessions_git_remote ON sessions(git_remote);
 
 CREATE TABLE IF NOT EXISTS turns (
     agent             TEXT NOT NULL,

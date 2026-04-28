@@ -78,26 +78,38 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
 
 ```
 ~/.loom/
-  config.json                              # client: server URL, auth token, interval
+  config.json                                  # client: server URL, auth token, interval
   transport/
-    cursors/source/<agent>/<uuid>.cursor   # client: next byte read from source
-    cursors/ship/<agent>/<uuid>.cursor     # client: next byte shipped to receiver
-    staging/<agent>/<project>/<uuid>.jsonl # client: bytes captured locally
-    shipper.lock                           # client: flock, one shipper at a time
-    shipper.log                            # client: launchd stdout/stderr capture
-  received/                                # server: default storage root
+    cursors/source/<agent>/<uuid>.cursor       # client: next byte read from source
+    cursors/ship/<agent>/<uuid>.cursor         # client: next byte shipped to receiver
+    staging/<agent>/<project>/<uuid>.jsonl     # client: bytes captured locally
+    staging/<agent>/<project>/<uuid>.meta.json # client: per-session project identity
+    shipper.lock                               # client: flock, one shipper at a time
+    shipper.log                                # client: launchd stdout/stderr capture
+  received/                                    # server: default storage root
     <agent>/
       <sanitized-project>/
-        <uuid>.jsonl                       # appended-to session file
-        <uuid>.offset                      # next expected byte (idempotency)
-  summaries.db                             # server: normalized summary database
-  summarizer.log                           # server: summarizer launchd capture
-  knowledge/                               # durable knowledge store (separate git repo)
+        <uuid>.jsonl                           # appended-to session file
+        <uuid>.offset                          # next expected byte (idempotency)
+        <uuid>.meta.json                       # project identity (git remote, raw cwd)
+  summaries.db                                 # server: normalized summary database
+  summarizer.log                               # server: summarizer launchd capture
+  knowledge/                                   # durable knowledge store (separate git repo)
 ```
 
 State lives per-user per-machine. Override the root with `LOOM_HOME=/some/path`.
 
 `<agent>` is `claude-code` or `codex-cli`. The two-stage shipper captures from the agent's source directory into local `staging/`, then ships staging deltas to the receiver — so the agent can clean up its own session files without losing data.
+
+### Project identity
+
+Each session carries an authoritative project identity captured at the shipper:
+
+- **`git_remote`** — `git -C <cwd> remote get-url origin` at capture time, normalized (SSH and HTTPS variants of the same origin collapse). Canonical when present.
+- **`cwd`** — the raw, unsanitized working directory the agent reported. Authoritative fallback when there's no git remote.
+- **`root_slug`** — the legacy sanitized path used as the on-disk storage directory, kept for backward compatibility.
+
+Identity travels in `wire.IngestRequest.ProjectIdentity` (optional; pre-identity clients omit it), is persisted by the receiver as a `<session>.meta.json` sidecar next to the JSONL, and is folded into `summaries.db` (`sessions.git_remote`, `sessions.cwd_raw`). The TUI groups projects by `git_remote`, then `cwd`, then `root_slug` — so the same repo shipped from two laptops with different sanitized paths rolls up into one project, and basename collisions like `code/loom` vs `other/loom` stay separate.
 
 ## Server setup
 

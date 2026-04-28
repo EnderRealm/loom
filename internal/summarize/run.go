@@ -5,6 +5,7 @@ package summarize
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -119,11 +120,14 @@ func walkAgent(ctx context.Context, st *store.Store, agent summary.Agent,
 		}
 		project := filepath.Base(filepath.Dir(path))
 		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		cwdRaw, gitRemote := readMetaSidecar(path)
 		source := store.SourceInfo{
-			Project: project,
-			Path:    path,
-			Size:    info.Size(),
-			Mtime:   info.ModTime(),
+			Project:   project,
+			Path:      path,
+			Size:      info.Size(),
+			Mtime:     info.ModTime(),
+			CwdRaw:    cwdRaw,
+			GitRemote: gitRemote,
 		}
 		if !force {
 			current, err := st.SessionAlreadyCurrent(string(agent), sessionID,
@@ -192,6 +196,26 @@ func signalContext() (context.Context, context.CancelFunc) {
 		cancel()
 	}()
 	return ctx, cancel
+}
+
+// readMetaSidecar pulls the receiver-written project identity for one
+// session. Sidecar layout matches wire.ProjectIdentity. Missing sidecar
+// returns zero values silently — pre-identity sessions land before the
+// shipper started populating it, and that's fine.
+func readMetaSidecar(jsonlPath string) (cwd, gitRemote string) {
+	metaPath := strings.TrimSuffix(jsonlPath, ".jsonl") + ".meta.json"
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return "", ""
+	}
+	var m struct {
+		GitRemote string `json:"git_remote"`
+		Cwd       string `json:"cwd"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return "", ""
+	}
+	return m.Cwd, m.GitRemote
 }
 
 func DefaultReceivedDir() string {

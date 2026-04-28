@@ -146,21 +146,24 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 	// keeps the per-session write idempotent without an ON CONFLICT clause.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO sessions (
-		    agent, session_id, project, cwd, git_branch, cli_version,
+		    agent, session_id, project, cwd, cwd_raw, git_remote,
+		    git_branch, cli_version,
 		    model_provider, model, personality, custom_title, agent_name,
 		    pr_url, start_time, end_time, duration_ms, turn_count,
 		    tool_call_count, error_count, compacted, input_tokens,
 		    output_tokens, cache_read_tokens, source_path, source_size,
 		    source_mtime, summarized_at
 		) VALUES (
-		    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		    ?, ?, ?, ?, ?, ?,
+		    ?, ?,
+		    ?, ?, ?, ?, ?,
 		    ?, ?, ?, ?, ?,
 		    ?, ?, ?, ?,
 		    ?, ?, ?, ?,
 		    ?, ?
 		)
 	`,
-		agent, sum.SessionID, source.Project, sum.Cwd,
+		agent, sum.SessionID, source.Project, sum.Cwd, source.CwdRaw, source.GitRemote,
 		sum.GitBranch, sum.CLIVersion,
 		sum.ModelProvider, sum.Model, sum.Personality,
 		sum.CustomTitle, sum.AgentName,
@@ -205,12 +208,16 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 }
 
 // SourceInfo is the per-file provenance the writer needs to mark a session
-// as up-to-date.
+// as up-to-date. CwdRaw and GitRemote come from the receiver's
+// per-session meta sidecar; both are empty for legacy sessions captured
+// before wire-level identity existed.
 type SourceInfo struct {
-	Project string
-	Path    string
-	Size    int64
-	Mtime   time.Time
+	Project   string
+	Path      string
+	Size      int64
+	Mtime     time.Time
+	CwdRaw    string
+	GitRemote string
 }
 
 func writeTurns(ctx context.Context, tx *sql.Tx,
