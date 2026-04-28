@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Spec describes one LaunchAgent. Zero values are sensible: an agent with
@@ -147,10 +148,46 @@ func Install(s Spec) error {
 	// bootout-then-bootstrap is the macOS-recommended replace pattern. bootout
 	// returns nonzero if nothing was loaded; ignored.
 	_ = exec.Command("launchctl", "bootout", target(s.Label)).Run()
-	if out, err := exec.Command("launchctl", "bootstrap", domain(), plistPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl bootstrap %s: %v: %s", s.Label, err, strings.TrimSpace(string(out)))
+	// bootout returns before launchd finishes tearing the job down, so an
+	// immediate bootstrap can fail with EIO ("Bootstrap failed: 5: Input/
+	// output error"). Wait for the service to actually disappear from the
+	// domain, then retry bootstrap on transient EIO.
+	waitForBootout(s.Label, 5*time.Second)
+	if err := bootstrapWithRetry(domain(), plistPath, s.Label); err != nil {
+		return err
 	}
 	return nil
+}
+
+func waitForBootout(label string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("launchctl", "print", target(label)).CombinedOutput()
+		if err != nil && strings.Contains(string(out), "Could not find service") {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func bootstrapWithRetry(dom, plistPath, label string) error {
+	var lastOut string
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		out, err := exec.Command("launchctl", "bootstrap", dom, plistPath).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastOut = strings.TrimSpace(string(out))
+		lastErr = err
+		// EIO during bootstrap usually means launchd is still tearing the
+		// previous instance down. Brief backoff and retry.
+		if !strings.Contains(lastOut, "Input/output error") {
+			break
+		}
+		time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
+	}
+	return fmt.Errorf("launchctl bootstrap %s: %v: %s", label, lastErr, lastOut)
 }
 
 // Kickstart asks launchd to spawn the job now even if no trigger has fired.
