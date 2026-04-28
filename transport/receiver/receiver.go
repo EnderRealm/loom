@@ -1,18 +1,18 @@
-// loom-receiver is the minimal ingest endpoint for agent session deltas.
+// Package receiver implements the server side of the loom transport. It
+// accepts POST /v1/ingest, appends each session's delta to a JSONL file
+// under <storage>/<agent>/<project>/<session_id>.jsonl, and tracks per-
+// session "next expected offset" so replays are idempotent.
 //
-// It accepts POST /v1/ingest with a wire.IngestRequest body, appends the
-// contained lines to <storage>/<agent>/<project>/<session_id>.jsonl, and
-// tracks per-session "next expected offset" so replays are idempotent.
-//
-// v1 is deliberately dumb: no database, no workers, no processing. Storage
-// is the landing zone for downstream jobs to read at their leisure.
-package main
+// v1 is deliberately dumb: no database, no workers, no processing.
+// Storage is the landing zone for downstream jobs (loom-summarize) to
+// read at their leisure.
+package receiver
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,52 +21,92 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"loom/internal/config"
 	"loom/transport/internal/wire"
 )
 
-var (
-	addr      = flag.String("addr", ":8765", "listen address")
-	storage   = flag.String("storage", "", "storage directory for ingested sessions (default: $LOOM_HOME/received or ~/.loom/received)")
-	authToken = flag.String("auth-token", "", "shared bearer token required on /v1/ingest (env: LOOM_RECEIVER_TOKEN)")
+// AgentLabel is the launchd label for the receiver. Exposed so the install
+// path can name its plist consistently.
+const AgentLabel = "com.loom.receiver"
 
-	// One global mutex for v1. Per-session locking is a later optimization.
-	mu sync.Mutex
-)
+// Options configures Run. Zero values follow flag defaults: bind :8765,
+// storage at $LOOM_HOME/received, auth from $LOOM_RECEIVER_TOKEN if Token
+// is empty.
+type Options struct {
+	Addr    string // listen address (default ":8765")
+	Storage string // storage root (default $LOOM_HOME/received)
+	Token   string // bearer token; empty means look at LOOM_RECEIVER_TOKEN
+}
 
-func main() {
-	flag.Parse()
-	if *authToken == "" {
-		*authToken = os.Getenv("LOOM_RECEIVER_TOKEN")
+// Run starts the receiver. Blocks until ctx is cancelled or the listener
+// fails. Cancellation gracefully shuts down the HTTP server.
+func Run(ctx context.Context, opts Options) error {
+	if opts.Addr == "" {
+		opts.Addr = ":8765"
 	}
-	if *storage == "" {
-		*storage = filepath.Join(config.Home(), "received")
+	if opts.Storage == "" {
+		opts.Storage = filepath.Join(config.Home(), "received")
 	}
-	if err := os.MkdirAll(*storage, 0o700); err != nil {
-		fmt.Fprintln(os.Stderr, "mkdir storage:", err)
-		os.Exit(1)
+	if opts.Token == "" {
+		opts.Token = os.Getenv("LOOM_RECEIVER_TOKEN")
+	}
+	if err := os.MkdirAll(opts.Storage, 0o700); err != nil {
+		return fmt.Errorf("mkdir storage: %w", err)
 	}
 
-	http.HandleFunc("/v1/ingest", handleIngest)
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	srv := &server{
+		storage:   opts.Storage,
+		authToken: opts.Token,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/ingest", srv.handleIngest)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
 	})
 
-	log.Printf("loom-receiver listening on %s storage=%s", *addr, *storage)
-	if err := http.ListenAndServe(*addr, nil); err != nil {
-		fmt.Fprintln(os.Stderr, "listen:", err)
-		os.Exit(1)
+	httpSrv := &http.Server{Addr: opts.Addr, Handler: mux}
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("loom-receiver listening on %s storage=%s", opts.Addr, opts.Storage)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+		return nil
+	case err := <-errCh:
+		return err
 	}
 }
 
-func handleIngest(w http.ResponseWriter, r *http.Request) {
+const shutdownTimeout = 5 * time.Second
+
+type server struct {
+	storage   string
+	authToken string
+
+	// One global mutex for v1. Per-session locking is a later
+	// optimization; under realistic load the writes are small and fast.
+	mu sync.Mutex
+}
+
+func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !checkAuth(r) {
+	if !s.checkAuth(r) {
 		log.Printf("reject 401 from=%s", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -94,10 +134,10 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	dir := filepath.Join(*storage, req.Agent, req.Project)
+	dir := filepath.Join(s.storage, req.Agent, req.Project)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		http.Error(w, "mkdir: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -111,10 +151,9 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Integrity check: verify the data file is at least as large as the offset
-	// claims. If it's shorter, the offset file is ahead of the data — a crash or
-	// manual cleanup left them inconsistent. Refuse the request rather than
-	// silently accepting a replay that covers a gap in the data file.
+	// Integrity check: refuse if the data file is shorter than the offset
+	// claims. Manual repair is preferable to silently accepting a replay
+	// that covers a gap.
 	if currentNext > 0 {
 		fi, statErr := os.Stat(sessionPath)
 		if statErr != nil && !os.IsNotExist(statErr) {
@@ -135,7 +174,6 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Replay: client is sending data we've already accepted.
 	if req.FromOffset < currentNext {
 		if req.ToOffset <= currentNext {
 			log.Printf("replay from=%s agent=%s project=%s session=%s (no-op, already at %d)",
@@ -152,7 +190,6 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gap: client has advanced past the server (server lost state?).
 	if req.FromOffset > currentNext {
 		log.Printf("reject 409 from=%s session=%s reason=gap expected=%d got=%d",
 			r.RemoteAddr, req.SessionID, currentNext, req.FromOffset)
@@ -163,9 +200,9 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In-order: append lines, then advance the offset.
-	// Order matters: if we crash between the two, the next retry will replay
-	// the same lines and we'd rather have duplicates than missing bytes.
+	// In-order: append lines, then advance the offset. If we crash
+	// between the two, the next retry replays the same lines and we'd
+	// rather have duplicates than missing bytes.
 	f, err := os.OpenFile(sessionPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		http.Error(w, "open session: "+err.Error(), http.StatusInternalServerError)
@@ -197,7 +234,15 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.IngestResponse{AcceptedToOffset: req.ToOffset})
 }
 
-// ---------- helpers ----------
+func (s *server) checkAuth(r *http.Request) bool {
+	if s.authToken == "" {
+		// No token configured — allow (useful for localhost dev).
+		return true
+	}
+	got := r.Header.Get("Authorization")
+	want := "Bearer " + s.authToken
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
 
 func readOffsetFile(path string) (int64, error) {
 	data, err := os.ReadFile(path)
@@ -220,16 +265,6 @@ func writeOffsetFile(path string, offset int64) error {
 		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-func checkAuth(r *http.Request) bool {
-	if *authToken == "" {
-		// No token configured — allow (useful for localhost dev).
-		return true
-	}
-	got := r.Header.Get("Authorization")
-	want := "Bearer " + *authToken
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func safeComponent(s string) bool {

@@ -12,22 +12,28 @@ var helpText = `loom - session ingest, summarization, and dashboard
 
 Usage: loom <command> [args]
 
+Daemons (run by launchd; manual invocation supported for debugging):
+  shipper daemon               Long-lived capture+ship loop on interval_minutes
+  shipper once                 Single capture+ship pass; idempotent
+  shipper health               Last sync, pending sessions, uncaptured bytes
+  receiver                     Run the ingest server (HTTP)
+
 Interactive:
   tui                          Open the dashboard
-  summarize [flags]            Fold received sessions into summaries.db
+  summarize [--watch|--rebuild]  Fold received sessions into summaries.db
 
 Lifecycle:
-  install <component>          Build and install a component
-                                 server | receiver | summarizer | shipper | tui
+  install <component>          Install a launchd agent for the running loom binary
+                                 server | receiver | summarizer | shipper
   uninstall                    Remove all loom launchd agents (state preserved)
-  status                       Show component status
+  status                       Show component status + sync health
 
 Global flags:
   -h, --help                   Show help
 
 Environment:
-  LOOM_HOME       state root (default: ~/.loom)
-  LOOM_BIN_DIR    binary install dir (default: ~/.local/bin)
+  LOOM_HOME             state root (default: ~/.loom)
+  LOOM_RECEIVER_TOKEN   shared bearer token (required for install receiver)
 `
 
 var Version = "dev"
@@ -68,8 +74,15 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		fmt.Println(helpText)
+	// Override only the root's help so subcommands keep cobra's built-in
+	// auto-generated help (which respects subcommand flags and Long text).
+	defaultHelp := rootCmd.HelpFunc()
+	rootCmd.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if c == rootCmd {
+			fmt.Println(helpText)
+			return
+		}
+		defaultHelp(c, args)
 	})
 }
 

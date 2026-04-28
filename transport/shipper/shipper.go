@@ -1,23 +1,20 @@
-// loom-shipper walks agent session files, stages their new bytes locally, and
-// ships staged deltas to the loom-receiver. Two-stage flow:
+// Package shipper drives the client side of the loom transport: it walks
+// agent session files, stages new bytes locally, and ships staged deltas to
+// the loom-receiver. Two-stage flow:
 //
 //  1. Capture: append new source bytes into ~/.loom/transport/staging so we
 //     survive the agent cleaning up its own session files.
 //  2. Ship: health-check the receiver, then post each staged session's delta
 //     with retry+backoff and classified error logging.
 //
-// Commands:
-//
-//	loom-shipper once              single pass, ship and exit
-//	loom-shipper install-agent     install a launchd user agent using config.interval_minutes
-//	loom-shipper uninstall-agent   remove the launchd user agent
-//	loom-shipper status            show launchctl state for the agent
-package main
+// Both Once (one tick) and Daemon (in-process ticker) live here; the cobra
+// surface in cmd/loom/cmd/shipper.go is a thin wrapper.
+package shipper
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +23,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,43 +37,6 @@ import (
 	"loom/transport/internal/wire"
 )
 
-func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	switch os.Args[1] {
-	case "once":
-		runOnce()
-	case "install-agent":
-		installAgent()
-	case "uninstall-agent":
-		uninstallAgent()
-	case "status":
-		statusAgent()
-	case "health":
-		printHealth()
-	case "-h", "--help", "help":
-		usage()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
-	}
-}
-
-func usage() {
-	fmt.Fprintf(os.Stderr, "loom-shipper - ship agent session deltas to the loom receiver\n\n")
-	fmt.Fprintf(os.Stderr, "usage:\n")
-	fmt.Fprintf(os.Stderr, "  loom-shipper once              ship any new session bytes and exit\n")
-	fmt.Fprintf(os.Stderr, "  loom-shipper install-agent     install launchd user agent using interval_minutes from config\n")
-	fmt.Fprintf(os.Stderr, "  loom-shipper uninstall-agent   remove the launchd user agent\n")
-	fmt.Fprintf(os.Stderr, "  loom-shipper status            show launchctl state for the agent\n")
-	fmt.Fprintf(os.Stderr, "  loom-shipper health            show last-sync/pending-session state (from notify.state)\n\n")
-	fmt.Fprintf(os.Stderr, "config: %s\n", config.Path())
-	fmt.Fprintf(os.Stderr, "state:  %s\n", config.TransportDir())
-}
-
 // ---------- error classification ----------
 
 type errClass string
@@ -91,7 +50,6 @@ const (
 	classIO     errClass = "io"     // local file/cursor error
 )
 
-// httpError carries an HTTP status plus body snippet so classify() can bucket it.
 type httpError struct {
 	status int
 	body   string
@@ -118,7 +76,6 @@ func classify(err error) errClass {
 			return class4xx
 		}
 	}
-	// net errors: timeouts, connection refused, DNS, EOF mid-response.
 	var ne net.Error
 	if errors.As(err, &ne) {
 		return classNet
@@ -142,7 +99,7 @@ func isNetError(err error) bool {
 // ---------- once ----------
 
 type tickCounts struct {
-	captured      int // sessions with captured bytes this tick
+	captured      int
 	captureFailed int
 	shipped       int
 	skipped       int
@@ -174,7 +131,12 @@ func (t tickCounts) classBreakdown() string {
 	return " " + strings.Join(parts, " ")
 }
 
-func runOnce() {
+// Once executes one capture+ship pass. Acquires the file lock so a
+// concurrent Daemon and a manual `loom shipper once` don't race on
+// staging or cursors. Errors are logged but not returned: the caller is
+// the launchd job, and a non-zero exit there triggers KeepAlive respawn
+// which we don't want for a normal failed tick.
+func Once() {
 	if err := acquireLock(); err != nil {
 		fmt.Fprintln(os.Stderr, "another shipper is running, skipping")
 		return
@@ -182,7 +144,8 @@ func runOnce() {
 
 	cfg, err := config.Load()
 	if err != nil {
-		die(err)
+		log.Printf("fail stage=config err=%q", err)
+		return
 	}
 
 	if err := cursor.Migrate(); err != nil {
@@ -198,11 +161,8 @@ func runOnce() {
 	counts := tickCounts{}
 	now := time.Now().UTC()
 
-	// Capture always runs — local only, independent of receiver state.
 	capturePass(&counts)
 
-	// Health-check before touching the receiver. On failure, skip ship pass
-	// but still refresh pending set from staging so the notification is accurate.
 	healthErr := healthCheck(cfg)
 	var shipSummary string
 	if healthErr != nil {
@@ -217,9 +177,6 @@ func runOnce() {
 		})
 		shipSummary = "ship-skipped"
 	} else {
-		// Receiver is reachable — record the ping regardless of per-session ship
-		// outcomes. "Last successful sync" tracks connectivity, not whether every
-		// session shipped cleanly.
 		state.LastSuccessTS = now
 
 		shipPass(cfg, &counts)
@@ -227,7 +184,6 @@ func runOnce() {
 		shipSummary = fmt.Sprintf("shipped=%d skipped=%d failed=%d%s",
 			counts.shipped, counts.skipped, counts.failed, counts.classBreakdown())
 
-		// Any session failures? One notification covering them all.
 		if counts.failed > 0 {
 			maybeNotify(cfg, state, notify.Event{
 				Kind:    notify.KindShipFailed,
@@ -236,7 +192,6 @@ func runOnce() {
 				Now:     now,
 			})
 		} else if counts.captureFailed == 0 {
-			// Fully-clean tick: fire recovery if we were previously in a failure.
 			maybeNotify(cfg, state, notify.Event{
 				Kind:    notify.KindRecovered,
 				Title:   "loom-shipper: recovered",
@@ -246,7 +201,6 @@ func runOnce() {
 		}
 	}
 
-	// Local/capture errors are independent of the receiver — notify once if any.
 	if counts.captureFailed > 0 {
 		maybeNotify(cfg, state, notify.Event{
 			Kind:    notify.KindLocalError,
@@ -264,11 +218,44 @@ func runOnce() {
 		counts.captured, counts.captureFailed, shipSummary, len(state.PendingSessions))
 }
 
+// Daemon runs Once on a ticker driven by config.IntervalMinutes (or
+// DefaultIntervalMinutes when unset). Designed to run as a launchd
+// KeepAlive job so the kernel respawns us on crash; we sleep between
+// ticks ourselves rather than relying on launchd's StartInterval, which
+// dasd coalesces aggressively.
+//
+// Cancellable via SIGINT / SIGTERM through the supplied context.
+func Daemon(ctx context.Context) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	interval := cfg.IntervalMinutes
+	if interval <= 0 {
+		interval = config.DefaultIntervalMinutes
+	}
+	d := time.Duration(interval) * time.Minute
+	log.Printf("daemon starting interval=%s", d)
+
+	// Run once immediately so the agent gets fresh data on launchd's first
+	// spawn, then settle into the ticker cadence.
+	Once()
+
+	t := time.NewTicker(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("daemon shutdown requested")
+			return nil
+		case <-t.C:
+			Once()
+		}
+	}
+}
+
 // ---------- capture pass ----------
 
-// capturePass walks every registered adapter and appends new source bytes into
-// staging. Each agent's source cursor advances only after a successful append
-// so a crash mid-tick replays, not loses.
 func capturePass(counts *tickCounts) {
 	for _, ad := range source.Adapters() {
 		agent := ad.Agent()
@@ -317,9 +304,6 @@ func capturePass(counts *tickCounts) {
 
 // ---------- ship pass ----------
 
-// shipPass drains every staged session (across all agents on disk, not just the
-// registered ones — so a disabled adapter's leftovers still flush). Retries
-// each session up to 3 times with jittered backoff on retryable errors.
 func shipPass(cfg *config.Config, counts *tickCounts) {
 	agents, err := staging.AgentDirs()
 	if err != nil {
@@ -370,7 +354,6 @@ func shipOne(cfg *config.Config, e staging.Entry, counts *tickCounts) {
 	accepted, err := postIngestWithRetry(cfg, req, e)
 	if err != nil {
 		class := classify(err)
-		// 409 resync: correct cursor and move on, not counted as failure.
 		var resyncErr *wire.ResyncError
 		if errors.As(err, &resyncErr) {
 			log.Printf("resync agent=%s project=%s session=%s cursor=%d→%d (server expects %d: %s)",
@@ -398,8 +381,6 @@ func shipOne(cfg *config.Config, e staging.Entry, counts *tickCounts) {
 	counts.shipped++
 }
 
-// postIngestWithRetry makes up to 3 attempts with jittered backoff on net/5xx
-// errors. 4xx / 409 / io errors return immediately — retrying won't help.
 func postIngestWithRetry(cfg *config.Config, req wire.IngestRequest, e staging.Entry) (int64, error) {
 	backoffs := []time.Duration{0, 500 * time.Millisecond, 2 * time.Second}
 	var lastErr error
@@ -424,7 +405,6 @@ func postIngestWithRetry(cfg *config.Config, req wire.IngestRequest, e staging.E
 	return 0, lastErr
 }
 
-// jitter returns d scaled by a random factor in [0.7, 1.3].
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -475,10 +455,6 @@ func postIngest(cfg *config.Config, req wire.IngestRequest) (int64, error) {
 	return out.AcceptedToOffset, nil
 }
 
-// ---------- health check ----------
-
-// healthCheck issues a 2s GET /healthz. Any transport error, timeout, or
-// non-2xx response is treated as "receiver down".
 func healthCheck(cfg *config.Config) error {
 	url := strings.TrimRight(cfg.ServerURL, "/") + "/healthz"
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -496,8 +472,6 @@ func healthCheck(cfg *config.Config) error {
 
 // ---------- notifier helpers ----------
 
-// refreshPending rebuilds state.PendingSessions from on-disk cursors + staging
-// sizes. A session is pending iff ship_cursor < staging file size.
 func refreshPending(state *notify.State) {
 	pending := map[string]bool{}
 	agents, err := staging.AgentDirs()
@@ -513,7 +487,6 @@ func refreshPending(state *notify.State) {
 		for _, sid := range sessions {
 			seen[sid] = true
 		}
-		// Also include any staging entries that don't yet have a ship cursor.
 		entries, err := staging.List(agent)
 		if err != nil {
 			continue
@@ -522,7 +495,6 @@ func refreshPending(state *notify.State) {
 			seen[e.SessionID] = true
 		}
 		for sid := range seen {
-			// Find project for this session via staging.List result.
 			var ent *staging.Entry
 			for i := range entries {
 				if entries[i].SessionID == sid {
@@ -531,7 +503,6 @@ func refreshPending(state *notify.State) {
 				}
 			}
 			if ent == nil {
-				// Cursor exists but staging gone — treat as not-pending.
 				continue
 			}
 			size, err := staging.Size(agent, ent.Project, sid)
@@ -580,6 +551,10 @@ func pluralS(n int) string {
 
 // ---------- lock ----------
 
+// AgentLabel is the launchd label for the shipper. Exposed so the install
+// path can name its plist consistently with what Daemon expects.
+const AgentLabel = "com.loom.shipper"
+
 func lockPath() string {
 	return filepath.Join(config.TransportDir(), "shipper.lock")
 }
@@ -601,166 +576,43 @@ func acquireLock() error {
 	return nil
 }
 
-// ---------- launchd agent management ----------
+// ---------- health printer ----------
 
-const agentLabel = "com.loom.shipper"
-
-func agentPlistPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "Library", "LaunchAgents", agentLabel+".plist"), nil
-}
-
-// launchctlDomain returns the gui/<uid> domain target for the current user.
-// gui/ is the standard for user-facing LaunchAgents; user/ would cover SSH-only
-// sessions but loom is meant for the user's own interactive Mac.
-func launchctlDomain() string {
-	return fmt.Sprintf("gui/%d", os.Getuid())
-}
-
-func launchctlTarget() string {
-	return launchctlDomain() + "/" + agentLabel
-}
-
-func installAgent() {
-	cfg, err := config.Load()
-	if err != nil {
-		die(err)
-	}
-	self, err := os.Executable()
-	if err != nil {
-		die(err)
-	}
-	if rp, err := filepath.EvalSymlinks(self); err == nil {
-		self = rp
-	}
-
-	plistPath, err := agentPlistPath()
-	if err != nil {
-		die(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
-		die(err)
-	}
-	if err := os.MkdirAll(config.TransportDir(), 0o700); err != nil {
-		die(err)
-	}
-
-	interval := cfg.IntervalMinutes
-	if interval <= 0 {
-		interval = config.DefaultIntervalMinutes
-	}
-	intervalSeconds := interval * 60
-	logPath := filepath.Join(config.TransportDir(), "shipper.log")
-
-	// Bake LOOM_HOME into the plist only if the user set it explicitly. Otherwise
-	// let the agent fall back to ~/.loom naturally at runtime.
-	loomHome := os.Getenv("LOOM_HOME")
-
-	plist := buildPlist(self, intervalSeconds, logPath, loomHome)
-	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
-		die(err)
-	}
-
-	// Safety net: validate the plist before touching launchd. If this fails the
-	// generator has a bug — delete the junk file so we don't poison ~/Library.
-	if out, err := exec.Command("plutil", "-lint", plistPath).CombinedOutput(); err != nil {
-		_ = os.Remove(plistPath)
-		die(fmt.Errorf("plutil -lint: %v: %s", err, strings.TrimSpace(string(out))))
-	}
-
-	// Idempotency: bootout any previously-loaded instance before bootstrapping
-	// the new one. bootout errors if nothing was loaded — intentionally ignored.
-	_ = exec.Command("launchctl", "bootout", launchctlTarget()).Run()
-
-	if out, err := exec.Command("launchctl", "bootstrap", launchctlDomain(), plistPath).CombinedOutput(); err != nil {
-		die(fmt.Errorf("launchctl bootstrap: %v: %s", err, strings.TrimSpace(string(out))))
-	}
-
-	fmt.Printf("installed launchd agent:\n")
-	fmt.Printf("  label:    %s\n", agentLabel)
-	fmt.Printf("  plist:    %s\n", plistPath)
-	fmt.Printf("  interval: %ds (%d min)\n", intervalSeconds, interval)
-	fmt.Printf("  log:      %s\n", logPath)
-}
-
-func uninstallAgent() {
-	plistPath, err := agentPlistPath()
-	if err != nil {
-		die(err)
-	}
-
-	// bootout first. Tolerate "not loaded" errors — launchctl's exit codes are
-	// poorly documented, so filter on message fragments.
-	out, err := exec.Command("launchctl", "bootout", launchctlTarget()).CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" &&
-			!strings.Contains(msg, "No such process") &&
-			!strings.Contains(msg, "Could not find service") &&
-			!strings.Contains(msg, "not find specified service") {
-			fmt.Fprintf(os.Stderr, "launchctl bootout: %s\n", msg)
-		}
-	}
-
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-		die(err)
-	}
-
-	fmt.Println("removed loom-shipper launchd agent")
-}
-
-func statusAgent() {
-	out, err := exec.Command("launchctl", "print", launchctlTarget()).CombinedOutput()
-	if err != nil {
-		fmt.Println("loom-shipper agent is not loaded")
-		return
-	}
-	fmt.Print(string(out))
-}
-
-// printHealth surfaces the same info carried in failure notifications: when
-// the shipper last succeeded, how many sessions are unsynced, and which kind
-// of failure (if any) is currently outstanding. install.sh --status calls this.
-func printHealth() {
+// PrintHealth surfaces the same info carried in failure notifications: when
+// the shipper last succeeded, how many sessions are unsynced, and which
+// kind of failure (if any) is currently outstanding. `loom status` calls it.
+func PrintHealth(w io.Writer) error {
 	state, err := notify.LoadState()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error reading notify state:", err)
-		os.Exit(1)
+		return fmt.Errorf("read notify state: %w", err)
 	}
 	now := time.Now().UTC()
 
 	if state.LastSuccessTS.IsZero() {
-		fmt.Println("  last successful sync: never")
+		fmt.Fprintln(w, "  last successful sync: never")
 	} else {
-		fmt.Printf("  last successful sync: %s (%s ago)\n",
+		fmt.Fprintf(w, "  last successful sync: %s (%s ago)\n",
 			state.LastSuccessTS.Local().Format("2006-01-02 15:04:05 MST"),
 			notify.FormatDuration(now.Sub(state.LastSuccessTS)))
 	}
 
 	pending := len(state.PendingSessions)
 	if pending == 0 {
-		fmt.Println("  unshipped sessions:   0")
+		fmt.Fprintln(w, "  unshipped sessions:   0")
 	} else {
-		fmt.Printf("  unshipped sessions:   %d\n", pending)
-		printPendingByProject(state.PendingSessions)
+		fmt.Fprintf(w, "  unshipped sessions:   %d\n", pending)
+		printPendingByProject(w, state.PendingSessions)
 	}
 
-	// Uncaptured: source files with new bytes the capture pass hasn't seen yet.
-	// Different from "unshipped" (staged but not sent) — this is "on disk but not
-	// in the pipeline at all", which is what the user cares about when asking
-	// "is my current session safe?"
 	uncap := countUncapturedSessions()
 	if len(uncap) == 0 {
-		fmt.Println("  uncaptured sessions:  0")
+		fmt.Fprintln(w, "  uncaptured sessions:  0")
 	} else {
 		total := 0
 		for _, c := range uncap {
 			total += c.sessions
 		}
-		fmt.Printf("  uncaptured sessions:  %d (%s not yet captured)\n",
+		fmt.Fprintf(w, "  uncaptured sessions:  %d (%s not yet captured)\n",
 			total, humanBytes(sumBytes(uncap)))
 		sort.Slice(uncap, func(i, j int) bool {
 			if uncap[i].agent != uncap[j].agent {
@@ -769,28 +621,28 @@ func printHealth() {
 			return uncap[i].project < uncap[j].project
 		})
 		for _, c := range uncap {
-			fmt.Printf("    %s / %s: %d session%s, %s\n",
+			fmt.Fprintf(w, "    %s / %s: %d session%s, %s\n",
 				c.agent, c.project, c.sessions, pluralS(c.sessions), humanBytes(c.bytes))
 		}
 	}
 
 	if state.LastNotifiedTS.IsZero() {
-		fmt.Println("  last notification:    none")
+		fmt.Fprintln(w, "  last notification:    none")
 	} else {
-		fmt.Printf("  last notification:    %s at %s (%s ago)\n",
+		fmt.Fprintf(w, "  last notification:    %s at %s (%s ago)\n",
 			state.LastNotifiedKind,
 			state.LastNotifiedTS.Local().Format("2006-01-02 15:04:05 MST"),
 			notify.FormatDuration(now.Sub(state.LastNotifiedTS)))
 	}
 
 	if state.FailureActive {
-		fmt.Println("  failure active:       yes (next healthy tick will notify recovered)")
+		fmt.Fprintln(w, "  failure active:       yes (next healthy tick will notify recovered)")
 	} else {
-		fmt.Println("  failure active:       no")
+		fmt.Fprintln(w, "  failure active:       no")
 	}
+	return nil
 }
 
-// uncapturedBucket is one row of the uncaptured-by-project breakdown.
 type uncapturedBucket struct {
 	agent    string
 	project  string
@@ -798,11 +650,6 @@ type uncapturedBucket struct {
 	bytes    int64
 }
 
-// countUncapturedSessions enumerates every source session across registered
-// adapters and returns one bucket per (agent, project) with uncaptured bytes.
-// A session is "uncaptured" when its source file has more bytes than the
-// source cursor has recorded — i.e. the next tick's capture pass would pick
-// them up if it ran.
 func countUncapturedSessions() []uncapturedBucket {
 	byKey := map[string]*uncapturedBucket{}
 	for _, ad := range source.Adapters() {
@@ -863,12 +710,7 @@ func humanBytes(n int64) string {
 	}
 }
 
-// printPendingByProject prints a "<agent> / <project>: <n>" row per distinct
-// (agent, project) pair, sorted and right-aligned on the count. PendingSessions
-// only carries agent+session_id; we recover project by scanning staging. A
-// session whose staging file is gone (e.g. manually cleaned) shows up under
-// "(unknown project)" so the total still adds up.
-func printPendingByProject(pending map[string]bool) {
+func printPendingByProject(w io.Writer, pending map[string]bool) {
 	type bucket struct {
 		agent, project string
 	}
@@ -881,8 +723,6 @@ func printPendingByProject(pending map[string]bool) {
 		}
 	}
 
-	// agent+session_id → project, built once per agent so we do at most one
-	// staging.List() call per agent regardless of pending count.
 	projectOf := map[string]string{}
 	for agent := range agents {
 		entries, err := staging.List(agent)
@@ -920,65 +760,6 @@ func printPendingByProject(pending map[string]bool) {
 	})
 
 	for _, b := range keys {
-		fmt.Printf("    %s / %s: %d\n", b.agent, b.project, counts[b])
+		fmt.Fprintf(w, "    %s / %s: %d\n", b.agent, b.project, counts[b])
 	}
-}
-
-// buildPlist generates the LaunchAgent plist XML. Paths are XML-escaped so
-// weird characters (though unlikely in a binary path) don't corrupt the file.
-func buildPlist(binaryPath string, intervalSeconds int, logPath, loomHome string) string {
-	binE := xmlEscape(binaryPath)
-	logE := xmlEscape(logPath)
-
-	envBlock := ""
-	if loomHome != "" {
-		envBlock = fmt.Sprintf(`
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>LOOM_HOME</key>
-        <string>%s</string>
-    </dict>`, xmlEscape(loomHome))
-	}
-
-	// ProcessType=Background + LowPriorityIO are the two knobs that keep
-	// StartInterval firing reliably on macOS 13+. Without them, the timer
-	// coalescer and Background Task Management layer can stretch a 10-minute
-	// interval into 24h+ on a loaded system.
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>%s</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>%s</string>
-        <string>once</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>%d</integer>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>LowPriorityIO</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>%s</string>
-    <key>StandardErrorPath</key>
-    <string>%s</string>%s
-</dict>
-</plist>
-`, agentLabel, binE, intervalSeconds, logE, logE, envBlock)
-}
-
-func xmlEscape(s string) string {
-	var buf bytes.Buffer
-	_ = xml.EscapeText(&buf, []byte(s))
-	return buf.String()
-}
-
-func die(err error) {
-	fmt.Fprintln(os.Stderr, "error:", err)
-	os.Exit(1)
 }
