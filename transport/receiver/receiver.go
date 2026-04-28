@@ -235,15 +235,24 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// legacy slug-only shape and downstream readers fall back to the
 	// directory name. Failures here don't block ingest — the raw bytes
 	// are already on disk.
+	identity := "none"
 	if req.ProjectIdentity != nil && *req.ProjectIdentity != (wire.ProjectIdentity{}) {
 		metaPath := filepath.Join(dir, req.SessionID+".meta.json")
 		if err := writeProjectIdentity(metaPath, req.ProjectIdentity); err != nil {
 			log.Printf("warn from=%s session=%s err=%q (write meta)", r.RemoteAddr, req.SessionID, err)
 		}
+		switch {
+		case req.ProjectIdentity.GitRemote != "":
+			identity = "remote=" + req.ProjectIdentity.GitRemote
+		case req.ProjectIdentity.Cwd != "":
+			identity = "cwd=" + req.ProjectIdentity.Cwd
+		default:
+			identity = "slug-only"
+		}
 	}
 
-	log.Printf("ingest from=%s agent=%s project=%s session=%s offset=%d→%d lines=%d",
-		r.RemoteAddr, req.Agent, req.Project, req.SessionID, req.FromOffset, req.ToOffset, len(req.Lines))
+	log.Printf("ingest from=%s agent=%s project=%s session=%s offset=%d→%d lines=%d identity=%s",
+		r.RemoteAddr, req.Agent, req.Project, req.SessionID, req.FromOffset, req.ToOffset, len(req.Lines), identity)
 	writeJSON(w, wire.IngestResponse{AcceptedToOffset: req.ToOffset})
 }
 
