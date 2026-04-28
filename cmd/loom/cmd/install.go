@@ -5,12 +5,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"loom/internal/config"
 	"loom/internal/launchd"
+	"loom/internal/updater"
 	"loom/transport/receiver"
 	"loom/transport/shipper"
 )
@@ -22,8 +24,8 @@ const (
 var installCmd = &cobra.Command{
 	Use:       "install <component>",
 	Short:     "Install a loom launchd agent",
-	Long:      "Components: server | receiver | summarizer | shipper. Each writes a launchd plist that runs the current loom binary.",
-	ValidArgs: []string{"server", "receiver", "summarizer", "shipper"},
+	Long:      "Components: server | receiver | summarizer | shipper | updater. Each writes a launchd plist that runs the current loom binary.",
+	ValidArgs: []string{"server", "receiver", "summarizer", "shipper", "updater"},
 	Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		switch args[0] {
@@ -41,6 +43,8 @@ var installCmd = &cobra.Command{
 			return installSummarizer()
 		case "shipper":
 			return installShipper()
+		case "updater":
+			return installUpdater()
 		default:
 			return fmt.Errorf("unknown component %q", args[0])
 		}
@@ -194,6 +198,88 @@ func installSummarizer() error {
 	fmt.Printf("  binary:   %s\n", bin)
 	fmt.Printf("  log:      %s\n", logPath)
 	return nil
+}
+
+// installUpdater installs the self-managing auto-updater. The updater
+// polls the source repo's origin/main on a tunable interval and, when
+// new commits land, pulls + rebuilds + kickstarts every other loom
+// agent (itself last). LOOM_SOURCE pins the source-checkout location;
+// LOOM_UPDATER_INTERVAL_MINUTES tunes the poll cadence.
+func installUpdater() error {
+	bin, err := loomBinary()
+	if err != nil {
+		return err
+	}
+	src, err := updater.SourceDir()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(src, ".git")); err != nil {
+		return fmt.Errorf("source dir %s is not a git checkout — set LOOM_SOURCE before installing", src)
+	}
+	logPath := updater.LogPath()
+
+	env := map[string]string{
+		"LOOM_HOME":                     config.Home(),
+		"LOOM_SOURCE":                   src,
+		"LOOM_UPDATER_INTERVAL_MINUTES": strconv.Itoa(updater.DefaultIntervalMinutes),
+		// PATH for git + go discovery; launchd's stripped PATH otherwise
+		// won't find the toolchain the rebuild step needs.
+		"PATH": canonicalPath(),
+	}
+
+	spec := launchd.Spec{
+		Label:                   updater.AgentLabel,
+		Program:                 bin,
+		Args:                    []string{"updater", "daemon"},
+		LogPath:                 logPath,
+		Env:                     env,
+		KeepAlive:               true,
+		RunAtLoad:               true,
+		ThrottleIntervalSeconds: 30,
+	}
+	if err := launchd.Install(spec); err != nil {
+		return err
+	}
+	fmt.Printf("installed updater:\n")
+	fmt.Printf("  label:    %s\n", spec.Label)
+	fmt.Printf("  binary:   %s\n", bin)
+	fmt.Printf("  source:   %s\n", src)
+	fmt.Printf("  interval: %d min\n", updater.DefaultIntervalMinutes)
+	fmt.Printf("  log:      %s\n", logPath)
+	return nil
+}
+
+// canonicalPath returns a PATH that includes the common Homebrew and
+// Go install locations the updater needs. launchd's default PATH is
+// /usr/bin:/bin:/usr/sbin:/sbin which doesn't include Homebrew's
+// /opt/homebrew/bin or the user's ~/go/bin.
+func canonicalPath() string {
+	parts := []string{
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
+		"/usr/local/bin",
+		"/usr/local/sbin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		parts = append([]string{filepath.Join(home, ".local", "bin"), filepath.Join(home, "go", "bin")}, parts...)
+	}
+	return joinPath(parts)
+}
+
+func joinPath(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ":"
+		}
+		out += p
+	}
+	return out
 }
 
 // waitForHealthz polls the URL until 2xx or timeout. Used during install

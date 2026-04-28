@@ -41,15 +41,35 @@ loom/
   knowledge/                           # eval fixtures only — durable store is ~/.loom/knowledge/
 ```
 
-Everything is driven by the unified `loom` binary. Build it once and use the launchd installers it ships with.
+Everything is driven by the unified `loom` binary. Two install paths:
+
+### Option A — Homebrew (no Go toolchain required)
 
 ```sh
-go install loom/cmd/loom        # or `go build -o ~/.local/bin/loom ./cmd/loom`
+brew tap EnderRealm/loom
+brew install loom
+```
 
+Updates: `brew upgrade loom`. Tap details and release publishing flow live in [`Formula/README.md`](./Formula/README.md).
+
+### Option B — Source checkout (recommended for development and auto-update)
+
+```sh
+git clone git@github.com:EnderRealm/loom.git ~/code/loom
+cd ~/code/loom
+go install ./cmd/loom        # or `go build -o ~/.local/bin/loom ./cmd/loom`
+```
+
+Updates: pull and rebuild manually, or `loom install updater` to have a daemon do it for you (see "Auto-update" below).
+
+### Common: install launchd agents
+
+```sh
 loom install server             # receiver + summarizer
 loom install receiver           # receiver only
 loom install summarizer         # summarizer only
 loom install shipper            # shipper (client side)
+loom install updater            # source checkouts only — see Auto-update
 loom uninstall                  # remove all loom launchd agents
 loom status                     # show state of all installed components
 loom tui                        # open the dashboard
@@ -57,7 +77,7 @@ loom tui                        # open the dashboard
 
 `install.sh` is preserved as a thin forwarder for muscle memory: each `--install-X` flag does `go build -o $LOOM_BIN_DIR/loom ./cmd/loom` then `loom install X`. Either entry point works; new docs prefer the `loom` binary directly.
 
-State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives wherever your `go install` puts it (`$LOOM_BIN_DIR` for the forwarder, default `~/.local/bin`).
+State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives wherever your installer put it (`/opt/homebrew/bin/loom` for Homebrew, `~/.local/bin/loom` for `go install`).
 
 ```sh
 LOOM_BIN_DIR=/usr/local/bin ./install.sh --install-shipper
@@ -65,6 +85,24 @@ LOOM_HOME=/srv/loom         loom install receiver
 ```
 
 > If `~/.local/bin` isn't in your `$PATH`, add it to your shell rc file. launchd runs the binary by absolute path regardless, so this is purely for interactive use.
+
+### Auto-update
+
+The `loom updater` daemon polls `origin/main` on the source checkout, pulls + rebuilds + kickstarts every loom agent (itself last) when new commits land. Source checkouts only — Homebrew users get updates via `brew upgrade`.
+
+```sh
+loom install updater
+tail -f ~/.loom/updater.log
+```
+
+Defaults: 5-minute poll, source at `~/code/loom`. Override via plist environment:
+
+| env var                          | default            | purpose                                   |
+| -------------------------------- | ------------------ | ----------------------------------------- |
+| `LOOM_SOURCE`                    | `~/code/loom`      | git checkout the updater pulls + rebuilds |
+| `LOOM_UPDATER_INTERVAL_MINUTES`  | `5`                | poll cadence                              |
+
+The reusable pattern (Go binary on launchd that updates itself from git push) is documented in [`docs/auto-update-pattern.md`](./docs/auto-update-pattern.md).
 
 ---
 

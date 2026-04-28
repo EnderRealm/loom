@@ -11,6 +11,7 @@ import (
 
 	"loom/internal/config"
 	"loom/internal/launchd"
+	"loom/internal/updater"
 	"loom/transport/receiver"
 	"loom/transport/shipper"
 )
@@ -47,6 +48,12 @@ var statusCmd = &cobra.Command{
 			label:    shipper.AgentLabel,
 			logPath:  filepath.Join(config.TransportDir(), "shipper.log"),
 			interval: shipperInterval,
+		})
+		printAgent(agentReport{
+			human:    "loom-updater",
+			label:    updater.AgentLabel,
+			logPath:  updater.LogPath(),
+			interval: fmt.Sprintf("%dm (git poll)", updater.DefaultIntervalMinutes),
 		})
 		fmt.Println("=== sync health ===")
 		if err := shipper.PrintHealth(os.Stdout); err != nil {
