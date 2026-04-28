@@ -1,0 +1,7 @@
+{"timestamp":"2026-04-01T10:00:00.000Z","type":"session_meta","payload":{"id":"sess-abc","timestamp":"2026-04-01T10:00:00.000Z","cwd":"/tmp/p","cli_version":"0.1.0"}}
+{"timestamp":"2026-04-01T10:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/tmp/p","model":"gpt-5.4"}}
+{"timestamp":"2026-04-01T10:00:02.000Z","type":"response_item","payload":{"type":"future_response_kind","role":"assistant"}}
+{"timestamp":"2026-04-01T10:00:03.000Z","type":"response_item","payload":{"type":"future_response_kind","role":"assistant"}}
+{"timestamp":"2026-04-01T10:00:04.000Z","type":"event_msg","payload":{"type":"future_event_kind","turn_id":"t1"}}
+{"timestamp":"2026-04-01T10:00:05.000Z","type":"event_msg","payload":{"type":"future_event_kind","turn_id":"t1"}}
+{"timestamp":"2026-04-01T10:00:06.000Z","type":"future_top_level_kind","payload":{}}

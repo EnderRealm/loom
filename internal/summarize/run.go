@@ -5,6 +5,7 @@ package summarize
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -27,12 +28,26 @@ type Options struct {
 	Force       bool
 	Verbose     bool
 	Watch       bool
+	Rebuild     bool
 	Interval    time.Duration
 }
 
 func Run(opts Options) error {
+	if opts.Rebuild {
+		if err := os.Remove(opts.DBPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", opts.DBPath, err)
+		}
+		// Best-effort: WAL/SHM siblings live alongside the DB file. SQLite
+		// recreates them; leftover files from the old schema would be ignored
+		// but cluttering them up is sloppy.
+		_ = os.Remove(opts.DBPath + "-wal")
+		_ = os.Remove(opts.DBPath + "-shm")
+	}
 	st, err := store.Open(opts.DBPath)
 	if err != nil {
+		if errors.Is(err, store.ErrSchemaOutdated) {
+			return fmt.Errorf("%w\n\n  re-run with --rebuild to drop and re-fold from %s", err, opts.ReceivedDir)
+		}
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer st.Close()
@@ -111,7 +126,7 @@ func walkAgent(ctx context.Context, st *store.Store, agent summary.Agent,
 			Mtime:   info.ModTime(),
 		}
 		if !force {
-			current, err := st.SessionAlreadyCurrent(sessionID,
+			current, err := st.SessionAlreadyCurrent(string(agent), sessionID,
 				source.Size, source.Mtime)
 			if err != nil {
 				log.Printf("check %s: %v", path, err)

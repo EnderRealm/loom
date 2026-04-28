@@ -165,7 +165,7 @@ func loadToolStats(db *sql.DB, d *SummaryData) error {
 		       SUM(tc.is_error) AS errors,
 		       CAST(ROUND(AVG(tc.duration_ms)) AS INTEGER) AS avg_ms
 		FROM tool_calls tc
-		JOIN sessions s ON s.session_id = tc.session_id
+		JOIN sessions s ON s.agent = tc.agent AND s.session_id = tc.session_id
 		WHERE s.project IS NOT NULL
 		GROUP BY s.project, kind
 		ORDER BY s.project, calls DESC
@@ -203,7 +203,7 @@ func loadCompactions(db *sql.DB, d *SummaryData) error {
 	rows, err := db.Query(`
 		SELECT s.project, COUNT(*) AS n
 		FROM compactions c
-		JOIN sessions s ON s.session_id = c.session_id
+		JOIN sessions s ON s.agent = c.agent AND s.session_id = c.session_id
 		WHERE s.project IS NOT NULL
 		GROUP BY s.project
 	`)

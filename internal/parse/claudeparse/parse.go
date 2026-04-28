@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,12 +99,13 @@ func newState(s *summary.SessionSummary) *state {
 
 func (st *state) feed(line []byte) error {
 	var probe struct {
-		Type string `json:"type"`
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
 	}
 	if err := json.Unmarshal(line, &probe); err != nil {
 		// Receiver-level corruption (interleaved writes, truncated lines)
 		// is expected at scale. Surface it as drift rather than aborting.
-		st.bumpUnknown(MalformedLineMarker, "")
+		st.bumpUnknown(MalformedLineMarker, "", time.Time{})
 		return nil
 	}
 	switch probe.Type {
@@ -132,7 +134,7 @@ func (st *state) feed(line []byte) error {
 	case "pr-link":
 		return st.handlePRLink(line)
 	default:
-		st.bumpUnknown(probe.Type, "")
+		st.bumpUnknown(probe.Type, "", parseTime(probe.Timestamp))
 		return nil
 	}
 }
@@ -297,7 +299,7 @@ func (st *state) handleSystem(line []byte) error {
 		"local_command", "away_summary":
 		// Recognized but currently no-op at the summary level.
 	default:
-		st.bumpUnknown("system", rec.Subtype)
+		st.bumpUnknown("system", rec.Subtype, ts)
 	}
 	return nil
 }
@@ -325,7 +327,7 @@ func (st *state) handleAttachment(line []byte) error {
 		// All recognized; no-op at summary level for now. Could be wired
 		// up later (e.g. plan_mode transitions are interesting).
 	default:
-		st.bumpUnknown("attachment", probe.Attachment.Type)
+		st.bumpUnknown("attachment", probe.Attachment.Type, parseTime(probe.Timestamp))
 	}
 	return nil
 }
@@ -504,15 +506,21 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 	}
 }
 
-func (st *state) bumpUnknown(typ, sub string) {
+// bumpUnknown records a Claude record whose discriminator is not in the
+// catalog. FirstSeen comes from the record's own timestamp so re-summarizing
+// the same input produces identical output. Zero ts is acceptable for cases
+// (malformed lines, top-level probe miss) where no timestamp is available.
+func (st *state) bumpUnknown(typ, sub string, ts time.Time) {
 	key := typ + "::" + sub
 	u := st.unknown[key]
 	if u == nil {
 		u = &summary.UnknownRecord{
-			Agent:     summary.AgentClaude,
-			Type:      typ,
-			Subtype:   sub,
-			FirstSeen: time.Now().UTC(),
+			Agent:   summary.AgentClaude,
+			Type:    typ,
+			Subtype: sub,
+		}
+		if !ts.IsZero() {
+			u.FirstSeen = ts.UTC()
 		}
 		st.unknown[key] = u
 	}
@@ -520,8 +528,13 @@ func (st *state) bumpUnknown(typ, sub string) {
 }
 
 func (st *state) finalize() {
-	for _, u := range st.unknown {
-		st.s.Unknown = append(st.s.Unknown, *u)
+	keys := make([]string, 0, len(st.unknown))
+	for k := range st.unknown {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		st.s.Unknown = append(st.s.Unknown, *st.unknown[k])
 	}
 	// Backfill tool-call durations from progress streams when a result
 	// carrier didn't land.

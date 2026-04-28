@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ func Parse(r io.Reader) (*summary.SessionSummary, error) {
 			return nil, err
 		}
 	}
+	st.finalize()
 	return s, nil
 }
 
@@ -80,7 +82,7 @@ const MalformedLineMarker = "__malformed__"
 func (st *state) feed(line []byte) error {
 	var env envelope
 	if err := json.Unmarshal(line, &env); err != nil {
-		st.bumpUnknown(MalformedLineMarker, "")
+		st.bumpUnknown(MalformedLineMarker, "", time.Time{})
 		return nil
 	}
 	ts := parseTime(env.Timestamp)
@@ -102,7 +104,7 @@ func (st *state) feed(line []byte) error {
 		})
 		return nil
 	default:
-		st.bumpUnknown(env.Type, "")
+		st.bumpUnknown(env.Type, "", ts)
 		return nil
 	}
 }
@@ -237,7 +239,7 @@ func (st *state) handleResponseItem(env envelope, ts time.Time) error {
 		}
 		st.s.ToolCalls = append(st.s.ToolCalls, tc)
 	default:
-		st.bumpUnknown("response_item", p.Type)
+		st.bumpUnknown("response_item", p.Type, ts)
 	}
 	return nil
 }
@@ -317,7 +319,7 @@ func (st *state) handleEventMsg(env envelope, ts time.Time) error {
 			t.ReasoningChars += len(p.Message)
 		}
 	default:
-		st.bumpUnknown("event_msg", p.Type)
+		st.bumpUnknown("event_msg", p.Type, ts)
 	}
 	return nil
 }
@@ -478,20 +480,37 @@ func (st *state) touchTimeRange(t time.Time) {
 	}
 }
 
-func (st *state) bumpUnknown(typ, sub string) {
+// bumpUnknown records a Codex record whose discriminator is not in the catalog.
+// Counts accumulate in the map; finalize() materializes the slice exactly once
+// so re-summarizing is reproducible. FirstSeen comes from the record's own
+// timestamp (zero is acceptable: malformed lines have no timestamp to honor).
+func (st *state) bumpUnknown(typ, sub string, ts time.Time) {
 	key := typ + "::" + sub
 	u := st.unknown[key]
 	if u == nil {
 		u = &summary.UnknownRecord{
-			Agent:     summary.AgentCodex,
-			Type:      typ,
-			Subtype:   sub,
-			FirstSeen: time.Now().UTC(),
+			Agent:   summary.AgentCodex,
+			Type:    typ,
+			Subtype: sub,
+		}
+		if !ts.IsZero() {
+			u.FirstSeen = ts.UTC()
 		}
 		st.unknown[key] = u
-		st.s.Unknown = append(st.s.Unknown, *u)
-	} else {
-		u.Count++
+	}
+	u.Count++
+}
+
+// finalize materializes the unknown-record map into st.s.Unknown in stable
+// (Type, Subtype) order so two runs over the same input produce equal output.
+func (st *state) finalize() {
+	keys := make([]string, 0, len(st.unknown))
+	for k := range st.unknown {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		st.s.Unknown = append(st.s.Unknown, *st.unknown[k])
 	}
 }
 

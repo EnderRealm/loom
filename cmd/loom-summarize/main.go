@@ -29,6 +29,7 @@ func main() {
 		force    = flag.Bool("force", false, "re-summarize even if unchanged")
 		verbose  = flag.Bool("v", false, "verbose progress")
 		watch    = flag.Bool("watch", false, "stay running and re-sweep on a ticker")
+		rebuild  = flag.Bool("rebuild", false, "drop the summary DB and rebuild from received/")
 		interval = flag.Duration("interval", 30*time.Second,
 			"watch-mode sweep interval")
 	)
@@ -40,6 +41,7 @@ func main() {
 		Force:       *force,
 		Verbose:     *verbose,
 		Watch:       *watch,
+		Rebuild:     *rebuild,
 		Interval:    *interval,
 	}); err != nil {
 		log.Fatal(err)
