@@ -21,9 +21,9 @@ class Loom < Formula
 
   # Bump per release. The release tarball is the standard GitHub
   # archive; sha256 is `shasum -a 256` of that tarball.
-  version "1.0.0"
-  url "https://github.com/EnderRealm/loom/archive/refs/tags/v#1.0.0.tar.gz"
-  sha256 "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5"
+  version "1.0.1"
+  url "https://github.com/EnderRealm/loom/archive/refs/tags/v#{version}.tar.gz"
+  sha256 "REPLACE_WITH_RELEASE_SHA256"
 
   depends_on "go" => :build
 

@@ -6,18 +6,26 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-04-28 — Distribution + auto-update
+
 ### Added
 
 - `loom updater daemon` self-managing auto-updater. Polls
   `origin/main` on an interval, pulls + rebuilds + kickstarts every
   loom agent (itself last) when new commits land. Mirrors the
   Ghostwheel deployer pattern.
-- Homebrew formula and tap instructions for installing the loom
-  binary without a Go toolchain.
+- Homebrew formula (`Formula/loom.rb`) and tap publish flow
+  (`Formula/README.md`) so users can install the loom binary without a
+  Go toolchain.
 - `docs/auto-update-pattern.md` — reusable template for
   Go-binary-on-launchd apps that want the same poll-rebuild-kickstart
   loop.
 - `CHANGELOG.md` (this file).
+
+### Fixed
+
+- `Formula/loom.rb` URL interpolation: `v#{version}` (Ruby) instead of
+  the literal `v#…` that an earlier hand-edit left behind.
 
 ## [0.4.0] — 2026-04-28 — Wire-level project identity
 
