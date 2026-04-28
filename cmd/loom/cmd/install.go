@@ -105,6 +105,13 @@ func installShipper() error {
 	if err := launchd.Install(spec); err != nil {
 		return err
 	}
+	// bootstrap honors RunAtLoad on initial load, but a re-install (bootout +
+	// bootstrap of an already-known label) can leave the job in pended/
+	// speculative state. Kickstart forces an immediate spawn so a rebuild +
+	// reinstall doesn't silently halt shipping until the next login.
+	if err := launchd.Kickstart(spec.Label); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: kickstart: %v\n", err)
+	}
 	fmt.Printf("installed shipper:\n")
 	fmt.Printf("  label:    %s\n", spec.Label)
 	fmt.Printf("  binary:   %s\n", bin)
