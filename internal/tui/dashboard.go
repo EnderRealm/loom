@@ -126,6 +126,7 @@ func (m dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 // Column widths for the dashboard table.
 const (
 	colProject   = 22
+	colRepo      = 28 // owner/repo from git remote, "—" otherwise
 	colWorktrees = 8
 	colAgents    = 16
 	colSessions  = 8
@@ -145,6 +146,7 @@ func (m dashboardModel) view() string {
 	// Header row.
 	b.WriteString("  ")
 	b.WriteString(padRight(StyleColHeader.Render("PROJECT"), colProject))
+	b.WriteString(padRight(StyleColHeader.Render("REPO"), colRepo))
 	b.WriteString(padRight(StyleColHeader.Render("WORKTREES"), colWorktrees))
 	b.WriteString(padRight(StyleColHeader.Render("AGENTS"), colAgents))
 	b.WriteString(padRight(StyleColHeader.Render("SESSIONS"), colSessions))
@@ -185,6 +187,13 @@ func (m dashboardModel) renderRow(p Project, selected bool) string {
 		name = p.Slug
 	}
 	projCell := padRightBg(selBg.Foreground(colorWhite).Render(truncate(name, colProject-1)), colProject, bg)
+
+	var repoCell string
+	if r := shortRepo(p.GitRemote); r != "" {
+		repoCell = padRightBg(selBg.Foreground(colorInfo).Render(truncate(r, colRepo-1)), colRepo, bg)
+	} else {
+		repoCell = padRightBg(selBg.Foreground(colorMuted).Render("—"), colRepo, bg)
+	}
 
 	var wtCell string
 	if n := len(p.Worktrees); n > 0 {
@@ -232,7 +241,7 @@ func (m dashboardModel) renderRow(p Project, selected bool) string {
 	if selected {
 		sp = selBg.Render("  ")
 	}
-	line := sp + projCell + wtCell + agentCell + sessCell + actCell + sizeCell + pendCell + tkCell + age
+	line := sp + projCell + repoCell + wtCell + agentCell + sessCell + actCell + sizeCell + pendCell + tkCell + age
 	if selected && m.width > 0 {
 		rendered := lipgloss.Width(line)
 		if rendered < m.width {
@@ -261,6 +270,34 @@ func renderActivityCell(p Project, bg lipgloss.Style) string {
 		out += dot + errStyle.Render(compactInt(p.ErrorCount))
 	}
 	return out
+}
+
+// shortRepo collapses a git remote URL to "owner/repo" for display.
+// Returns "" when the remote is empty so the caller can render a dash.
+func shortRepo(remote string) string {
+	if remote == "" {
+		return ""
+	}
+	s := strings.TrimSpace(remote)
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
+	switch {
+	case strings.HasPrefix(s, "git@"):
+		s = strings.TrimPrefix(s, "git@")
+		s = strings.Replace(s, ":", "/", 1)
+	case strings.HasPrefix(s, "ssh://"):
+		s = strings.TrimPrefix(s, "ssh://")
+		s = strings.TrimPrefix(s, "git@")
+	case strings.HasPrefix(s, "https://"):
+		s = strings.TrimPrefix(s, "https://")
+	case strings.HasPrefix(s, "http://"):
+		s = strings.TrimPrefix(s, "http://")
+	}
+	// Strip the host so the column shows "owner/repo".
+	if i := strings.Index(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }
 
 // compactInt formats large counts with K/M suffixes so they stay narrow.
