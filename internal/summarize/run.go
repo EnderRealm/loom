@@ -68,7 +68,7 @@ func Run(opts Options) error {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("watch: shutdown requested")
+			log.Print("watch: shutdown requested")
 			return nil
 		case <-tick.C:
 			r := sweep(ctx, st, opts.ReceivedDir, opts.Force, opts.Verbose)
@@ -174,7 +174,7 @@ func summarizeOne(ctx context.Context, st *store.Store, agent summary.Agent,
 		return err
 	}
 	if verbose {
-		fmt.Printf("[%s] %s turns=%d tools=%d errs=%d unknown=%d\n",
+		log.Printf("[%s] %s turns=%d tools=%d errs=%d unknown=%d",
 			agent, sessionID, len(sum.Turns), len(sum.ToolCalls),
 			len(sum.Errors), len(sum.Unknown))
 	}
@@ -182,7 +182,7 @@ func summarizeOne(ctx context.Context, st *store.Store, agent summary.Agent,
 }
 
 func report(r sweepResult, dbPath string) {
-	fmt.Printf("seen=%d parsed=%d skipped=%d errored=%d in %s db=%s\n",
+	log.Printf("seen=%d parsed=%d skipped=%d errored=%d in %s db=%s",
 		r.seen, r.parsed, r.skipped, r.errored,
 		r.duration.Round(time.Millisecond), dbPath)
 }
