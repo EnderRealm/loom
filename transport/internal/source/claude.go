@@ -34,10 +34,18 @@ func claudeProjectsDir() (string, error) {
 	return filepath.Join(home, ".claude", "projects"), nil
 }
 
-// readClaudeCwd reads the first record's `cwd` field. Empty return
-// means "not yet available" (file is empty or first line isn't \n-
-// terminated yet); a parse error is returned so the caller can skip
-// the session this tick rather than emit a Session with no Cwd.
+// readClaudeCwd scans the head of a Claude session JSONL for the first
+// non-empty `cwd` field. Sparse-headered records (permission-mode,
+// file-history-snapshot, agent-name, custom-title, last-prompt, pr-link)
+// carry no cwd, so the FIRST line frequently misses it; the canonical
+// cwd lives on user/assistant/system records that follow. Empty return
+// means "not yet available" (file is empty or no \n-terminated line in
+// the head carried a cwd); the capture pass treats that as "check back
+// next tick" and skips writing an identity sidecar this round.
+//
+// 200 lines is a generous head sample — a session that hasn't logged a
+// header-bearing record in its first 200 lines is broken regardless,
+// and 200 small JSON parses cost <1ms.
 func readClaudeCwd(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -46,22 +54,28 @@ func readClaudeCwd(path string) (string, error) {
 	defer f.Close()
 
 	r := bufio.NewReader(f)
-	line, err := r.ReadBytes('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
+	for i := 0; i < 200; i++ {
+		line, err := r.ReadBytes('\n')
+		if errors.Is(err, io.EOF) || (len(line) > 0 && line[len(line)-1] != '\n') {
+			// Reached EOF without a complete trailing line.
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		var probe struct {
+			Cwd string `json:"cwd"`
+		}
+		if err := json.Unmarshal(line[:len(line)-1], &probe); err != nil {
+			// Malformed line — keep scanning; legitimate later records
+			// can still answer the question.
+			continue
+		}
+		if probe.Cwd != "" {
+			return probe.Cwd, nil
+		}
 	}
-	if len(line) == 0 || line[len(line)-1] != '\n' {
-		return "", nil
-	}
-	var probe struct {
-		Cwd string `json:"cwd"`
-	}
-	if err := json.Unmarshal(line[:len(line)-1], &probe); err != nil {
-		// Malformed first line — caller skips; capture log will surface
-		// it as drift on the next pass once the line completes.
-		return "", err
-	}
-	return probe.Cwd, nil
+	return "", nil
 }
 
 // ListClaudeSessions enumerates every .jsonl session file under ~/.claude/projects/*/.
