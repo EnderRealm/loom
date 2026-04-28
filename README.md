@@ -1,15 +1,19 @@
 # Loom
 
-Loom is a minimal pipeline for capturing, storing, and (eventually) processing agent sessions. See `docs/overview.md` for the project philosophy — this README covers how to build and run what exists today.
+Loom captures agent session transcripts, ships them to a central receiver, folds them into a normalized summary database, and surfaces both raw state and durable knowledge through an interactive TUI. See `docs/overview.md` for the project philosophy.
 
 ## Status
 
-| Subsystem   | State      | What it does                                                |
-| ----------- | ---------- | ----------------------------------------------------------- |
-| `transport` | v1, usable | Ships agent session JSONL files to a central receiver       |
-| everything else | not built yet | Extraction, storage, processing — deliberately deferred |
+| Subsystem    | State      | What it does                                                       |
+| ------------ | ---------- | ------------------------------------------------------------------ |
+| `transport`  | v1, usable | Ships agent session JSONL files to a central receiver              |
+| `summarizer` | v1, usable | Folds received sessions into `~/.loom/summaries.db` (sqlite)       |
+| `tui`        | v1, usable | Interactive dashboard for projects, sessions, and knowledge        |
+| `loom` CLI   | v1, usable | Unified entry point (`tui`, `summarize`, `install`, `status`, ...) |
 
-Transport is the only subsystem today. Anything else in this repo (`extractors/`, `docs/`, `knowledge/*-eval/`) is notes, prompts, or scaffolding. Durable extracted knowledge lives outside the repo at `~/.loom/knowledge/` (its own git repo); see that store's `SCHEMA.md`.
+**Agents supported:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/**/rollout-<ts>-<uuid>.jsonl`).
+
+`extractors/` is a Python research project (truth/decision extraction from session summaries) that operates over the durable knowledge store at `~/.loom/knowledge/` — its own git repo, see that store's `SCHEMA.md`. The TUI reads that store; the Go code does not write to it.
 
 ## Prerequisites
 
@@ -36,10 +40,13 @@ Everything (build + launchd agent management) is driven by `./install.sh`. Run i
 
 ```sh
 ./install.sh                           # help
-./install.sh --install-receiver        # server side
+./install.sh --install-server          # receiver + summarizer + tui
+./install.sh --install-receiver        # receiver only
+./install.sh --install-summarizer      # summarizer only
 ./install.sh --install-shipper         # client side
-./install.sh --uninstall               # remove both launchd agents
-./install.sh --status                  # show state of both agents
+./install.sh --install-tui             # build the TUI binary
+./install.sh --uninstall               # remove all loom launchd agents
+./install.sh --status                  # show state of all agents
 ```
 
 The script builds to `$LOOM_BIN_DIR` (default `~/.local/bin`, no sudo required), writes state under `$LOOM_HOME` (default `~/.loom`), and manages both launchd agents. Override either via environment:
@@ -52,8 +59,11 @@ LOOM_HOME=/srv/loom         ./install.sh --install-receiver
 If you prefer to build manually (e.g., you don't want the launchd agent, or you're running the receiver in a container):
 
 ```sh
-go build -o ~/.local/bin/loom-shipper  ./transport/cmd/loom-shipper
-go build -o ~/.local/bin/loom-receiver ./transport/cmd/loom-receiver
+go build -o ~/.local/bin/loom-shipper   ./transport/cmd/loom-shipper
+go build -o ~/.local/bin/loom-receiver  ./transport/cmd/loom-receiver
+go build -o ~/.local/bin/loom-summarize ./cmd/loom-summarize
+go build -o ~/.local/bin/loom-tui       ./cmd/loom-tui
+go build -o ~/.local/bin/loom           ./cmd/loom
 ```
 
 > If `~/.local/bin` isn't in your `$PATH`, add it to your shell rc file so you can invoke the binaries by name. launchd runs them by absolute path regardless, so this is purely for interactive use.
@@ -64,25 +74,32 @@ go build -o ~/.local/bin/loom-receiver ./transport/cmd/loom-receiver
 
 A lightweight agent-session shipper. The client (`loom-shipper`) walks agent session files, ships byte-delta batches to the server (`loom-receiver`) over HTTP, and persists per-session cursors so subsequent runs are incremental and idempotent.
 
-**Agents supported in v1:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`).
+**Agents supported in v1:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<uuid>.jsonl`).
 
 ## State locations
 
 ```
 ~/.loom/
-  config.json                          # client: server URL, auth token, interval
+  config.json                              # client: server URL, auth token, interval
   transport/
-    cursors/claude-code/<uuid>.cursor  # client: next byte to ship per session
-    shipper.lock                       # client: flock, one shipper at a time
-    shipper.log                        # client: launchd stdout/stderr capture
-  received/                            # server: default storage root
-    claude-code/
+    cursors/source/<agent>/<uuid>.cursor   # client: next byte read from source
+    cursors/ship/<agent>/<uuid>.cursor     # client: next byte shipped to receiver
+    staging/<agent>/<project>/<uuid>.jsonl # client: bytes captured locally
+    shipper.lock                           # client: flock, one shipper at a time
+    shipper.log                            # client: launchd stdout/stderr capture
+  received/                                # server: default storage root
+    <agent>/
       <sanitized-project>/
-        <uuid>.jsonl                   # appended-to session file
-        <uuid>.offset                  # next expected byte (idempotency)
+        <uuid>.jsonl                       # appended-to session file
+        <uuid>.offset                      # next expected byte (idempotency)
+  summaries.db                             # server: normalized summary database
+  summarizer.log                           # server: summarizer launchd capture
+  knowledge/                               # durable knowledge store (separate git repo)
 ```
 
 State lives per-user per-machine. Override the root with `LOOM_HOME=/some/path`.
+
+`<agent>` is `claude-code` or `codex-cli`. The two-stage shipper captures from the agent's source directory into local `staging/`, then ships staging deltas to the receiver — so the agent can clean up its own session files without losing data.
 
 ## Server setup
 
@@ -267,8 +284,15 @@ Both are plain decimal integers in files on disk. Not negotiated, not serialized
 - `~/.loom/transport/cursors/` — client cursors; keep them, they make updates resumable
 - `~/.loom/received/` — server storage; keep it
 - `~/.loom/transport/shipper.log` — append-only, rotate manually if it grows
+- `~/.loom/summaries.db` — disposable. The summarizer rebuilds it from `~/.loom/received/` on demand. When this binary's schema is newer than the on-disk DB, the summarizer refuses to open it and instructs the user to re-run with `--rebuild`.
 
-Nothing in the update flow requires wiping state. If an update ever did — for example, a cursor format change — it would be called out explicitly in that release.
+### Summary DB upgrades
+
+```sh
+loom summarize --rebuild       # drops summaries.db and re-folds from received/
+```
+
+Equivalent low-level form: `loom-summarize -rebuild`. Use this whenever the summarizer reports `summary db schema is outdated`. The DB is treated as a derived artifact — there's no migration path because there doesn't need to be one.
 
 ---
 

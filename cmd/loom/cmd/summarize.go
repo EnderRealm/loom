@@ -18,6 +18,7 @@ var summarizeCmd = &cobra.Command{
 		opts.Force, _ = cmd.Flags().GetBool("force")
 		opts.Verbose, _ = cmd.Flags().GetBool("v")
 		opts.Watch, _ = cmd.Flags().GetBool("watch")
+		opts.Rebuild, _ = cmd.Flags().GetBool("rebuild")
 		opts.Interval, _ = cmd.Flags().GetDuration("interval")
 		return summarize.Run(opts)
 	},
@@ -30,6 +31,7 @@ func init() {
 	f.Bool("force", false, "re-summarize even if unchanged")
 	f.BoolP("v", "v", false, "verbose progress")
 	f.Bool("watch", false, "stay running and re-sweep on a ticker")
+	f.Bool("rebuild", false, "drop the summary DB and rebuild from received/")
 	f.Duration("interval", 30*time.Second, "watch-mode sweep interval")
 
 	rootCmd.AddCommand(summarizeCmd)
