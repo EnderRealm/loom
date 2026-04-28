@@ -123,13 +123,16 @@ func (m dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	return m, nil
 }
 
-// Column widths for the dashboard table.
+// Column widths for the dashboard table. Each must hold its header plus
+// at least two trailing spaces so adjacent header text never runs
+// together (e.g. "WORKTREESAGENTS"). The cells render values shorter
+// than the header in every realistic case.
 const (
 	colProject   = 22
 	colRepo      = 28 // owner/repo from git remote, "—" otherwise
-	colWorktrees = 8
+	colWorktrees = 11 // "WORKTREES" + 2
 	colAgents    = 16
-	colSessions  = 8
+	colSessions  = 10 // "SESSIONS" + 2
 	colActivity  = 18 // turns·tools·errors
 	colSize      = 10
 	colPending   = 10
