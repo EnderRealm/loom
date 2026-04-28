@@ -1,6 +1,6 @@
 // Package store persists summary.SessionSummary into a SQLite database for
 // cross-session pattern analysis (bottleneck detection, error rates, learnings).
-package store
+package summaries
 
 import (
 	"context"

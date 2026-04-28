@@ -5,11 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"loom/internal/config"
+	"loom/internal/summaries"
+	"loom/transport/cursor"
 
 	"github.com/EnderRealm/ticket/pkg/ticket"
 )
@@ -43,7 +44,7 @@ type Project struct {
 	ToolCallCount int
 	ErrorCount    int
 	Compactions   int
-	TopTools      []ToolStat
+	TopTools      []summaries.ToolStat
 }
 
 // Session is one agent session tied to a project, with both on-disk
@@ -63,7 +64,7 @@ type Session struct {
 
 	// Summary metrics from ~/.loom/summaries.db. Zero when the summarizer
 	// hasn't processed this session yet (e.g. brand new or DB missing).
-	Summary *SessionMetrics
+	Summary *summaries.SessionMetrics
 }
 
 // TicketSummary is the rollup for one project's central ticket store.
@@ -96,7 +97,7 @@ func LoadProjects() ([]Project, error) {
 
 	// Pull summary metrics first so their identity columns drive the
 	// grouping decision, not the slug we're about to walk past.
-	summary, _ := LoadSummaryData()
+	summary, _ := summaries.Load()
 
 	// Pre-walk slugs so the legacy basename heuristic can match
 	// suffixes against locally-resolved paths. Only consulted when a
@@ -149,7 +150,7 @@ func LoadProjects() ([]Project, error) {
 	// and cross-machine variants of the same repo still collapse.
 	resolveIdentity := func(agent, slug, sid, jsonlPath string) (key, gitRemote, cwd, name, localPath string) {
 		if summary != nil {
-			if m, ok := summary.BySession[sessionKey(agent, sid)]; ok {
+			if m, ok := summary.BySession[summaries.SessionKey(agent, sid)]; ok {
 				if m.GitRemote != "" {
 					gitRemote = m.GitRemote
 				}
@@ -274,7 +275,7 @@ func LoadProjects() ([]Project, error) {
 		if info.ModTime().After(s.Modified) {
 			s.Modified = info.ModTime()
 		}
-		ship, _ := readShipCursor(agent, sid)
+		ship, _ := cursor.Read(cursor.KindShip, agent, sid)
 		s.ShipCursor = ship
 		if ship < info.Size() {
 			s.Pending = info.Size() - ship
@@ -614,14 +615,14 @@ func loadTicketSummary(projectPath string) *TicketSummary {
 // attachSummary joins a project's sessions with rows from summaries.db and
 // rolls per-session metrics into project-level aggregates. No-op when the
 // summary DB isn't available.
-func attachSummary(p *Project, d *SummaryData) {
+func attachSummary(p *Project, d *summaries.View) {
 	if d == nil || !d.Available {
 		return
 	}
 	// Per-session lookup.
 	for i := range p.Sessions {
 		s := &p.Sessions[i]
-		if m, ok := d.BySession[sessionKey(s.Agent, s.SessionID)]; ok {
+		if m, ok := d.BySession[summaries.SessionKey(s.Agent, s.SessionID)]; ok {
 			s.Summary = m
 			p.TurnCount += m.TurnCount
 			p.ToolCallCount += m.ToolCallCount
@@ -630,7 +631,7 @@ func attachSummary(p *Project, d *SummaryData) {
 	}
 	// Top tools across the project's slugs (root + worktrees) merged into
 	// one ranked list.
-	merged := map[string]*ToolStat{}
+	merged := map[string]*summaries.ToolStat{}
 	for _, slug := range p.Slugs {
 		for _, ts := range d.ToolStats[slug] {
 			cur, ok := merged[ts.Kind]
@@ -665,22 +666,6 @@ func contains(ss []string, v string) bool {
 		}
 	}
 	return false
-}
-
-// readShipCursor reads transport/cursors/ship/<agent>/<sid>.cursor. The file
-// is a plain decimal byte offset; missing file == 0 (nothing shipped yet).
-// Kept private to the TUI so we don't have to expose the transport/cursor
-// package outside its own subtree.
-func readShipCursor(agent, sid string) (int64, error) {
-	path := filepath.Join(config.TransportDir(), "cursors", "ship", agent, sid+".cursor")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	return strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 }
 
 func homeDir() (string, error) {

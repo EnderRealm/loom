@@ -19,7 +19,7 @@ import (
 
 	"loom/internal/parse/claudeparse"
 	"loom/internal/parse/codexparse"
-	"loom/internal/parse/store"
+	"loom/internal/summaries"
 	"loom/internal/parse/summary"
 )
 
@@ -44,9 +44,9 @@ func Run(opts Options) error {
 		_ = os.Remove(opts.DBPath + "-wal")
 		_ = os.Remove(opts.DBPath + "-shm")
 	}
-	st, err := store.Open(opts.DBPath)
+	st, err := summaries.Open(opts.DBPath)
 	if err != nil {
-		if errors.Is(err, store.ErrSchemaOutdated) {
+		if errors.Is(err, summaries.ErrSchemaOutdated) {
 			return fmt.Errorf("%w\n\n  re-run with --rebuild to drop and re-fold from %s", err, opts.ReceivedDir)
 		}
 		return fmt.Errorf("open db: %w", err)
@@ -84,7 +84,7 @@ type sweepResult struct {
 	duration                       time.Duration
 }
 
-func sweep(ctx context.Context, st *store.Store, receivedDir string,
+func sweep(ctx context.Context, st *summaries.Store, receivedDir string,
 	force, verbose bool) sweepResult {
 	r := sweepResult{}
 	start := time.Now()
@@ -96,7 +96,7 @@ func sweep(ctx context.Context, st *store.Store, receivedDir string,
 	return r
 }
 
-func walkAgent(ctx context.Context, st *store.Store, agent summary.Agent,
+func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 	root string, force, verbose bool, r *sweepResult) {
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return
@@ -121,7 +121,7 @@ func walkAgent(ctx context.Context, st *store.Store, agent summary.Agent,
 		project := filepath.Base(filepath.Dir(path))
 		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		cwdRaw, gitRemote := readMetaSidecar(path)
-		source := store.SourceInfo{
+		source := summaries.SourceInfo{
 			Project:   project,
 			Path:      path,
 			Size:      info.Size(),
@@ -149,8 +149,8 @@ func walkAgent(ctx context.Context, st *store.Store, agent summary.Agent,
 	})
 }
 
-func summarizeOne(ctx context.Context, st *store.Store, agent summary.Agent,
-	sessionID string, source store.SourceInfo, verbose bool) error {
+func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
+	sessionID string, source summaries.SourceInfo, verbose bool) error {
 	f, err := os.Open(source.Path)
 	if err != nil {
 		return err

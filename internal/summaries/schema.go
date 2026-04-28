@@ -1,4 +1,4 @@
-package store
+package summaries
 
 // schemaSQL is the canonical schema for ~/.loom/summaries.db. We keep all
 // tables agent-agnostic; an `agent` column on every top-level row lets us

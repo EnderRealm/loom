@@ -99,13 +99,15 @@ type Event struct {
 // Behavior:
 //   - Recovery fires iff FailureActive is true AND the caller picked Kind=Recovered.
 //   - Failure events are suppressed if LastNotifiedKind==Kind AND we're still
-//     inside NotifyCooldownMinutes. Crossing to a different kind always fires.
+//     inside cooldown. Crossing to a different kind always fires.
 //   - Cooldown < 0 disables suppression (fire every tick).
-func (s *State) Maybe(cfg *config.Config, ev Event) (bool, error) {
-	if !cfg.NotifyEnabled() {
+//
+// The caller passes scalar enabled/cooldown values rather than a config
+// struct so this package doesn't pull in a typed-config dependency.
+func (s *State) Maybe(enabled bool, cooldown time.Duration, ev Event) (bool, error) {
+	if !enabled {
 		return false, nil
 	}
-	cooldown := time.Duration(cfg.NotifyCooldownMinutes) * time.Minute
 	if ev.Kind == KindRecovered && !s.FailureActive {
 		return false, nil
 	}

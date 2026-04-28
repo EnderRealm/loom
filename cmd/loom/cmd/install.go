@@ -74,12 +74,12 @@ func loomHomeForPlist() string {
 }
 
 func installShipper() error {
-	cfg, err := config.Load()
+	cfg, err := shipper.LoadConfig()
 	if err != nil {
 		return err
 	}
 	if cfg.IntervalMinutes <= 0 {
-		cfg.IntervalMinutes = config.DefaultIntervalMinutes
+		cfg.IntervalMinutes = shipper.DefaultIntervalMinutes
 	}
 	bin, err := loomBinary()
 	if err != nil {

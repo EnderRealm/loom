@@ -1,4 +1,4 @@
-package tui
+package summaries
 
 import (
 	"database/sql"
@@ -6,13 +6,12 @@ import (
 	"os"
 	"path/filepath"
 
-	_ "modernc.org/sqlite"
-
 	"loom/internal/config"
 )
 
-// SessionMetrics is the per-session view of summaries.db rows that the TUI
-// surfaces on the dashboard and detail page.
+// SessionMetrics is the per-session view of summaries.db rows that
+// dashboards and detail pages surface. Mirrors the shape the TUI
+// consumed before the read+write layer was unified into this package.
 type SessionMetrics struct {
 	Agent           string
 	SessionID       string
@@ -31,22 +30,8 @@ type SessionMetrics struct {
 	DurationMs      int64
 }
 
-// SummaryData is the bundle of metrics the TUI needs per refresh. Indexed by
-// (agent, sessionID) for fast joins; project-level rollups are pre-aggregated
-// by Slug for the dashboard's ACTIVITY column.
-type SummaryData struct {
-	BySession map[string]*SessionMetrics
-	ByProject map[string]*ProjectMetrics
-	// ToolStats holds per-project tool aggregates keyed by lowercased project
-	// basename. Each entry is sorted by call count desc.
-	ToolStats map[string][]ToolStat
-	// CompactionsByProject counts compactions across the project's sessions.
-	CompactionsByProject map[string]int
-	// Available is false when summaries.db doesn't exist yet — every other
-	// field is nil/empty in that case and the TUI should degrade silently.
-	Available bool
-}
-
+// ProjectMetrics rolls per-session counters up to the legacy slug
+// dimension. Identity-based grouping is the caller's job.
 type ProjectMetrics struct {
 	TurnCount     int
 	ToolCallCount int
@@ -54,20 +39,40 @@ type ProjectMetrics struct {
 	SessionCount  int
 }
 
+// ToolStat is one (project, tool_kind) aggregate.
 type ToolStat struct {
-	Kind     string
-	Calls    int
-	Errors   int
-	AvgMs    int64
+	Kind   string
+	Calls  int
+	Errors int
+	AvgMs  int64
 }
 
-// LoadSummaryData opens the SQLite summary DB read-only, materializes the
-// per-session and per-project rollups the TUI needs, and returns. If the DB
-// doesn't exist yet (e.g. summarizer not installed), Available is false.
-func LoadSummaryData() (*SummaryData, error) {
+// View is the bundle a dashboard refresh consumes in one shot. Indexed
+// by (agent, sessionID) for fast joins; project-level rollups are
+// pre-aggregated by slug for the dashboard's ACTIVITY column.
+type View struct {
+	BySession            map[string]*SessionMetrics
+	ByProject            map[string]*ProjectMetrics
+	ToolStats            map[string][]ToolStat
+	CompactionsByProject map[string]int
+	// Available is false when summaries.db doesn't exist yet (e.g.
+	// summarizer not installed); every other field is nil/empty in
+	// that case so callers can degrade silently.
+	Available bool
+}
+
+// SessionKey is the canonical "<agent>\x00<session_id>" lookup key.
+func SessionKey(agent, sessionID string) string {
+	return agent + "\x00" + sessionID
+}
+
+// Load opens the summary DB read-only and materializes a View. Returns
+// View{Available: false} when the DB doesn't exist yet so the caller
+// (typically the TUI) can render its pre-summary fields.
+func Load() (*View, error) {
 	dbPath := filepath.Join(config.Home(), "summaries.db")
 	if _, err := os.Stat(dbPath); err != nil {
-		return &SummaryData{Available: false}, nil
+		return &View{Available: false}, nil
 	}
 
 	// mode=ro keeps us out of the writer's way; the launchd summarizer
@@ -79,7 +84,7 @@ func LoadSummaryData() (*SummaryData, error) {
 	}
 	defer db.Close()
 
-	d := &SummaryData{
+	v := &View{
 		BySession:            map[string]*SessionMetrics{},
 		ByProject:            map[string]*ProjectMetrics{},
 		ToolStats:            map[string][]ToolStat{},
@@ -87,26 +92,19 @@ func LoadSummaryData() (*SummaryData, error) {
 		Available:            true,
 	}
 
-	if err := loadSessions(db, d); err != nil {
+	if err := loadSessions(db, v); err != nil {
 		return nil, err
 	}
-	if err := loadToolStats(db, d); err != nil {
+	if err := loadToolStats(db, v); err != nil {
 		return nil, err
 	}
-	if err := loadCompactions(db, d); err != nil {
+	if err := loadCompactions(db, v); err != nil {
 		return nil, err
 	}
-
-	return d, nil
+	return v, nil
 }
 
-// sessionKey is the same shape we use elsewhere in the TUI for per-session
-// lookup. Centralized here so dashboard/detail can share it.
-func sessionKey(agent, sessionID string) string {
-	return agent + "\x00" + sessionID
-}
-
-func loadSessions(db *sql.DB, d *SummaryData) error {
+func loadSessions(db *sql.DB, v *View) error {
 	rows, err := db.Query(`
 		SELECT session_id, agent, project, cwd, cwd_raw, git_remote, model,
 		       turn_count, tool_call_count, error_count, compacted,
@@ -153,16 +151,13 @@ func loadSessions(db *sql.DB, d *SummaryData) error {
 		}
 		m.Compacted = compact.Valid && compact.Int64 != 0
 
-		d.BySession[sessionKey(m.Agent, m.SessionID)] = &m
+		v.BySession[SessionKey(m.Agent, m.SessionID)] = &m
 
-		// Project-level rollup keyed by the slug. We don't have access to
-		// the dashboard's basename-canonicalization here; that join is done
-		// later in data.go where the slug → projectKey mapping lives.
 		if project.Valid {
-			pm, ok := d.ByProject[project.String]
+			pm, ok := v.ByProject[project.String]
 			if !ok {
 				pm = &ProjectMetrics{}
-				d.ByProject[project.String] = pm
+				v.ByProject[project.String] = pm
 			}
 			pm.SessionCount++
 			pm.TurnCount += m.TurnCount
@@ -173,10 +168,7 @@ func loadSessions(db *sql.DB, d *SummaryData) error {
 	return rows.Err()
 }
 
-func loadToolStats(db *sql.DB, d *SummaryData) error {
-	// One row per (project, tool_kind) with counts, errors, avg duration.
-	// Joining on sessions gives us the per-project bucketing we need without
-	// a second walk through tool_calls in Go.
+func loadToolStats(db *sql.DB, v *View) error {
 	rows, err := db.Query(`
 		SELECT s.project,
 		       COALESCE(tc.tool_kind, 'other') AS kind,
@@ -213,12 +205,12 @@ func loadToolStats(db *sql.DB, d *SummaryData) error {
 		if avg.Valid {
 			ts.AvgMs = avg.Int64
 		}
-		d.ToolStats[project.String] = append(d.ToolStats[project.String], ts)
+		v.ToolStats[project.String] = append(v.ToolStats[project.String], ts)
 	}
 	return rows.Err()
 }
 
-func loadCompactions(db *sql.DB, d *SummaryData) error {
+func loadCompactions(db *sql.DB, v *View) error {
 	rows, err := db.Query(`
 		SELECT s.project, COUNT(*) AS n
 		FROM compactions c
@@ -238,7 +230,7 @@ func loadCompactions(db *sql.DB, d *SummaryData) error {
 			return err
 		}
 		if project.Valid {
-			d.CompactionsByProject[project.String] = n
+			v.CompactionsByProject[project.String] = n
 		}
 	}
 	return rows.Err()

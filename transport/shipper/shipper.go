@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"loom/internal/config"
-	"loom/transport/internal/cursor"
+	"loom/transport/cursor"
 	"loom/transport/internal/notify"
 	"loom/transport/internal/source"
 	"loom/transport/internal/staging"
@@ -143,7 +143,7 @@ func Once() {
 		return
 	}
 
-	cfg, err := config.Load()
+	cfg, err := LoadConfig()
 	if err != nil {
 		log.Printf("fail stage=config err=%q", err)
 		return
@@ -227,13 +227,13 @@ func Once() {
 //
 // Cancellable via SIGINT / SIGTERM through the supplied context.
 func Daemon(ctx context.Context) error {
-	cfg, err := config.Load()
+	cfg, err := LoadConfig()
 	if err != nil {
 		return err
 	}
 	interval := cfg.IntervalMinutes
 	if interval <= 0 {
-		interval = config.DefaultIntervalMinutes
+		interval = DefaultIntervalMinutes
 	}
 	d := time.Duration(interval) * time.Minute
 	log.Printf("daemon starting interval=%s", d)
@@ -344,7 +344,7 @@ func resolveGitRemote(cwd string) string {
 
 // ---------- ship pass ----------
 
-func shipPass(cfg *config.Config, counts *tickCounts) {
+func shipPass(cfg *Config, counts *tickCounts) {
 	agents, err := staging.AgentDirs()
 	if err != nil {
 		log.Printf("fail stage=ship class=io err=%q", err)
@@ -364,7 +364,7 @@ func shipPass(cfg *config.Config, counts *tickCounts) {
 	}
 }
 
-func shipOne(cfg *config.Config, e staging.Entry, counts *tickCounts) {
+func shipOne(cfg *Config, e staging.Entry, counts *tickCounts) {
 	from, err := cursor.Read(cursor.KindShip, e.Agent, e.SessionID)
 	if err != nil {
 		log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (cursor read)",
@@ -428,7 +428,7 @@ func shipOne(cfg *config.Config, e staging.Entry, counts *tickCounts) {
 	counts.shipped++
 }
 
-func postIngestWithRetry(cfg *config.Config, req wire.IngestRequest, e staging.Entry) (int64, error) {
+func postIngestWithRetry(cfg *Config, req wire.IngestRequest, e staging.Entry) (int64, error) {
 	backoffs := []time.Duration{0, 500 * time.Millisecond, 2 * time.Second}
 	var lastErr error
 	for attempt := 0; attempt < len(backoffs); attempt++ {
@@ -460,7 +460,7 @@ func jitter(d time.Duration) time.Duration {
 	return time.Duration(float64(d) * factor)
 }
 
-func postIngest(cfg *config.Config, req wire.IngestRequest) (int64, error) {
+func postIngest(cfg *Config, req wire.IngestRequest) (int64, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return 0, err
@@ -502,7 +502,7 @@ func postIngest(cfg *config.Config, req wire.IngestRequest) (int64, error) {
 	return out.AcceptedToOffset, nil
 }
 
-func healthCheck(cfg *config.Config) error {
+func healthCheck(cfg *Config) error {
 	url := strings.TrimRight(cfg.ServerURL, "/") + "/healthz"
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(url)
@@ -565,8 +565,9 @@ func refreshPending(state *notify.State) {
 	state.PendingSessions = pending
 }
 
-func maybeNotify(cfg *config.Config, state *notify.State, ev notify.Event) {
-	emitted, err := state.Maybe(cfg, ev)
+func maybeNotify(cfg *Config, state *notify.State, ev notify.Event) {
+	cooldown := time.Duration(cfg.NotifyCooldownMinutes) * time.Minute
+	emitted, err := state.Maybe(cfg.NotifyEnabled(), cooldown, ev)
 	if err != nil {
 		log.Printf("fail stage=notify kind=%s err=%q", ev.Kind, err)
 		return

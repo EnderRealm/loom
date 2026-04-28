@@ -22,10 +22,10 @@ var statusCmd = &cobra.Command{
 		// Shipper interval lives in config.json (in-process ticker);
 		// summarizer ticks every 30s by default (plist-baked flag).
 		shipperInterval := ""
-		if cfg, err := config.Load(); err == nil {
+		if cfg, err := shipper.LoadConfig(); err == nil {
 			n := cfg.IntervalMinutes
 			if n <= 0 {
-				n = config.DefaultIntervalMinutes
+				n = shipper.DefaultIntervalMinutes
 			}
 			shipperInterval = fmt.Sprintf("%dm (capture+ship ticker)", n)
 		}
