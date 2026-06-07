@@ -6,6 +6,13 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `loom dev` — at-a-glance machine development state in three sections:
+  super-summarized loom status (N/4 daemons running + pending sync
+  count), projects with dirty working trees (changed-file counts), and
+  projects with ready tickets.
+
 ## [1.0.1] — 2026-04-28 — Distribution + auto-update
 
 ### Added
