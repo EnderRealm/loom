@@ -9,9 +9,10 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `loom dev` — at-a-glance machine development state in three sections:
-  super-summarized loom status (N/4 daemons running + pending sync
-  count), projects with dirty working trees (changed-file counts), and
-  projects with ready tickets.
+  a green/yellow/red loom health rollup (green = all daemons up and no
+  sync backlog, yellow = backlog, red = a daemon down), projects with
+  dirty working trees (changed-file counts), and projects with ready
+  tickets. Color via lipgloss, degrades to plain text when piped.
 
 ## [1.0.1] — 2026-04-28 — Distribution + auto-update
 

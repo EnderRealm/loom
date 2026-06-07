@@ -24,7 +24,6 @@ var devCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("=== loom status ===")
 		labels := []string{
 			receiver.AgentLabel,
 			summarizerLabel,
@@ -37,16 +36,36 @@ var devCmd = &cobra.Command{
 				running++
 			}
 		}
-		fmt.Printf("  daemons: %d/%d running\n", running, len(labels))
 		pending := 0
 		for _, p := range projects {
 			pending += p.PendingCount
 		}
-		fmt.Printf("  pending sync: %d sessions\n", pending)
+
+		// State precedence: any daemon down is degraded (red) regardless of
+		// pending; all up with a backlog is yellow; all up and clear is green.
+		state := "healthy"
+		stateStyle := tui.StyleSuccess
+		switch {
+		case running < len(labels):
+			state = "degraded"
+			stateStyle = tui.StyleDanger
+		case pending > 0:
+			state = "backlog"
+			stateStyle = tui.StyleWarning
+		}
+		dot := stateStyle.Render("●")
+		detail := tui.StyleDim.Render(fmt.Sprintf("%d/%d daemons · %d pending", running, len(labels), pending))
+		fmt.Printf("%s loom %s   %s\n", dot, stateStyle.Render(state), detail)
 		fmt.Println()
 
-		fmt.Println("=== dirty repos ===")
-		any := false
+		fmt.Println(tui.StyleSection.Render("Dirty repos"))
+		type dirtyRow struct {
+			name    string
+			changed int
+			path    string
+		}
+		var dirty []dirtyRow
+		nameWidth := 0
 		for _, p := range projects {
 			if p.Path == "" {
 				continue
@@ -55,27 +74,44 @@ var devCmd = &cobra.Command{
 			if !ok || changed == 0 {
 				continue
 			}
-			any = true
-			fmt.Printf("  %s: %d changed  (%s)\n", p.Name, changed, devShortenPath(p.Path))
+			dirty = append(dirty, dirtyRow{p.Name, changed, devShortenPath(p.Path)})
+			if len(p.Name) > nameWidth {
+				nameWidth = len(p.Name)
+			}
 		}
-		if !any {
-			fmt.Println("  none")
+		if len(dirty) == 0 {
+			fmt.Println("  " + tui.StyleDim.Render("none"))
+		} else {
+			for _, r := range dirty {
+				fmt.Printf("  %-*s   %d changed   %s\n", nameWidth, r.name, r.changed, r.path)
+			}
 		}
 		fmt.Println()
 
-		fmt.Println("=== ready tickets ===")
-		any = false
+		fmt.Println(tui.StyleSection.Render("Ready tickets"))
+		type readyRow struct {
+			name  string
+			count int
+		}
+		var ready []readyRow
+		nameWidth = 0
 		for _, p := range projects {
 			if p.Tickets == nil {
 				continue
 			}
 			if n := p.Tickets.Status["ready"]; n > 0 {
-				any = true
-				fmt.Printf("  %s: %d ready\n", p.Name, n)
+				ready = append(ready, readyRow{p.Name, n})
+				if len(p.Name) > nameWidth {
+					nameWidth = len(p.Name)
+				}
 			}
 		}
-		if !any {
-			fmt.Println("  none")
+		if len(ready) == 0 {
+			fmt.Println("  " + tui.StyleDim.Render("none"))
+		} else {
+			for _, r := range ready {
+				fmt.Printf("  %-*s   %d ready\n", nameWidth, r.name, r.count)
+			}
 		}
 		return nil
 	},
