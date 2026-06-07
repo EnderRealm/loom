@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -254,6 +255,12 @@ func (m knowledgeModel) update(msg tea.Msg) (knowledgeModel, tea.Cmd) {
 		case "esc", "q", "backspace":
 			m.showDetail = false
 			m.detailScroll = 0
+		case "p":
+			return m.promote()
+		case "x":
+			return m.reject()
+		case "e":
+			return m.edit()
 		case "up", "k":
 			if m.detailScroll > 0 {
 				m.detailScroll--
@@ -278,6 +285,19 @@ func (m knowledgeModel) update(msg tea.Msg) (knowledgeModel, tea.Cmd) {
 			m.showDetail = true
 			m.detailScroll = 0
 		}
+	case "p":
+		return m.promote()
+	case "x":
+		return m.reject()
+	case "e":
+		return m.edit()
+	case "s":
+		// Skip: leave the candidate in place, advance to the next row.
+		if m.cursor < len(m.artifacts)-1 {
+			m.cursor++
+			m.clampOffset()
+		}
+		return m, statusCmd("skipped")
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -308,6 +328,65 @@ func (m knowledgeModel) update(msg tea.Msg) (knowledgeModel, tea.Cmd) {
 		m.clampOffset()
 	}
 	return m, nil
+}
+
+// promote and reject act on the selected candidate; both close the detail
+// sub-view and trigger a reload so the moved file leaves the list. edit shells
+// out to $EDITOR for any selected artifact and reloads on return.
+func (m knowledgeModel) promote() (knowledgeModel, tea.Cmd) {
+	a := m.selected()
+	if a == nil {
+		return m, nil
+	}
+	if a.Status != "candidate" {
+		return m, statusCmd("only candidates can be promoted")
+	}
+	dest, err := promoteCandidate(*a)
+	if err != nil {
+		return m, statusCmd("promote failed: " + err.Error())
+	}
+	m.showDetail = false
+	return m, tea.Batch(statusCmd("promoted → "+shortenPath(dest)), loadKnowledgeCmd())
+}
+
+func (m knowledgeModel) reject() (knowledgeModel, tea.Cmd) {
+	a := m.selected()
+	if a == nil {
+		return m, nil
+	}
+	if a.Status != "candidate" {
+		return m, statusCmd("only candidates can be rejected")
+	}
+	if _, err := rejectCandidate(*a); err != nil {
+		return m, statusCmd("reject failed: " + err.Error())
+	}
+	m.showDetail = false
+	return m, tea.Batch(statusCmd("rejected — archived to _rejected/"), loadKnowledgeCmd())
+}
+
+func (m knowledgeModel) edit() (knowledgeModel, tea.Cmd) {
+	a := m.selected()
+	if a == nil {
+		return m, nil
+	}
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		return m, statusCmd("$VISUAL/$EDITOR not set")
+	}
+	cmd := exec.Command(editor, a.Path)
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return statusMsg("editor exited: " + err.Error())
+		}
+		arts, e := LoadKnowledge()
+		if e != nil {
+			return errMsg(e)
+		}
+		return knowledgeLoadedMsg(arts)
+	})
 }
 
 func (m knowledgeModel) detailRows() int {

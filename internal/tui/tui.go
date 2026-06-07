@@ -253,9 +253,9 @@ func (a App) helpLine() string {
 	}
 	if a.overlay == overlayKnowledge {
 		if a.knowledge.showDetail {
-			return "↑↓ scroll  │  esc/q back to list"
+			return "↑↓ scroll  │  p promote  │  x reject  │  e edit  │  esc/q back"
 		}
-		return "↑↓ select  │  enter view  │  esc/q close"
+		return "↑↓ select  │  enter view  │  p promote  │  x reject  │  e edit  │  s skip  │  esc/q close"
 	}
 	return "↑↓ select  │  enter open  │  c knowledge  │  r refresh  │  q quit"
 }
