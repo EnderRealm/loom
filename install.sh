@@ -58,7 +58,7 @@ case "${1:-}" in
         ;;
     --install-tui)
         build
-        echo "the TUI is built into the loom binary; run: $LOOM_BIN_DIR/loom tui"
+        echo "the TUI is built into the loom binary; run: $LOOM_BIN_DIR/loom ui"
         ;;
     --uninstall)
         if [[ -x "$LOOM_BIN_DIR/loom" ]]; then

@@ -19,7 +19,7 @@ Daemons (run by launchd; manual invocation supported for debugging):
   receiver                     Run the ingest server (HTTP)
 
 Interactive:
-  tui                          Open the dashboard
+  ui                           Open the dashboard (alias: tui)
   summarize [--watch|--rebuild]  Fold received sessions into summaries.db
 
 Lifecycle:

@@ -72,7 +72,7 @@ loom install shipper            # shipper (client side)
 loom install updater            # source checkouts only — see Auto-update
 loom uninstall                  # remove all loom launchd agents
 loom status                     # show state of all installed components
-loom tui                        # open the dashboard
+loom ui                         # open the dashboard (alias: loom tui)
 ```
 
 `install.sh` is preserved as a thin forwarder for muscle memory: each `--install-X` flag does `go build -o $LOOM_BIN_DIR/loom ./cmd/loom` then `loom install X`. Either entry point works; new docs prefer the `loom` binary directly.
@@ -271,7 +271,7 @@ rm -f ~/.local/bin/loom
 | `loom receiver`               | Run the ingest server (`:8765` by default).                                 |
 | `loom summarize [--watch]`    | Fold received sessions into `~/.loom/summaries.db`.                         |
 | `loom summarize --rebuild`    | Drop and re-fold the summary DB; the upgrade path for schema bumps.         |
-| `loom tui`                    | Interactive dashboard.                                                      |
+| `loom ui`                     | Interactive dashboard (alias: `loom tui`).                                  |
 | `loom install <component>`    | Components: `server` / `receiver` / `summarizer` / `shipper`.               |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |
 | `loom status`                 | Launchctl state per component + sync health + config presence.              |
