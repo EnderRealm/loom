@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -113,8 +114,64 @@ var devCmd = &cobra.Command{
 				fmt.Printf("  %-*s   %d ready\n", nameWidth, r.name, r.count)
 			}
 		}
+		fmt.Println()
+
+		fmt.Println(tui.StyleSection.Render("Unreleased changelog"))
+		type changelogRow struct {
+			name  string
+			count int
+		}
+		var unreleased []changelogRow
+		nameWidth = 0
+		for _, p := range projects {
+			if p.Path == "" {
+				continue
+			}
+			count, ok := unreleasedChangelogEntries(p.Path)
+			if !ok || count == 0 {
+				continue
+			}
+			unreleased = append(unreleased, changelogRow{p.Name, count})
+			if len(p.Name) > nameWidth {
+				nameWidth = len(p.Name)
+			}
+		}
+		if len(unreleased) == 0 {
+			fmt.Println("  " + tui.StyleDim.Render("none"))
+		} else {
+			for _, r := range unreleased {
+				fmt.Printf("  %-*s   %d entries\n", nameWidth, r.name, r.count)
+			}
+		}
 		return nil
 	},
+}
+
+// unreleasedChangelogEntries counts the bullet entries under the
+// `## [Unreleased]` heading of a project's root CHANGELOG.md — the pending
+// changes that a release would publish. ok is false when the project has no
+// CHANGELOG.md, so callers treat changelog-less repos as not-applicable rather
+// than failing the command. An empty scaffold (only `###` subsection headers,
+// no bullets) yields a zero count.
+func unreleasedChangelogEntries(repoPath string) (count int, ok bool) {
+	data, err := os.ReadFile(filepath.Join(repoPath, "CHANGELOG.md"))
+	if err != nil {
+		return 0, false
+	}
+	inUnreleased := false
+	for _, line := range strings.Split(string(data), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "## ") {
+			// A top-level heading: enter the Unreleased block, or leave it on
+			// reaching the next versioned section.
+			inUnreleased = strings.Contains(strings.ToLower(t), "[unreleased]")
+			continue
+		}
+		if inUnreleased && (strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ")) {
+			count++
+		}
+	}
+	return count, true
 }
 
 // daemonRunning reports whether a daemon's plist is installed and launchd

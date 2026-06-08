@@ -13,6 +13,9 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   sync backlog, yellow = backlog, red = a daemon down), projects with
   dirty working trees (changed-file counts), and projects with ready
   tickets. Color via lipgloss, degrades to plain text when piped.
+- `loom dev` "Unreleased changelog" section — flags projects whose root
+  `CHANGELOG.md` has entries under `[Unreleased]`, signalling a release
+  is pending before those changes are published outside the repo.
 
 ## [1.0.1] — 2026-04-28 — Distribution + auto-update
 
