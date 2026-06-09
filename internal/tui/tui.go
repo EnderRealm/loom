@@ -36,7 +36,18 @@ type App struct {
 }
 
 func New() App {
-	return App{loading: true}
+	return App{loading: true, dashboard: dashboardModel{sortCol: defaultSortCol()}}
+}
+
+// defaultSortCol returns the index of the SESSIONS column so the dashboard's
+// default order matches the historical load-time sort.
+func defaultSortCol() int {
+	for i, c := range sortColumns {
+		if c.header == "SESSIONS" {
+			return i
+		}
+	}
+	return 0
 }
 
 type projectsLoadedMsg []Project
@@ -257,7 +268,7 @@ func (a App) helpLine() string {
 		}
 		return "↑↓ select  │  enter view  │  p promote  │  x reject  │  e edit  │  s skip  │  esc/q close"
 	}
-	return "↑↓ select  │  enter open  │  c knowledge  │  r refresh  │  q quit"
+	return "↑↓ select  │  enter open  │  s sort  │  c knowledge  │  r refresh  │  q quit"
 }
 
 // launchTk shells out to `tk ui --repo <path>` via tea.ExecProcess so the

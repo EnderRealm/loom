@@ -85,17 +85,18 @@ func PriorityBadge(p int) string {
 }
 
 var (
-	StyleBold     = lipgloss.NewStyle().Bold(true)
-	StyleDim      = lipgloss.NewStyle().Foreground(colorMuted)
-	StyleAccent   = lipgloss.NewStyle().Foreground(colorAccent)
-	StyleDanger   = lipgloss.NewStyle().Foreground(colorDanger)
-	StyleSuccess  = lipgloss.NewStyle().Foreground(colorSuccess)
-	StyleWarning  = lipgloss.NewStyle().Foreground(colorWarning)
-	StyleInfo     = lipgloss.NewStyle().Foreground(colorInfo)
-	StyleHelp     = lipgloss.NewStyle().Foreground(colorMuted)
-	StyleFieldKey = lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Width(14)
-	StyleSection  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
-	StyleColHeader = lipgloss.NewStyle().Bold(true).Foreground(colorCyan)
+	StyleBold            = lipgloss.NewStyle().Bold(true)
+	StyleDim             = lipgloss.NewStyle().Foreground(colorMuted)
+	StyleAccent          = lipgloss.NewStyle().Foreground(colorAccent)
+	StyleDanger          = lipgloss.NewStyle().Foreground(colorDanger)
+	StyleSuccess         = lipgloss.NewStyle().Foreground(colorSuccess)
+	StyleWarning         = lipgloss.NewStyle().Foreground(colorWarning)
+	StyleInfo            = lipgloss.NewStyle().Foreground(colorInfo)
+	StyleHelp            = lipgloss.NewStyle().Foreground(colorMuted)
+	StyleFieldKey        = lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Width(14)
+	StyleSection         = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	StyleColHeader       = lipgloss.NewStyle().Bold(true).Foreground(colorCyan)
+	StyleColHeaderActive = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(colorWhite)
 
 	StyleOverlayBorder = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).

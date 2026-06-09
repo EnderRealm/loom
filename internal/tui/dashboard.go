@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,92 @@ type dashboardModel struct {
 	offset   int
 	width    int
 	height   int
+	sortCol  int
+}
+
+// sortColumn pairs a sortable header with the comparator for its natural
+// sort direction. less reports whether a sorts before b.
+type sortColumn struct {
+	header string
+	less   func(a, b Project) bool
+}
+
+// projName is the case-insensitive display name used as the deterministic
+// final tiebreaker so ordering is stable regardless of incoming order.
+func projName(p Project) string {
+	n := p.Name
+	if n == "" {
+		n = p.Slug
+	}
+	return strings.ToLower(n)
+}
+
+// sortColumns is the ordered cycle of meaningful dashboard sort columns.
+// Headers must match the displayed header text exactly.
+var sortColumns = []sortColumn{
+	{"PROJECT", func(a, b Project) bool {
+		return projName(a) < projName(b)
+	}},
+	{"SESSIONS", func(a, b Project) bool {
+		if a.SessionCount != b.SessionCount {
+			return a.SessionCount > b.SessionCount
+		}
+		if !a.LastActivity.Equal(b.LastActivity) {
+			return a.LastActivity.After(b.LastActivity)
+		}
+		return projName(a) < projName(b)
+	}},
+	{"AGENTS", func(a, b Project) bool {
+		aj, bj := strings.Join(a.Agents, ","), strings.Join(b.Agents, ",")
+		if aj != bj {
+			return aj < bj
+		}
+		return projName(a) < projName(b)
+	}},
+	{"ACTIVITY", func(a, b Project) bool {
+		if a.TurnCount != b.TurnCount {
+			return a.TurnCount > b.TurnCount
+		}
+		if a.ToolCallCount != b.ToolCallCount {
+			return a.ToolCallCount > b.ToolCallCount
+		}
+		return projName(a) < projName(b)
+	}},
+	{"SIZE", func(a, b Project) bool {
+		if a.BytesTotal != b.BytesTotal {
+			return a.BytesTotal > b.BytesTotal
+		}
+		return projName(a) < projName(b)
+	}},
+	{"PENDING", func(a, b Project) bool {
+		if a.PendingCount != b.PendingCount {
+			return a.PendingCount > b.PendingCount
+		}
+		if a.PendingBytes != b.PendingBytes {
+			return a.PendingBytes > b.PendingBytes
+		}
+		return projName(a) < projName(b)
+	}},
+	{"TICKETS", func(a, b Project) bool {
+		at, bt := ticketTotal(a), ticketTotal(b)
+		if at != bt {
+			return at > bt
+		}
+		return projName(a) < projName(b)
+	}},
+	{"SEEN", func(a, b Project) bool {
+		if !a.LastActivity.Equal(b.LastActivity) {
+			return a.LastActivity.After(b.LastActivity)
+		}
+		return projName(a) < projName(b)
+	}},
+}
+
+func ticketTotal(p Project) int {
+	if p.Tickets == nil {
+		return 0
+	}
+	return p.Tickets.Total
 }
 
 func (m *dashboardModel) setSize(w, h int) {
@@ -29,9 +116,24 @@ func (m *dashboardModel) setProjects(p []Project) {
 		selectedSlug = s.Slug
 	}
 	m.projects = p
-	if selectedSlug != "" {
+	m.applySort()
+	m.reselect(selectedSlug)
+}
+
+// applySort orders the visible rows by the active sort column.
+func (m *dashboardModel) applySort() {
+	less := sortColumns[m.sortCol].less
+	sort.SliceStable(m.projects, func(i, j int) bool {
+		return less(m.projects[i], m.projects[j])
+	})
+}
+
+// reselect restores the cursor to the row matching slug, clamping when the
+// slug is gone or empty so the cursor stays in range.
+func (m *dashboardModel) reselect(slug string) {
+	if slug != "" {
 		for i, pr := range m.projects {
-			if pr.Slug == selectedSlug {
+			if pr.Slug == slug {
 				m.cursor = i
 				break
 			}
@@ -41,6 +143,18 @@ func (m *dashboardModel) setProjects(p []Project) {
 		m.cursor = max(0, len(m.projects)-1)
 	}
 	m.clampOffset()
+}
+
+// cycleSort advances to the next sort column and re-sorts, preserving the
+// current selection across the reorder.
+func (m *dashboardModel) cycleSort() {
+	var selectedSlug string
+	if s := m.selected(); s != nil {
+		selectedSlug = s.Slug
+	}
+	m.sortCol = (m.sortCol + 1) % len(sortColumns)
+	m.applySort()
+	m.reselect(selectedSlug)
 }
 
 func (m dashboardModel) selected() *Project {
@@ -103,6 +217,8 @@ func (m dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		case "G":
 			m.cursor = max(0, len(m.projects)-1)
 			m.clampOffset()
+		case "s":
+			m.cycleSort()
 		}
 	case tea.MouseMsg:
 		switch msg.Button {
@@ -148,16 +264,16 @@ func (m dashboardModel) view() string {
 	var b strings.Builder
 	// Header row.
 	b.WriteString("  ")
-	b.WriteString(padRight(StyleColHeader.Render("PROJECT"), colProject))
-	b.WriteString(padRight(StyleColHeader.Render("REPO"), colRepo))
-	b.WriteString(padRight(StyleColHeader.Render("WORKTREES"), colWorktrees))
-	b.WriteString(padRight(StyleColHeader.Render("AGENTS"), colAgents))
-	b.WriteString(padRight(StyleColHeader.Render("SESSIONS"), colSessions))
-	b.WriteString(padRight(StyleColHeader.Render("ACTIVITY"), colActivity))
-	b.WriteString(padRight(StyleColHeader.Render("SIZE"), colSize))
-	b.WriteString(padRight(StyleColHeader.Render("PENDING"), colPending))
-	b.WriteString(padRight(StyleColHeader.Render("TICKETS"), colTickets))
-	b.WriteString(StyleColHeader.Render("SEEN"))
+	b.WriteString(padRight(m.headerCell("PROJECT"), colProject))
+	b.WriteString(padRight(m.headerCell("REPO"), colRepo))
+	b.WriteString(padRight(m.headerCell("WORKTREES"), colWorktrees))
+	b.WriteString(padRight(m.headerCell("AGENTS"), colAgents))
+	b.WriteString(padRight(m.headerCell("SESSIONS"), colSessions))
+	b.WriteString(padRight(m.headerCell("ACTIVITY"), colActivity))
+	b.WriteString(padRight(m.headerCell("SIZE"), colSize))
+	b.WriteString(padRight(m.headerCell("PENDING"), colPending))
+	b.WriteString(padRight(m.headerCell("TICKETS"), colTickets))
+	b.WriteString(m.headerCell("SEEN"))
 	b.WriteString("\n")
 
 	visible := m.visibleRows()
@@ -173,6 +289,15 @@ func (m dashboardModel) view() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// headerCell renders a column header, marking the active sort column with
+// the active style. Width is unchanged — the marker is style-only.
+func (m dashboardModel) headerCell(name string) string {
+	if sortColumns[m.sortCol].header == name {
+		return StyleColHeaderActive.Render(name)
+	}
+	return StyleColHeader.Render(name)
 }
 
 func (m dashboardModel) renderRow(p Project, selected bool) string {
