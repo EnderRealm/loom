@@ -6,6 +6,8 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-08 — Machine dev-state + UI
+
 ### Added
 
 - `loom dev` — at-a-glance machine development state in three sections:
@@ -16,6 +18,15 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 - `loom dev` "Unreleased changelog" section — flags projects whose root
   `CHANGELOG.md` has entries under `[Unreleased]`, signalling a release
   is pending before those changes are published outside the repo.
+- Candidate review screen actions: promote, reject, and edit a
+  knowledge candidate inline.
+- `loom ui` dashboard `(s)ort` — cycle the sort column, ordered
+  left-to-right across the visible columns.
+
+### Changed
+
+- `loom tui` renamed to `loom ui`; the `tui` name stays as an alias so
+  existing muscle memory and scripts keep working.
 
 ## [1.0.1] — 2026-04-28 — Distribution + auto-update
 
