@@ -23,7 +23,7 @@ class Loom < Formula
   # archive; sha256 is `shasum -a 256` of that tarball.
   version "1.1.0"
   url "https://github.com/EnderRealm/loom/archive/refs/tags/v#{version}.tar.gz"
-  sha256 "REPLACE_WITH_RELEASE_SHA256"
+  sha256 "da4adc871faed3f0ae6c9bd433ebc1d8ce39b79421a0066b84f4033473ef75b2"
 
   depends_on "go" => :build
 
