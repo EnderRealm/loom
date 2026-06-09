@@ -36,10 +36,19 @@ func projName(p Project) string {
 	return strings.ToLower(n)
 }
 
-// sortColumns is the ordered cycle of meaningful dashboard sort columns.
-// Headers must match the displayed header text exactly.
+// sortColumns is the cycle of meaningful dashboard sort columns, ordered
+// left-to-right to match the table layout so `s` always advances the active
+// column one position to the right (skipping the non-sortable REPO and
+// WORKTREES columns). Headers must match the displayed header text exactly.
 var sortColumns = []sortColumn{
 	{"PROJECT", func(a, b Project) bool {
+		return projName(a) < projName(b)
+	}},
+	{"AGENTS", func(a, b Project) bool {
+		aj, bj := strings.Join(a.Agents, ","), strings.Join(b.Agents, ",")
+		if aj != bj {
+			return aj < bj
+		}
 		return projName(a) < projName(b)
 	}},
 	{"SESSIONS", func(a, b Project) bool {
@@ -48,13 +57,6 @@ var sortColumns = []sortColumn{
 		}
 		if !a.LastActivity.Equal(b.LastActivity) {
 			return a.LastActivity.After(b.LastActivity)
-		}
-		return projName(a) < projName(b)
-	}},
-	{"AGENTS", func(a, b Project) bool {
-		aj, bj := strings.Join(a.Agents, ","), strings.Join(b.Agents, ",")
-		if aj != bj {
-			return aj < bj
 		}
 		return projName(a) < projName(b)
 	}},
