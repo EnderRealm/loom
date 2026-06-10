@@ -46,12 +46,24 @@ Everything is driven by the unified `loom` binary. Two install paths:
 ### Option A — Homebrew (no Go toolchain required)
 
 ```sh
-brew install enderrealm/tools/loom
+brew install --formula enderrealm/tools/loom
 ```
 
 Installs a prebuilt binary from the shared `EnderRealm/homebrew-tools` tap.
-Updates: `brew upgrade loom`. The release pipeline that builds those
-binaries and the formula lives in [`docs/releasing.md`](./docs/releasing.md).
+Updates: `brew upgrade enderrealm/tools/loom`. The release pipeline that
+builds those binaries and the formula lives in
+[`docs/releasing.md`](./docs/releasing.md).
+
+Two things Homebrew will tell you about, both expected:
+
+- **Always qualify the name.** A bare `brew install loom` resolves to the
+  unrelated Loom.com screen-recorder *cask*, not this formula — hence the
+  `--formula enderrealm/tools/loom`. On a machine that already has that
+  cask installed, Homebrew skips linking our binary into the prefix
+  ("loom cask is installed, skipping link"); `loom` deploys (shipper /
+  receiver hosts) won't have the cask, so this only affects desktops.
+- **Trust the tap** if you have `HOMEBREW_REQUIRE_TAP_TRUST` enabled (the
+  default in a future Homebrew): `brew trust --formula enderrealm/tools/loom`.
 
 ### Option B — Source checkout (recommended for development and auto-update)
 
