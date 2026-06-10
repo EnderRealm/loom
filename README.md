@@ -46,11 +46,12 @@ Everything is driven by the unified `loom` binary. Two install paths:
 ### Option A — Homebrew (no Go toolchain required)
 
 ```sh
-brew tap EnderRealm/loom
-brew install loom
+brew install enderrealm/tools/loom
 ```
 
-Updates: `brew upgrade loom`. Tap details and release publishing flow live in [`Formula/README.md`](./Formula/README.md).
+Installs a prebuilt binary from the shared `EnderRealm/homebrew-tools` tap.
+Updates: `brew upgrade loom`. The release pipeline that builds those
+binaries and the formula lives in [`docs/releasing.md`](./docs/releasing.md).
 
 ### Option B — Source checkout (recommended for development and auto-update)
 

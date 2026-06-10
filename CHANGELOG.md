@@ -6,6 +6,25 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-06-09 — Automated releases
+
+### Added
+
+- GoReleaser release pipeline (`.goreleaser.yml` +
+  `.github/workflows/release.yml`): pushing a `vX.Y.Z` tag
+  cross-compiles `loom` for darwin/linux × amd64/arm64, publishes a
+  GitHub Release with binary tarballs + `checksums.txt`, and commits
+  the generated formula to the `EnderRealm/homebrew-tools` tap. See
+  `docs/releasing.md`.
+
+### Changed
+
+- Homebrew install moves to the shared `EnderRealm/homebrew-tools` tap
+  (`brew install enderrealm/tools/loom`) and ships prebuilt binaries —
+  no Go toolchain required at install time. The hand-maintained
+  `Formula/loom.rb` (and its README) are removed; the tap formula is
+  generated on each release.
+
 ## [1.1.0] — 2026-06-08 — Machine dev-state + UI
 
 ### Added

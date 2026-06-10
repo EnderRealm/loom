@@ -51,3 +51,4 @@ extractors/eval-data/*.jsonl
 # .idea/
 # .vscode/
 /loom
+dist/

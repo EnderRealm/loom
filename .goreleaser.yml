@@ -1,0 +1,39 @@
+version: 2
+
+builds:
+  - binary: loom
+    main: ./cmd/loom
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X loom/cmd/loom/cmd.Version={{.Version}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github-native
+
+brews:
+  - repository:
+      owner: EnderRealm
+      name: homebrew-tools
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    name: loom
+    homepage: "https://github.com/EnderRealm/loom"
+    description: "Capture, ship, summarize, and explore agent session transcripts"
+    install: |
+      bin.install "loom"
+    test: |
+      assert_match "Usage: loom", shell_output("#{bin}/loom --help")
