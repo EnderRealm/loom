@@ -8,6 +8,12 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `loom relevant --for-ticket <namespaced-id>`: read-only command that
+  scans the validated knowledge corpus at `~/.loom/knowledge/` and prints
+  a ranked markdown list of related truths and decisions. Ranking
+  precedence is direct citations → evidence-path overlap → keyword
+  overlap, with scope match breaking ties; each line carries the artifact
+  id, claim title, relative path, score, and matched signal.
 - Machine roles: `loom install server` (receiver + summarizer) and the
   new `loom install remote` (shipper) record the machine's role under
   `$LOOM_HOME/role`. `loom dev` and `loom status` scope health to the

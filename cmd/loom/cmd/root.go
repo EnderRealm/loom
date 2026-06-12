@@ -22,6 +22,9 @@ Interactive:
   ui                           Open the dashboard (alias: tui)
   summarize [--watch|--rebuild]  Fold received sessions into summaries.db
 
+Knowledge:
+  relevant --for-ticket <id>   Rank stored truths/decisions relevant to a ticket
+
 Lifecycle:
   install <component>          Install a launchd agent for the running loom binary
                                  server | receiver | summarizer | shipper

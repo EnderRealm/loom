@@ -4,9 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// frontmatterKey matches a top-level "key: value" line inside a `---` block.
+// Indented lines (sub-fields under sources:, evidence:) are ignored.
+var frontmatterKey = regexp.MustCompile(`^([a-z_]+):\s*(.*)$`)
 
 // pluralType maps a singular artifact type to the directory segment used in the
 // knowledge store (truth → truths, decision → decisions).
