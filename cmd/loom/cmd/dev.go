@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"loom/internal/config"
 	"loom/internal/launchd"
 	"loom/internal/tui"
 	"loom/internal/updater"
@@ -25,12 +26,8 @@ var devCmd = &cobra.Command{
 			return err
 		}
 
-		labels := []string{
-			receiver.AgentLabel,
-			summarizerLabel,
-			shipper.AgentLabel,
-			updater.AgentLabel,
-		}
+		role := config.ReadRole()
+		labels := expectedDaemons(role, plistInstalled(updater.AgentLabel))
 		running := 0
 		for _, label := range labels {
 			if daemonRunning(label) {
@@ -42,8 +39,9 @@ var devCmd = &cobra.Command{
 			pending += p.PendingCount
 		}
 
-		// State precedence: any daemon down is degraded (red) regardless of
-		// pending; all up with a backlog is yellow; all up and clear is green.
+		// State precedence: any expected daemon down is degraded (red)
+		// regardless of pending; all up with a backlog is yellow; all up and
+		// clear is green.
 		state := "healthy"
 		stateStyle := tui.StyleSuccess
 		switch {
@@ -55,8 +53,16 @@ var devCmd = &cobra.Command{
 			stateStyle = tui.StyleWarning
 		}
 		dot := stateStyle.Render("●")
-		detail := tui.StyleDim.Render(fmt.Sprintf("%d/%d daemons · %d pending", running, len(labels), pending))
+		var detail string
+		if role != "" {
+			detail = tui.StyleDim.Render(fmt.Sprintf("%s · %d/%d daemons · %d pending", role, running, len(labels), pending))
+		} else {
+			detail = tui.StyleDim.Render(fmt.Sprintf("%d/%d daemons · %d pending", running, len(labels), pending))
+		}
 		fmt.Printf("%s loom %s   %s\n", dot, stateStyle.Render(state), detail)
+		if role == "" {
+			fmt.Println(tui.StyleDim.Render("  no role set — run 'loom install server' or 'loom install remote'"))
+		}
 		fmt.Println()
 
 		fmt.Println(tui.StyleSection.Render("Dirty repos"))
@@ -174,15 +180,48 @@ func unreleasedChangelogEntries(repoPath string) (count int, ok bool) {
 	return count, true
 }
 
-// daemonRunning reports whether a daemon's plist is installed and launchd
-// shows it in the running state. Not-installed and not-loaded both count as
-// not-running.
-func daemonRunning(label string) bool {
+// expectedDaemons returns the set of daemon labels that should be running
+// for a machine's role, used as the denominator of the dev health rollup.
+// A server folds sessions (receiver + summarizer); a remote only ships
+// them. The updater is appended for either role only when its plist is
+// actually installed — brew-installed machines lack a source checkout and
+// never install it, so its absence must not count against health. An
+// unknown or empty role falls back to the legacy all-four set.
+func expectedDaemons(role string, updaterInstalled bool) []string {
+	var labels []string
+	switch role {
+	case config.RoleServer:
+		labels = []string{receiver.AgentLabel, summarizerLabel}
+	case config.RoleRemote:
+		labels = []string{shipper.AgentLabel}
+	default:
+		return []string{receiver.AgentLabel, summarizerLabel, shipper.AgentLabel, updater.AgentLabel}
+	}
+	if updaterInstalled {
+		labels = append(labels, updater.AgentLabel)
+	}
+	return labels
+}
+
+// plistInstalled reports whether a daemon's launchd plist exists on disk,
+// independent of whether launchd has it loaded or running. daemonRunning
+// conflates not-installed with not-running, which is correct for the
+// expected set but wrong for deciding whether to expect the updater at
+// all — that decision needs the pure installed/not-installed signal.
+func plistInstalled(label string) bool {
 	plistPath, err := launchd.PlistPath(label)
 	if err != nil || plistPath == "" {
 		return false
 	}
-	if _, err := os.Stat(plistPath); err != nil {
+	_, err = os.Stat(plistPath)
+	return err == nil
+}
+
+// daemonRunning reports whether a daemon's plist is installed and launchd
+// shows it in the running state. Not-installed and not-loaded both count as
+// not-running.
+func daemonRunning(label string) bool {
+	if !plistInstalled(label) {
 		return false
 	}
 	out, loaded, err := launchd.Status(label)

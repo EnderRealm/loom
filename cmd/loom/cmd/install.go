@@ -24,8 +24,8 @@ const (
 var installCmd = &cobra.Command{
 	Use:       "install <component>",
 	Short:     "Install a loom launchd agent",
-	Long:      "Components: server | receiver | summarizer | shipper | updater. Each writes a launchd plist that runs the current loom binary.",
-	ValidArgs: []string{"server", "receiver", "summarizer", "shipper", "updater"},
+	Long:      "Components: server | remote | receiver | summarizer | shipper | updater. Each writes a launchd plist that runs the current loom binary. The server and remote profiles also record the machine's role for health reporting.",
+	ValidArgs: []string{"server", "remote", "receiver", "summarizer", "shipper", "updater"},
 	Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		switch args[0] {
@@ -36,7 +36,12 @@ var installCmd = &cobra.Command{
 			if err := installSummarizer(); err != nil {
 				return err
 			}
-			return nil
+			return config.WriteRole(config.RoleServer)
+		case "remote":
+			if err := installShipper(); err != nil {
+				return err
+			}
+			return config.WriteRole(config.RoleRemote)
 		case "receiver":
 			return installReceiver()
 		case "summarizer":

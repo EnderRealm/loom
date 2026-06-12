@@ -3,8 +3,66 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+
+	"loom/internal/config"
+	"loom/internal/updater"
+	"loom/transport/receiver"
+	"loom/transport/shipper"
 )
+
+func TestExpectedDaemons(t *testing.T) {
+	cases := []struct {
+		name             string
+		role             string
+		updaterInstalled bool
+		want             []string
+	}{
+		{
+			name: "server without updater",
+			role: config.RoleServer,
+			want: []string{receiver.AgentLabel, summarizerLabel},
+		},
+		{
+			name:             "server with updater",
+			role:             config.RoleServer,
+			updaterInstalled: true,
+			want:             []string{receiver.AgentLabel, summarizerLabel, updater.AgentLabel},
+		},
+		{
+			name: "remote without updater",
+			role: config.RoleRemote,
+			want: []string{shipper.AgentLabel},
+		},
+		{
+			name:             "remote with updater",
+			role:             config.RoleRemote,
+			updaterInstalled: true,
+			want:             []string{shipper.AgentLabel, updater.AgentLabel},
+		},
+		{
+			name: "empty role falls back to all four (updater not installed)",
+			role: "",
+			want: []string{receiver.AgentLabel, summarizerLabel, shipper.AgentLabel, updater.AgentLabel},
+		},
+		{
+			name:             "empty role falls back to all four (updater installed)",
+			role:             "",
+			updaterInstalled: true,
+			want:             []string{receiver.AgentLabel, summarizerLabel, shipper.AgentLabel, updater.AgentLabel},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expectedDaemons(tc.role, tc.updaterInstalled)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("expectedDaemons(%q, %v) = %v, want %v", tc.role, tc.updaterInstalled, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestUnreleasedChangelogEntries(t *testing.T) {
 	cases := []struct {

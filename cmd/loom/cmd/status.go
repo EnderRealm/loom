@@ -31,37 +31,63 @@ var statusCmd = &cobra.Command{
 			shipperInterval = fmt.Sprintf("%dm (capture+ship ticker)", n)
 		}
 
+		role := config.ReadRole()
+		// Mirror dev.go's math: the updater counts toward the expected set
+		// only when its plist is installed, so brew machines without a
+		// source checkout don't flag a missing updater.
+		expected := map[string]bool{}
+		for _, label := range expectedDaemons(role, plistInstalled(updater.AgentLabel)) {
+			expected[label] = true
+		}
+
 		printAgent(agentReport{
 			human:    "loom-receiver",
 			label:    receiver.AgentLabel,
 			logPath:  filepath.Join(config.Home(), "receiver.log"),
 			interval: "n/a (HTTP server)",
+			role:     role,
+			expected: expected[receiver.AgentLabel],
 		})
 		printAgent(agentReport{
 			human:    "loom-summarizer",
 			label:    summarizerLabel,
 			logPath:  filepath.Join(config.Home(), "summarizer.log"),
 			interval: "30s (sweep ticker)",
+			role:     role,
+			expected: expected[summarizerLabel],
 		})
 		printAgent(agentReport{
 			human:    "loom-shipper",
 			label:    shipper.AgentLabel,
 			logPath:  filepath.Join(config.TransportDir(), "shipper.log"),
 			interval: shipperInterval,
+			role:     role,
+			expected: expected[shipper.AgentLabel],
 		})
 		printAgent(agentReport{
 			human:    "loom-updater",
 			label:    updater.AgentLabel,
 			logPath:  updater.LogPath(),
 			interval: fmt.Sprintf("%dm (git poll)", updater.DefaultIntervalMinutes),
+			role:     role,
+			expected: expected[updater.AgentLabel],
 		})
-		fmt.Println("=== sync health ===")
-		if err := shipper.PrintHealth(os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "  (no notify state: %v)\n", err)
+		// Sync health is shipper-specific notify state; only meaningful on
+		// machines that actually run the shipper.
+		if plistInstalled(shipper.AgentLabel) {
+			fmt.Println("=== sync health ===")
+			if err := shipper.PrintHealth(os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "  (no notify state: %v)\n", err)
+			}
+			fmt.Println()
 		}
-		fmt.Println()
 		fmt.Println("=== config ===")
 		fmt.Printf("  LOOM_HOME=%s\n", config.Home())
+		if role != "" {
+			fmt.Printf("  role: %s\n", role)
+		} else {
+			fmt.Println("  role: not set")
+		}
 		if _, err := os.Stat(config.Path()); err == nil {
 			fmt.Println("  config.json: present")
 		} else {
@@ -76,6 +102,8 @@ type agentReport struct {
 	label    string
 	logPath  string
 	interval string
+	role     string // machine role, for the not-installed marker
+	expected bool   // whether this role expects the component installed
 }
 
 func printAgent(r agentReport) {
@@ -84,6 +112,15 @@ func printAgent(r agentReport) {
 		return
 	}
 	if _, err := os.Stat(plistPath); err != nil {
+		// A component a set role expects but that isn't installed gets an
+		// explicit marker rather than a silent skip, so the gap is visible.
+		// Components outside the role, and every component on a no-role
+		// machine, stay silently skipped (the legacy behavior).
+		if r.role != "" && r.expected {
+			fmt.Printf("=== %s ===\n", r.human)
+			fmt.Printf("  not installed (expected for %s role)\n", r.role)
+			fmt.Println()
+		}
 		return
 	}
 	fmt.Printf("=== %s ===\n", r.human)

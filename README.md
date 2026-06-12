@@ -78,15 +78,18 @@ Updates: pull and rebuild manually, or `loom install updater` to have a daemon d
 ### Common: install launchd agents
 
 ```sh
-loom install server             # receiver + summarizer
+loom install server             # receiver + summarizer; records role=server
+loom install remote             # shipper (client side); records role=remote
 loom install receiver           # receiver only
 loom install summarizer         # summarizer only
-loom install shipper            # shipper (client side)
+loom install shipper            # shipper only (no role change)
 loom install updater            # source checkouts only — see Auto-update
 loom uninstall                  # remove all loom launchd agents
 loom status                     # show state of all installed components
 loom ui                         # open the dashboard (alias: loom tui)
 ```
+
+The `server` and `remote` profiles also record the machine's role under `$LOOM_HOME/role`. `loom dev` and `loom status` scope their health rollup to the daemons that role expects, so a `remote` machine running only the shipper no longer reports "degraded" for the receiver/summarizer it was never meant to run. Installing individual components (`receiver`, `summarizer`, `shipper`, `updater`) leaves the role untouched.
 
 `install.sh` is preserved as a thin forwarder for muscle memory: each `--install-X` flag does `go build -o $LOOM_BIN_DIR/loom ./cmd/loom` then `loom install X`. Either entry point works; new docs prefer the `loom` binary directly.
 
@@ -285,7 +288,7 @@ rm -f ~/.local/bin/loom
 | `loom summarize [--watch]`    | Fold received sessions into `~/.loom/summaries.db`.                         |
 | `loom summarize --rebuild`    | Drop and re-fold the summary DB; the upgrade path for schema bumps.         |
 | `loom ui`                     | Interactive dashboard (alias: `loom tui`).                                  |
-| `loom install <component>`    | Components: `server` / `receiver` / `summarizer` / `shipper`.               |
+| `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `shipper`. `server`/`remote` also record the machine role. |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |
 | `loom status`                 | Launchctl state per component + sync health + config presence.              |
 

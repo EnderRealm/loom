@@ -6,6 +6,25 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Machine roles: `loom install server` (receiver + summarizer) and the
+  new `loom install remote` (shipper) record the machine's role under
+  `$LOOM_HOME/role`. `loom dev` and `loom status` scope health to the
+  daemons that role expects, so a shipper-only machine no longer reports
+  "degraded" for the receiver/summarizer it was never meant to run. The
+  updater counts toward health only when its plist is installed (brew
+  machines lack a source checkout and never install it).
+
+### Changed
+
+- `loom dev` health line shows the role and a per-role daemon count
+  (e.g. `remote · 1/1 daemons`); with no role set it keeps the legacy
+  format and prints a hint to run `loom install server`/`remote`.
+- `loom status` prints the machine role, marks role-expected components
+  that aren't installed instead of skipping them silently, and shows the
+  sync-health section only when the shipper is installed.
+
 ## [1.1.1] — 2026-06-09 — Automated releases
 
 ### Added
