@@ -78,9 +78,34 @@ throttle. `ThrottleInterval=30` (or higher) gives you a chance to
 git checkout, no go toolchain). Don't `loom install updater` on those
 hosts; rely on `brew upgrade` instead.
 
+**Fast-forward-only guard.** `reset --hard` is unrecoverable, and on a
+machine where the deploy checkout doubles as a dev checkout a naive
+"HEAD != origin/main → reset" would destroy local work. The updater
+deploys only on a pure fast-forward of a clean main. After the fetch
+and before the reset it refuses the tick — logging the specific reason
+and returning success (no error, so launchd doesn't crash-respawn) —
+when any of:
+
+- **the working tree is dirty** (`git status --porcelain` non-empty) —
+  uncommitted edits would be clobbered;
+- **HEAD is not on `main`** (`git rev-parse --abbrev-ref HEAD` != `main`,
+  which also catches a detached HEAD mid-rebase) — a feature branch ref
+  would be reset to `origin/main`;
+- **HEAD is not an ancestor of `origin/main`**
+  (`git merge-base --is-ancestor HEAD origin/main` exits non-zero) —
+  local commits ahead of or diverged from the remote would be lost.
+
+A skipped tick is not a failure; it converges on the next clean tick.
+Once the conditions hold again — the dev commits land on `origin/main`,
+the branch returns to `main`, the tree is committed or stashed — the
+following poll fast-forwards and deploys as normal.
+
 ## Skeleton (Go)
 
-A complete implementation is ~150 LoC. The key pieces:
+A complete implementation is ~150 LoC. The key pieces (the skeleton's
+`Tick` omits the fast-forward-only guard described above — see
+`internal/updater/updater.go` for the guarded version before copying
+this into a checkout that doubles as a dev tree):
 
 ```go
 package updater

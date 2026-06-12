@@ -31,6 +31,17 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   that aren't installed instead of skipping them silently, and shows the
   sync-health section only when the shipper is installed.
 
+### Fixed
+
+- Auto-updater no longer destroys local work on machines where the
+  deploy checkout doubles as a dev checkout. The updater treated any
+  `HEAD != origin/main` as "remote moved forward" and ran `reset
+  --hard origin/main`, clobbering uncommitted changes, resetting
+  unpushed commits, and overwriting checked-out feature branch refs. A
+  tick now deploys only on a pure fast-forward of a clean `main`;
+  otherwise it logs the reason (dirty tree / not on main / HEAD
+  diverged) and skips, converging on the next clean tick.
+
 ## [1.1.1] — 2026-06-09 — Automated releases
 
 ### Added

@@ -71,29 +71,16 @@ func Daemon(ctx context.Context) error {
 	}
 }
 
-// Tick performs one git fetch + (if origin/main moved) reset + rebuild
-// + kickstart cycle. Exposed so a one-off `loom updater once` can drive
-// the same logic without the daemon loop.
+// Tick performs one git fetch + (if origin/main moved cleanly) reset +
+// rebuild + kickstart cycle. Exposed so a one-off `loom updater once`
+// can drive the same logic without the daemon loop.
 func Tick(ctx context.Context, src string) error {
-	curSHA, err := gitOutput(ctx, src, "rev-parse", "HEAD")
+	updated, err := updateSource(ctx, src)
 	if err != nil {
-		return fmt.Errorf("rev-parse HEAD: %w", err)
+		return err
 	}
-	if _, err := gitOutput(ctx, src, "fetch", "--quiet", "origin", "main"); err != nil {
-		return fmt.Errorf("fetch: %w", err)
-	}
-	remoteSHA, err := gitOutput(ctx, src, "rev-parse", "origin/main")
-	if err != nil {
-		return fmt.Errorf("rev-parse origin/main: %w", err)
-	}
-	if curSHA == remoteSHA {
-		log.Printf("up to date (sha=%s)", curSHA[:short])
+	if !updated {
 		return nil
-	}
-	log.Printf("update available %s → %s", curSHA[:short], remoteSHA[:short])
-
-	if _, err := gitOutput(ctx, src, "reset", "--hard", "origin/main"); err != nil {
-		return fmt.Errorf("reset: %w", err)
 	}
 
 	bin, err := loomBinary()
@@ -127,6 +114,79 @@ func Tick(ctx context.Context, src string) error {
 		return fmt.Errorf("kickstart self: %w", err)
 	}
 	return nil
+}
+
+// updateSource fetches origin/main and, when the checkout can safely
+// fast-forward to it, runs reset --hard and reports updated=true. Any
+// other condition returns (false, nil) so the caller skips the deploy.
+func updateSource(ctx context.Context, src string) (bool, error) {
+	curSHA, err := gitOutput(ctx, src, "rev-parse", "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("rev-parse HEAD: %w", err)
+	}
+	if _, err := gitOutput(ctx, src, "fetch", "--quiet", "origin", "main"); err != nil {
+		return false, fmt.Errorf("fetch: %w", err)
+	}
+	remoteSHA, err := gitOutput(ctx, src, "rev-parse", "origin/main")
+	if err != nil {
+		return false, fmt.Errorf("rev-parse origin/main: %w", err)
+	}
+	if curSHA == remoteSHA {
+		log.Printf("up to date (sha=%s)", curSHA[:short])
+		return false, nil
+	}
+
+	// Guard against destroying local state on machines where the deploy
+	// checkout is also a dev checkout. reset --hard is unrecoverable, so
+	// it runs only for a pure fast-forward of a clean main. Checks run
+	// after the fetch (the ancestry check needs the fresh origin/main)
+	// and before the reset.
+	if status, err := gitOutput(ctx, src, "status", "--porcelain"); err != nil {
+		return false, fmt.Errorf("status: %w", err)
+	} else if status != "" {
+		log.Printf("skipping deploy: working tree dirty; resumes once clean")
+		return false, nil
+	}
+	branch, err := gitOutput(ctx, src, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("rev-parse branch: %w", err)
+	}
+	if branch != "main" {
+		log.Printf("skipping deploy: HEAD on %q, not main", branch)
+		return false, nil
+	}
+	// HEAD != origin/main was established above, so an affirmative
+	// ancestor result means HEAD is strictly behind — a fast-forward.
+	// A negative result means HEAD diverged or is ahead; refuse it.
+	if ancestor, err := isAncestor(ctx, src, "HEAD", "origin/main"); err != nil {
+		return false, fmt.Errorf("merge-base: %w", err)
+	} else if !ancestor {
+		log.Printf("skipping deploy: HEAD %s diverged from origin/main %s", curSHA[:short], remoteSHA[:short])
+		return false, nil
+	}
+	log.Printf("update available %s → %s", curSHA[:short], remoteSHA[:short])
+
+	if _, err := gitOutput(ctx, src, "reset", "--hard", "origin/main"); err != nil {
+		return false, fmt.Errorf("reset: %w", err)
+	}
+	return true, nil
+}
+
+// isAncestor reports whether commit is an ancestor of ref. git
+// merge-base --is-ancestor signals "no" with exit code 1 and no output,
+// which gitOutput would surface as an error; this distinguishes that
+// expected non-zero exit from a genuine failure.
+func isAncestor(ctx context.Context, dir, commit, ref string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", commit, ref)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ProcessState.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 }
 
 const short = 8
