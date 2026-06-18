@@ -74,9 +74,10 @@ makes the updater crash immediately would loop infinitely without a
 throttle. `ThrottleInterval=30` (or higher) gives you a chance to
 `launchctl bootout` it manually if you push something broken.
 
-**Source-bound.** The updater is a no-op for Homebrew installs (no
-git checkout, no go toolchain). Don't `loom install updater` on those
-hosts; rely on `brew upgrade` instead.
+**Source-bound.** The updater needs a git checkout and a Go toolchain
+on the host. A machine that has neither can't run `loom install
+updater`; give it a source checkout and a Go toolchain first, then the
+updater can manage it.
 
 **Fast-forward-only guard.** `reset --hard` is unrecoverable, and on a
 machine where the deploy checkout doubles as a dev checkout a naive
@@ -246,8 +247,6 @@ keeping a source checkout per host.
 
 ## Related
 
-- [`Formula/loom.rb`](../Formula/loom.rb) — Homebrew formula path,
-  for users who want the binary without the auto-update loop.
 - [`internal/updater/updater.go`](../internal/updater/updater.go) —
   loom's concrete implementation of this pattern.
 - Ghostwheel's [`tools/deployer/deployer.py`](https://github.com/EnderRealm/ghostwheel/blob/main/tools/deployer/deployer.py)

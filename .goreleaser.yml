@@ -24,16 +24,3 @@ checksum:
 
 changelog:
   use: github-native
-
-brews:
-  - repository:
-      owner: EnderRealm
-      name: homebrew-tools
-      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    name: loom
-    homepage: "https://github.com/EnderRealm/loom"
-    description: "Capture, ship, summarize, and explore agent session transcripts"
-    install: |
-      bin.install "loom"
-    test: |
-      assert_match "Usage: loom", shell_output("#{bin}/loom --help")

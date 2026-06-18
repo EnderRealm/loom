@@ -19,9 +19,6 @@ The `Release` workflow (`.github/workflows/release.yml`) fires on any
    `checksums.txt`.
 3. Publishes a GitHub Release with those archives as assets and a
    GitHub-native changelog generated from the commits in the tag range.
-4. Commits the generated formula to the `EnderRealm/homebrew-tools`
-   tap, so `brew install enderrealm/tools/loom` resolves to the new
-   version.
 
 Config lives in [`.goreleaser.yml`](../.goreleaser.yml). Validate
 changes locally before pushing a tag:
@@ -39,16 +36,15 @@ Versioning follows [SemVer](https://semver.org). Roll the
 
 ## Secrets
 
-The workflow needs one repository secret beyond the built-in
-`GITHUB_TOKEN`:
+The workflow needs no secrets beyond the built-in `GITHUB_TOKEN`,
+which is enough to publish the release and its artifacts.
 
-- `TAP_GITHUB_TOKEN` — a PAT with write access to
-  `EnderRealm/homebrew-tools`, used to commit the formula. The same
-  token backs the `ticket` release pipeline.
+## Releases vs. the deploy channel
 
-## Auto-update vs. Homebrew
-
-Source checkouts can instead run `loom install updater`, a daemon that
-polls `origin/main`, rebuilds, and kickstarts the loom agents. That
-path is independent of the Homebrew release flow and does not require a
-tag — see the "Auto-update" section of the [README](../README.md).
+Tagged releases are milestone markers and artifact stores, not an
+install channel. The fleet deploys through a single channel: the
+`loom updater` daemon on each machine polls `origin/main`, rebuilds,
+and kickstarts the loom agents — no tag required (see the "Auto-update"
+section of the [README](../README.md)). Cut a tag to snapshot a
+version and attach prebuilt binaries; the running fleet picks up code
+from `origin/main` independently.

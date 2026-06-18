@@ -19,8 +19,7 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   `$LOOM_HOME/role`. `loom dev` and `loom status` scope health to the
   daemons that role expects, so a shipper-only machine no longer reports
   "degraded" for the receiver/summarizer it was never meant to run. The
-  updater counts toward health only when its plist is installed (brew
-  machines lack a source checkout and never install it).
+  updater counts toward health only when its plist is installed.
 
 ### Changed
 
@@ -30,6 +29,16 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 - `loom status` prints the machine role, marks role-expected components
   that aren't installed instead of skipping them silently, and shows the
   sync-health section only when the shipper is installed.
+
+### Removed
+
+- Homebrew distribution channel. The `EnderRealm/homebrew-tools` tap
+  publishing step is gone from `.goreleaser.yml` (no more
+  `TAP_GITHUB_TOKEN`), and the brew install/upgrade instructions and
+  tap-trust / cask-collision caveats are gone from the README. Loom
+  deploys through a single channel: a source checkout plus the `loom
+  updater` daemon on every fleet machine. Tagged GitHub releases stay
+  as milestone markers and artifact stores, not an install path.
 
 ### Fixed
 

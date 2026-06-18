@@ -41,31 +41,7 @@ loom/
   knowledge/                           # eval fixtures only — durable store is ~/.loom/knowledge/
 ```
 
-Everything is driven by the unified `loom` binary. Two install paths:
-
-### Option A — Homebrew (no Go toolchain required)
-
-```sh
-brew install --formula enderrealm/tools/loom
-```
-
-Installs a prebuilt binary from the shared `EnderRealm/homebrew-tools` tap.
-Updates: `brew upgrade enderrealm/tools/loom`. The release pipeline that
-builds those binaries and the formula lives in
-[`docs/releasing.md`](./docs/releasing.md).
-
-Two things Homebrew will tell you about, both expected:
-
-- **Always qualify the name.** A bare `brew install loom` resolves to the
-  unrelated Loom.com screen-recorder *cask*, not this formula — hence the
-  `--formula enderrealm/tools/loom`. On a machine that already has that
-  cask installed, Homebrew skips linking our binary into the prefix
-  ("loom cask is installed, skipping link"); `loom` deploys (shipper /
-  receiver hosts) won't have the cask, so this only affects desktops.
-- **Trust the tap** if you have `HOMEBREW_REQUIRE_TAP_TRUST` enabled (the
-  default in a future Homebrew): `brew trust --formula enderrealm/tools/loom`.
-
-### Option B — Source checkout (recommended for development and auto-update)
+Everything is driven by the unified `loom` binary. Install from a source checkout:
 
 ```sh
 git clone git@github.com:EnderRealm/loom.git ~/code/loom
@@ -73,9 +49,9 @@ cd ~/code/loom
 go install ./cmd/loom        # or `go build -o ~/.local/bin/loom ./cmd/loom`
 ```
 
-Updates: pull and rebuild manually, or `loom install updater` to have a daemon do it for you (see "Auto-update" below).
+Updates: pull and rebuild manually, or `loom install updater` to have a daemon do it for you (see "Auto-update" below). Every fleet machine runs the updater off its source checkout — that is the deploy channel.
 
-### Common: install launchd agents
+### Install launchd agents
 
 ```sh
 loom install server             # receiver + summarizer; records role=server
@@ -93,7 +69,7 @@ The `server` and `remote` profiles also record the machine's role under `$LOOM_H
 
 `install.sh` is preserved as a thin forwarder for muscle memory: each `--install-X` flag does `go build -o $LOOM_BIN_DIR/loom ./cmd/loom` then `loom install X`. Either entry point works; new docs prefer the `loom` binary directly.
 
-State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives wherever your installer put it (`/opt/homebrew/bin/loom` for Homebrew, `~/.local/bin/loom` for `go install`).
+State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives wherever your build put it (`~/.local/bin/loom` for `go build`, or `~/go/bin/loom` for `go install`).
 
 ```sh
 LOOM_BIN_DIR=/usr/local/bin ./install.sh --install-shipper
@@ -104,7 +80,7 @@ LOOM_HOME=/srv/loom         loom install receiver
 
 ### Auto-update
 
-The `loom updater` daemon polls `origin/main` on the source checkout, pulls + rebuilds + kickstarts every loom agent (itself last) when new commits land. Source checkouts only — Homebrew users get updates via `brew upgrade`.
+The `loom updater` daemon polls `origin/main` on the source checkout, pulls + rebuilds + kickstarts every loom agent (itself last) when new commits land. This is how loom deploys across the fleet — every machine carries a source checkout and runs the updater.
 
 ```sh
 loom install updater
