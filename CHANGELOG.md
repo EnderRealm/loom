@@ -4,6 +4,22 @@ All notable changes to Loom are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Auto-updater now activates a new release binary on macOS. After
+  installing the downloaded artifact it bootout+bootstraps each loaded
+  loom agent (via `<bin> install <component>`) instead of `launchctl
+  kickstart`. `kickstart` without `-k` is a no-op on a running daemon
+  (stale in-memory code), and even `kickstart -k` can't respawn a
+  differently-signed binary under launchd's managed Launch Constraint
+  (`EX_CONFIG`), so the new code never ran. The updater re-bootstraps
+  itself last via a detached `loom updater reexec` helper, because a job
+  can't bootout its own launchd job from within. Re-bootstrap uses
+  role-neutral component installs, so it never changes the machine's
+  persisted role.
+
 ## [1.2.0] — 2026-06-20 — Release-driven updates
 
 ### Added

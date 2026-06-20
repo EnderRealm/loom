@@ -209,7 +209,7 @@ func installSummarizer() error {
 // polls EnderRealm/loom's latest GitHub Release on a tunable interval
 // and, when a newer release than the running binary ships, downloads the
 // platform tarball, verifies its checksum, installs it over the running
-// binary, and kickstarts every other loom agent (itself last).
+// binary, and re-bootstraps every other loom agent (itself last).
 // LOOM_UPDATER_INTERVAL_MINUTES tunes the poll cadence.
 func installUpdater() error {
 	bin, err := loomBinary()

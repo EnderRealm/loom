@@ -3,7 +3,7 @@
 // tunable interval, and when a newer release than the running binary is
 // available it downloads the platform tarball, verifies its sha256
 // against the release's checksums.txt, atomically installs the extracted
-// binary over the running one, and kickstarts every other loom agent
+// binary over the running one, and re-bootstraps every other loom agent
 // (itself last). The pattern is documented in docs/auto-update-pattern.md.
 //
 // Unlike the prior source-build updater, this needs no git checkout and
@@ -24,9 +24,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"loom/internal/config"
@@ -105,7 +107,7 @@ func Daemon(ctx context.Context) error {
 }
 
 // Tick performs one check + (if a newer release is available) download +
-// verify + install + kickstart cycle. Exposed so a one-off `loom updater
+// verify + install + re-bootstrap cycle. Exposed so a one-off `loom updater
 // once` can drive the same logic without the daemon loop.
 func Tick(ctx context.Context) error {
 	tag, assets, err := source.Latest(ctx)
@@ -132,37 +134,84 @@ func Tick(ctx context.Context) error {
 	}
 	log.Printf("installed %s at %s", tag, bin)
 
-	return kickstartAgents()
+	return reBootstrapAgents(bin)
 }
 
-// kickstartAgents respawns every loaded loom agent under the freshly
+// workerComponents maps each non-self agent's launchd label to the
+// `loom install <component>` argument that re-bootstraps it. These installs
+// are role-neutral (only `server`/`remote` write the machine role), so a
+// re-bootstrap never changes the persisted role.
+var workerComponents = []struct {
+	label, component string
+}{
+	{shipper.AgentLabel, "shipper"},
+	{receiver.AgentLabel, "receiver"},
+	{SummarizerLabel, "summarizer"},
+}
+
+// reBootstrapAgents reinstalls every loaded loom agent under the freshly
 // installed binary, the updater itself last. A package var so tests can
-// stub it out (driving the real launchctl path would kill the live
-// daemon on the developer's machine).
-var kickstartAgents = func() error {
-	// Kickstart every loaded loom agent except ourselves. They respawn
-	// under the new binary on KeepAlive. Order doesn't matter — they're
-	// independent — but we save the updater (us) for last so we don't
-	// kill ourselves mid-deploy.
-	for _, label := range []string{shipper.AgentLabel, receiver.AgentLabel, SummarizerLabel} {
-		if !plistPresent(label) {
+// stub it out (driving the real launchctl path would kill the live daemon
+// on the developer's machine).
+//
+// Why bootout+bootstrap and not kickstart: `launchctl kickstart` (even with
+// -k) cannot activate a binary whose code signature changed under launchd —
+// the downloaded artifact differs from the previously-bootstrapped binary,
+// so launchd rejects the respawn (EX_CONFIG / "needs LWCR update") and the
+// daemon never runs the new code. bootout+bootstrap both restarts the daemon
+// and re-registers the launch constraint for the new binary; that is exactly
+// what `loom install <component>` does, so we re-run it via the new binary.
+var reBootstrapAgents = func(bin string) error {
+	// Workers run in their OWN launchd jobs, so we can wait on each child:
+	// the child boots out and bootstraps a different job and exits cleanly,
+	// leaving this updater process untouched. A failure on one logs and
+	// continues so a single bad agent doesn't strand the rest.
+	for _, wc := range workerComponents {
+		if !plistPresent(wc.label) {
 			continue
 		}
-		if err := launchd.Kickstart(label); err != nil {
-			log.Printf("kickstart %s: %v", label, err)
+		if err := installComponent(bin, wc.component); err != nil {
+			log.Printf("re-bootstrap %s: %v", wc.label, err)
 			continue
 		}
-		log.Printf("kickstarted %s", label)
+		log.Printf("re-bootstrapped %s", wc.label)
 	}
 
-	// Last: kickstart self. launchd kills the current process and
-	// respawns it under the new binary; from here on the new code runs.
+	// Last: re-bootstrap self. We CANNOT wait on `<bin> install updater` —
+	// it boots out com.loom.updater, which is THIS job, killing both this
+	// process and the (same-job) child mid-bootout. Instead spawn a DETACHED
+	// helper (Setsid: new session, survives our job's teardown) that sleeps
+	// briefly so we exit first, then bootout+bootstraps the updater job
+	// fresh under the new binary. We do not Wait; we just return and let
+	// launchd's KeepAlive (or the helper's bootstrap) bring the new code up.
 	if !plistPresent(AgentLabel) {
 		return nil
 	}
-	log.Printf("kickstarting self %s — new binary takes over", AgentLabel)
-	if err := launchd.Kickstart(AgentLabel); err != nil {
-		return fmt.Errorf("kickstart self: %w", err)
+	log.Printf("re-bootstrapping self %s via detached helper — new binary takes over", AgentLabel)
+	return spawnSelfReexec(bin)
+}
+
+// installComponent runs `<bin> install <component>` and waits for it. The
+// child bootout+bootstraps its own launchd job, so completing is safe for
+// the (different-job) updater process. A package var so tests can record
+// invocations without spawning a real process.
+var installComponent = func(bin, component string) error {
+	out, err := exec.Command(bin, "install", component).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// spawnSelfReexec launches the detached `<bin> updater reexec` helper that
+// re-bootstraps com.loom.updater after this process exits. Setsid detaches
+// it into a new session so it survives the updater job's bootout. We do not
+// Wait. A package var so tests can record the call without spawning.
+var spawnSelfReexec = func(bin string) error {
+	cmd := exec.Command(bin, "updater", "reexec")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("spawn self re-bootstrap: %w", err)
 	}
 	return nil
 }
@@ -356,7 +405,7 @@ func intervalFromEnv() time.Duration {
 
 // resolveLoomBinary returns the absolute path of the running loom binary
 // so the install writes to the same path. Plists pin this path;
-// installing in place + kickstart is the entire deploy sequence.
+// installing in place + re-bootstrap is the entire deploy sequence.
 func resolveLoomBinary() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -368,7 +417,10 @@ func resolveLoomBinary() (string, error) {
 	return self, nil
 }
 
-func plistPresent(label string) bool {
+// plistPresent reports whether label's launchd plist exists, gating which
+// agents count as "loaded" and so get re-bootstrapped. A package var so
+// tests can control the loaded set without touching the real filesystem.
+var plistPresent = func(label string) bool {
 	p, err := launchd.PlistPath(label)
 	if err != nil {
 		return false

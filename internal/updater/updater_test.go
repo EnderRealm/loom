@@ -10,10 +10,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 
 	"loom/internal/version"
+	"loom/transport/receiver"
+	"loom/transport/shipper"
 )
 
 // fakeSource is an in-memory releaseSource. Latest returns a fixed tag +
@@ -93,8 +96,8 @@ func newFakeRelease(t *testing.T, tag string, binContent []byte, corruptSum bool
 }
 
 // installEnv wires Tick to a temp install target, a fake release source,
-// a fixed Current version, and a no-op kickstart (so tests never touch
-// launchctl or the live daemon). It returns the install target path.
+// a fixed Current version, and a no-op re-bootstrap (so tests never touch
+// launchctl, exec, or the live daemon). It returns the install target path.
 func installEnv(t *testing.T, current string, s releaseSource, binContent []byte) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -106,16 +109,16 @@ func installEnv(t *testing.T, current string, s releaseSource, binContent []byte
 	origSrc := source
 	origVer := version.Current
 	origBin := loomBinary
-	origKick := kickstartAgents
+	origReboot := reBootstrapAgents
 	source = s
 	version.Current = current
 	loomBinary = func() (string, error) { return bin, nil }
-	kickstartAgents = func() error { return nil }
+	reBootstrapAgents = func(string) error { return nil }
 	t.Cleanup(func() {
 		source = origSrc
 		version.Current = origVer
 		loomBinary = origBin
-		kickstartAgents = origKick
+		reBootstrapAgents = origReboot
 	})
 	return bin
 }
@@ -169,6 +172,98 @@ func TestTickInstallsWhenDev(t *testing.T) {
 	}
 	if got := readFile(t, bin); got != "released binary" {
 		t.Fatalf("dev build did not update: %q", got)
+	}
+}
+
+// TestReBootstrapAgentsLoadedOnly drives the real reBootstrapAgents with
+// stubbed plistPresent + per-component hooks (no exec, no launchctl). It
+// asserts: only loaded agents are re-bootstrapped, each via the install
+// (bootout+bootstrap) path with the right component arg, and self is the
+// detached reexec done last.
+func TestReBootstrapAgentsLoadedOnly(t *testing.T) {
+	// shipper + updater loaded; receiver + summarizer not.
+	loaded := map[string]bool{
+		shipper.AgentLabel: true,
+		AgentLabel:         true,
+	}
+
+	var installs []string
+	selfSpawned := false
+
+	origPlist := plistPresent
+	origInstall := installComponent
+	origSpawn := spawnSelfReexec
+	plistPresent = func(label string) bool { return loaded[label] }
+	installComponent = func(bin, component string) error {
+		if selfSpawned {
+			t.Fatalf("worker install %q ran after self reexec", component)
+		}
+		installs = append(installs, component)
+		return nil
+	}
+	spawnSelfReexec = func(bin string) error {
+		selfSpawned = true
+		return nil
+	}
+	t.Cleanup(func() {
+		plistPresent = origPlist
+		installComponent = origInstall
+		spawnSelfReexec = origSpawn
+	})
+
+	if err := reBootstrapAgents("/tmp/loom"); err != nil {
+		t.Fatalf("reBootstrapAgents: %v", err)
+	}
+
+	want := []string{"shipper"}
+	if !reflect.DeepEqual(installs, want) {
+		t.Fatalf("worker installs = %v, want %v (only loaded workers)", installs, want)
+	}
+	if !selfSpawned {
+		t.Fatal("self reexec was not spawned for the loaded updater")
+	}
+	// receiver/summarizer are not loaded, so they must not be installed.
+	for _, c := range installs {
+		if c == "receiver" || c == "summarizer" {
+			t.Fatalf("re-bootstrapped unloaded agent %q", c)
+		}
+	}
+}
+
+// TestReBootstrapAgentsSkipsSelfWhenAbsent confirms self is not re-bootstrapped
+// when the updater plist is absent (matching plistPresent gating).
+func TestReBootstrapAgentsSkipsSelfWhenAbsent(t *testing.T) {
+	loaded := map[string]bool{receiver.AgentLabel: true}
+
+	var installs []string
+	selfSpawned := false
+
+	origPlist := plistPresent
+	origInstall := installComponent
+	origSpawn := spawnSelfReexec
+	plistPresent = func(label string) bool { return loaded[label] }
+	installComponent = func(bin, component string) error {
+		installs = append(installs, component)
+		return nil
+	}
+	spawnSelfReexec = func(bin string) error {
+		selfSpawned = true
+		return nil
+	}
+	t.Cleanup(func() {
+		plistPresent = origPlist
+		installComponent = origInstall
+		spawnSelfReexec = origSpawn
+	})
+
+	if err := reBootstrapAgents("/tmp/loom"); err != nil {
+		t.Fatalf("reBootstrapAgents: %v", err)
+	}
+	if !reflect.DeepEqual(installs, []string{"receiver"}) {
+		t.Fatalf("worker installs = %v, want [receiver]", installs)
+	}
+	if selfSpawned {
+		t.Fatal("self reexec spawned despite absent updater plist")
 	}
 }
 

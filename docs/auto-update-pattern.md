@@ -208,8 +208,8 @@ download loom_<ver>_<os>_<arch>.tar.gz + checksums.txt   (plain HTTPS, public re
 verify sha256(tarball) against its checksums.txt line
 extract the `loom` entry to a temp file beside the install target
 chmod 0755; os.Rename over the target            ◄── atomic; never a partial write
-for label in [other agents]: launchctl kickstart -k
-launchctl kickstart -k <updater-self>            ◄── KeepAlive respawns the new binary
+for component in [other agents]: <bin> install <component>   ◄── bootout+bootstrap, waited
+<bin> updater reexec (detached, Setsid)          ◄── re-bootstraps the updater job last
 ```
 
 Why this variant over source-build:
@@ -231,6 +231,57 @@ Why this variant over source-build:
 
 The network is injected behind a small interface (`Latest` + `Download`)
 so the install path is testable without hitting GitHub.
+
+### macOS caveat: in-place swap needs bootout+bootstrap, not kickstart
+
+The generic pattern above respawns agents with `launchctl kickstart -k`.
+That does **not** work for the artifact-fetch variant on macOS. A
+downloaded GoReleaser binary carries a different code signature than the
+binary launchd originally bootstrapped, and launchd enforces a managed
+Launch Constraint (LWCR) tied to that original signature:
+
+- `launchctl kickstart` (no `-k`) is a no-op on an already-running
+  service — the daemon keeps its stale in-memory code and never picks up
+  the new binary.
+- `launchctl kickstart -k` does restart the job, but launchd rejects the
+  respawn of a differently-signed binary with `EX_CONFIG` ("needs LWCR
+  update"); the daemon crash-loops (observed: shipper exit 78) instead of
+  running the new code.
+
+The reliable primitive is **bootout+bootstrap** — exactly what
+`launchd.Install` (and therefore `loom install <component>`) does: it
+restarts the daemon *and* re-registers the LWCR for the new binary. So
+after installing the new binary the updater re-bootstraps each loaded
+agent by shelling out to the freshly-installed binary's install
+subcommand, `<bin> install <component>` (the updater package can't import
+`cmd` without a cycle). These are role-neutral installs, so re-bootstrap
+never rewrites the machine's persisted role.
+
+- **Workers** (shipper, receiver, summarizer) run in their own launchd
+  jobs, so the updater runs each `<bin> install <component>` and **waits**:
+  the child boots out and bootstraps a *different* job and exits, leaving
+  the updater process untouched. A failure on one logs and continues.
+- **Self** (the updater) is re-bootstrapped **last**, and cannot be waited
+  on: `<bin> install updater` boots out `com.loom.updater`, which is the
+  updater's own job — that kills the updater process *and* the same-job
+  child mid-bootout. Instead the updater spawns a **detached** helper
+  (`<bin> updater reexec`, `SysProcAttr{Setsid: true}`) and returns
+  without waiting. The helper sleeps ~2s so the updater process exits
+  first, then bootout+bootstraps the updater job fresh under the new
+  binary. A job cannot bootout itself from within; the detached helper is
+  what escapes the parent job's teardown.
+
+Only agents whose plist is present are re-bootstrapped (the same
+"loaded" gating the kickstart path used).
+
+**Recovery.** The self-re-bootstrap is the one step that can leave the
+updater down: if the detached helper is killed after its `bootout` but
+before its `bootstrap`, `com.loom.updater` is unloaded and stays down
+(KeepAlive only respawns a *loaded* job, so it does not cover an
+unloaded label). The worker agents are unaffected — they re-bootstrap
+independently and stay current. If the updater stops polling after an
+update (no new lines in `updater.log`), recover with a one-time
+`loom install updater`. From then on it tracks releases again.
 
 ## Plist requirements
 
