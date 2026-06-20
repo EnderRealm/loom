@@ -1,10 +1,13 @@
 # Auto-update pattern: self-managing daemon over launchd
 
 A small reusable template for Go-binary-on-launchd applications that
-want to deploy themselves from `git push` without an external CI/CD
-pipeline. Loom uses it (`internal/updater`); Ghostwheel originated it
-(`tools/deployer`); both fit on a single MacBook or studio without
-extra infrastructure.
+want to deploy themselves without an external CI/CD pipeline.
+Ghostwheel originated the source-build form (`tools/deployer`); it fits
+on a single MacBook or studio without extra infrastructure. Loom now
+runs the **artifact-fetch variant** (`internal/updater`) — it pulls
+released tarballs instead of building from a checkout. The generic
+source-build pattern is documented first; loom's variant follows in
+"Loom's variant: release artifacts" below.
 
 ## When to use this pattern
 
@@ -191,6 +194,44 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 }
 ```
 
+## Loom's variant: release artifacts
+
+Loom no longer builds from a checkout. The same launchd-self-kickstart
+spine drives an **artifact-fetch** updater that installs published
+GitHub Release tarballs:
+
+```
+curVer := version.Current            // ldflag-stamped semver, "dev" on local builds
+tag, assets := GET /repos/<owner>/<repo>/releases/latest
+if curVer != "dev" && curVer == tag: up to date; sleep; continue
+download loom_<ver>_<os>_<arch>.tar.gz + checksums.txt   (plain HTTPS, public repo)
+verify sha256(tarball) against its checksums.txt line
+extract the `loom` entry to a temp file beside the install target
+chmod 0755; os.Rename over the target            ◄── atomic; never a partial write
+for label in [other agents]: launchctl kickstart -k
+launchctl kickstart -k <updater-self>            ◄── KeepAlive respawns the new binary
+```
+
+Why this variant over source-build:
+
+- **No host toolchain.** Any machine can run the updater — no git
+  checkout, no Go. The "source-bound" requirement below does not apply.
+- **No `reset --hard` hazard.** There's no working tree to clobber, so
+  the fast-forward-only guard is gone too. A machine where someone runs
+  a local `go build` for development is unaffected; the updater only
+  touches the pinned install path.
+- **Released semver, not HEAD.** The deploy unit is a tagged release,
+  not every push to `main`. Cutting a release (pushing a `vX.Y.Z` tag)
+  is the deploy trigger; the installed binary's version is always a
+  published semver.
+- **Atomic + verified.** Download, checksum-verify, and extract all land
+  in a temp file in the target's directory; only a verified extract is
+  `os.Rename`d into place, so a failed or corrupt fetch leaves the
+  running binary untouched.
+
+The network is injected behind a small interface (`Latest` + `Download`)
+so the install path is testable without hitting GitHub.
+
 ## Plist requirements
 
 Three things the install path must bake into the plist:
@@ -248,6 +289,6 @@ keeping a source checkout per host.
 ## Related
 
 - [`internal/updater/updater.go`](../internal/updater/updater.go) —
-  loom's concrete implementation of this pattern.
+  loom's artifact-fetch variant of this pattern.
 - Ghostwheel's [`tools/deployer/deployer.py`](https://github.com/EnderRealm/ghostwheel/blob/main/tools/deployer/deployer.py)
   — the Python original this pattern was extracted from.

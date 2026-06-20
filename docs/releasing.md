@@ -14,7 +14,7 @@ The `Release` workflow (`.github/workflows/release.yml`) fires on any
 1. Cross-compiles the `loom` binary for darwin/linux × amd64/arm64
    (`CGO_ENABLED=0` — the build is pure Go via `modernc.org/sqlite`).
    The tag drives `loom --version` through
-   `-X loom/cmd/loom/cmd.Version={{.Version}}`.
+   `-X loom/internal/version.Current={{.Version}}`.
 2. Builds `loom_<version>_<os>_<arch>.tar.gz` archives plus a
    `checksums.txt`.
 3. Publishes a GitHub Release with those archives as assets and a
@@ -39,12 +39,13 @@ Versioning follows [SemVer](https://semver.org). Roll the
 The workflow needs no secrets beyond the built-in `GITHUB_TOKEN`,
 which is enough to publish the release and its artifacts.
 
-## Releases vs. the deploy channel
+## Releases are the deploy channel
 
-Tagged releases are milestone markers and artifact stores, not an
-install channel. The fleet deploys through a single channel: the
-`loom updater` daemon on each machine polls `origin/main`, rebuilds,
-and kickstarts the loom agents — no tag required (see the "Auto-update"
-section of the [README](../README.md)). Cut a tag to snapshot a
-version and attach prebuilt binaries; the running fleet picks up code
-from `origin/main` independently.
+A tagged release is the deploy unit. The `loom updater` daemon on each
+machine polls the latest GitHub Release, and when a newer release than
+the running binary ships it downloads the platform tarball, verifies its
+`checksums.txt` entry, installs the extracted binary over
+`~/.local/bin/loom`, and kickstarts the loom agents (see the
+"Auto-update" section of the [README](../README.md)). Cutting a tag is
+therefore what deploys code to the fleet; an unreleased commit on `main`
+reaches a machine only when it ships in a release.

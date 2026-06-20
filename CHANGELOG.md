@@ -23,6 +23,17 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Auto-updater now installs released GitHub Release artifacts instead of
+  building `origin/main` from a source checkout. Each tick compares the
+  running binary's version to the latest release, and on a newer release
+  downloads the platform tarball (`loom_<ver>_<os>_<arch>.tar.gz`),
+  verifies its `checksums.txt` entry, atomically installs the extracted
+  binary over `~/.local/bin/loom`, and kickstarts every agent (itself
+  last). This needs no git checkout and no Go toolchain on the host, and
+  removes the `reset --hard` hazard entirely. `loom install updater` no
+  longer requires a checkout (drops the `LOOM_SOURCE` env var). The
+  released-artifact updater is the single install/update channel;
+  development is a separate local `go build -o ./loom` (or `make dev`).
 - `loom dev` health line shows the role and a per-role daemon count
   (e.g. `remote · 1/1 daemons`); with no role set it keeps the legacy
   format and prints a hint to run `loom install server`/`remote`.

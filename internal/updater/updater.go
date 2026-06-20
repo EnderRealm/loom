@@ -1,26 +1,37 @@
 // Package updater is loom's self-managing auto-updater. As a launchd
-// KeepAlive daemon it polls the source repo's origin/main on a tunable
-// interval, pulls clean, rebuilds the loom binary, and kickstarts every
-// other loom agent (itself last). The pattern is documented in
-// docs/auto-update-pattern.md.
+// KeepAlive daemon it polls EnderRealm/loom's latest GitHub Release on a
+// tunable interval, and when a newer release than the running binary is
+// available it downloads the platform tarball, verifies its sha256
+// against the release's checksums.txt, atomically installs the extracted
+// binary over the running one, and kickstarts every other loom agent
+// (itself last). The pattern is documented in docs/auto-update-pattern.md.
 //
-// The updater is opt-in: source-checkout users run `loom install
-// updater`; brew users typically don't bother and rely on
-// `brew upgrade` instead.
+// Unlike the prior source-build updater, this needs no git checkout and
+// no Go toolchain on the host: the installed binary is always a released
+// semver build. Development is a separate local `go build -o ./loom`.
 package updater
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"loom/internal/config"
 	"loom/internal/launchd"
+	"loom/internal/version"
 	"loom/transport/receiver"
 	"loom/transport/shipper"
 )
@@ -37,22 +48,44 @@ const SummarizerLabel = "com.loom.summarizer"
 // the remote.
 const DefaultIntervalMinutes = 5
 
+// githubAPIBase is the GitHub API root the default release source hits.
+// A package var so tests can point it at an httptest server.
+var githubAPIBase = "https://api.github.com"
+
+// checksumsAsset is the release asset listing "<sha256>  <filename>"
+// lines, one per tarball. GoReleaser names it checksums.txt.
+const checksumsAsset = "checksums.txt"
+
+// releaseSource fetches release metadata and assets. The default
+// implementation hits GitHub over net/http; tests inject a fake.
+type releaseSource interface {
+	// Latest returns the latest release's tag and a map of asset name to
+	// download URL.
+	Latest(ctx context.Context) (tag string, assets map[string]string, err error)
+	// Download fetches the asset at url and returns its bytes.
+	Download(ctx context.Context, url string) ([]byte, error)
+}
+
+// source is the releaseSource Tick uses. Overridable in tests.
+var source releaseSource = githubSource{}
+
+// loomBinary resolves the install target (the running binary's path).
+// A package var so tests can point the install at a temp file rather
+// than the test binary.
+var loomBinary = resolveLoomBinary
+
 // Daemon runs Tick on a ticker driven by the configured interval. Like
 // the shipper daemon, KeepAlive in the plist handles crash respawn so
 // non-fatal errors here just log and continue.
 //
 // Cancellable via SIGINT / SIGTERM through the supplied context.
 func Daemon(ctx context.Context) error {
-	src, err := SourceDir()
-	if err != nil {
-		return fmt.Errorf("source dir: %w", err)
-	}
 	interval := intervalFromEnv()
-	log.Printf("updater starting interval=%s source=%s", interval, src)
+	log.Printf("updater starting interval=%s current=%s", interval, version.String())
 
 	// One immediate tick on startup so a freshly-installed updater
 	// doesn't sit idle for the full interval before its first check.
-	if err := Tick(ctx, src); err != nil {
+	if err := Tick(ctx); err != nil {
 		log.Printf("tick: %v", err)
 	}
 
@@ -64,34 +97,49 @@ func Daemon(ctx context.Context) error {
 			log.Printf("updater shutdown requested")
 			return nil
 		case <-t.C:
-			if err := Tick(ctx, src); err != nil {
+			if err := Tick(ctx); err != nil {
 				log.Printf("tick: %v", err)
 			}
 		}
 	}
 }
 
-// Tick performs one git fetch + (if origin/main moved cleanly) reset +
-// rebuild + kickstart cycle. Exposed so a one-off `loom updater once`
-// can drive the same logic without the daemon loop.
-func Tick(ctx context.Context, src string) error {
-	updated, err := updateSource(ctx, src)
+// Tick performs one check + (if a newer release is available) download +
+// verify + install + kickstart cycle. Exposed so a one-off `loom updater
+// once` can drive the same logic without the daemon loop.
+func Tick(ctx context.Context) error {
+	tag, assets, err := source.Latest(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("latest release: %w", err)
 	}
-	if !updated {
+
+	current := version.Current
+	latest := normalizeVersion(tag)
+	// A dev build (or any version we can't match) always updates so a
+	// machine never gets stuck on an unreleased binary.
+	if current != "dev" && normalizeVersion(current) == latest {
+		log.Printf("up to date (%s)", current)
 		return nil
 	}
+	log.Printf("update available %s → %s", current, tag)
 
 	bin, err := loomBinary()
 	if err != nil {
 		return fmt.Errorf("locate loom binary: %w", err)
 	}
-	if err := rebuild(ctx, src, bin); err != nil {
-		return fmt.Errorf("rebuild: %w", err)
+	if err := installRelease(ctx, tag, assets, bin); err != nil {
+		return err
 	}
-	log.Printf("rebuilt %s", bin)
+	log.Printf("installed %s at %s", tag, bin)
 
+	return kickstartAgents()
+}
+
+// kickstartAgents respawns every loaded loom agent under the freshly
+// installed binary, the updater itself last. A package var so tests can
+// stub it out (driving the real launchctl path would kill the live
+// daemon on the developer's machine).
+var kickstartAgents = func() error {
 	// Kickstart every loaded loom agent except ourselves. They respawn
 	// under the new binary on KeepAlive. Order doesn't matter — they're
 	// independent — but we save the updater (us) for last so we don't
@@ -109,6 +157,9 @@ func Tick(ctx context.Context, src string) error {
 
 	// Last: kickstart self. launchd kills the current process and
 	// respawns it under the new binary; from here on the new code runs.
+	if !plistPresent(AgentLabel) {
+		return nil
+	}
 	log.Printf("kickstarting self %s — new binary takes over", AgentLabel)
 	if err := launchd.Kickstart(AgentLabel); err != nil {
 		return fmt.Errorf("kickstart self: %w", err)
@@ -116,94 +167,179 @@ func Tick(ctx context.Context, src string) error {
 	return nil
 }
 
-// updateSource fetches origin/main and, when the checkout can safely
-// fast-forward to it, runs reset --hard and reports updated=true. Any
-// other condition returns (false, nil) so the caller skips the deploy.
-func updateSource(ctx context.Context, src string) (bool, error) {
-	curSHA, err := gitOutput(ctx, src, "rev-parse", "HEAD")
-	if err != nil {
-		return false, fmt.Errorf("rev-parse HEAD: %w", err)
+// installRelease downloads the platform tarball + checksums for tag,
+// verifies the tarball sha256, extracts the loom binary, and atomically
+// renames it over bin. Any error before the rename leaves bin untouched
+// (download + verify + extract all land in a temp file in bin's dir;
+// only a successful, verified extract is renamed into place).
+func installRelease(ctx context.Context, tag string, assets map[string]string, bin string) error {
+	name := assetName(tag)
+	tarURL, ok := assets[name]
+	if !ok {
+		return fmt.Errorf("release %s has no asset %s", tag, name)
 	}
-	if _, err := gitOutput(ctx, src, "fetch", "--quiet", "origin", "main"); err != nil {
-		return false, fmt.Errorf("fetch: %w", err)
-	}
-	remoteSHA, err := gitOutput(ctx, src, "rev-parse", "origin/main")
-	if err != nil {
-		return false, fmt.Errorf("rev-parse origin/main: %w", err)
-	}
-	if curSHA == remoteSHA {
-		log.Printf("up to date (sha=%s)", curSHA[:short])
-		return false, nil
+	sumURL, ok := assets[checksumsAsset]
+	if !ok {
+		return fmt.Errorf("release %s has no %s", tag, checksumsAsset)
 	}
 
-	// Guard against destroying local state on machines where the deploy
-	// checkout is also a dev checkout. reset --hard is unrecoverable, so
-	// it runs only for a pure fast-forward of a clean main. Checks run
-	// after the fetch (the ancestry check needs the fresh origin/main)
-	// and before the reset.
-	if status, err := gitOutput(ctx, src, "status", "--porcelain"); err != nil {
-		return false, fmt.Errorf("status: %w", err)
-	} else if status != "" {
-		log.Printf("skipping deploy: working tree dirty; resumes once clean")
-		return false, nil
-	}
-	branch, err := gitOutput(ctx, src, "rev-parse", "--abbrev-ref", "HEAD")
+	tarball, err := source.Download(ctx, tarURL)
 	if err != nil {
-		return false, fmt.Errorf("rev-parse branch: %w", err)
+		return fmt.Errorf("download %s: %w", name, err)
 	}
-	if branch != "main" {
-		log.Printf("skipping deploy: HEAD on %q, not main", branch)
-		return false, nil
+	sums, err := source.Download(ctx, sumURL)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", checksumsAsset, err)
 	}
-	// HEAD != origin/main was established above, so an affirmative
-	// ancestor result means HEAD is strictly behind — a fast-forward.
-	// A negative result means HEAD diverged or is ahead; refuse it.
-	if ancestor, err := isAncestor(ctx, src, "HEAD", "origin/main"); err != nil {
-		return false, fmt.Errorf("merge-base: %w", err)
-	} else if !ancestor {
-		log.Printf("skipping deploy: HEAD %s diverged from origin/main %s", curSHA[:short], remoteSHA[:short])
-		return false, nil
+	if err := verifyChecksum(tarball, sums, name); err != nil {
+		return fmt.Errorf("verify %s: %w", name, err)
 	}
-	log.Printf("update available %s → %s", curSHA[:short], remoteSHA[:short])
 
-	if _, err := gitOutput(ctx, src, "reset", "--hard", "origin/main"); err != nil {
-		return false, fmt.Errorf("reset: %w", err)
+	binary, err := extractLoom(tarball)
+	if err != nil {
+		return fmt.Errorf("extract %s: %w", name, err)
 	}
-	return true, nil
+
+	// Stage in bin's directory so the final rename is atomic (same
+	// filesystem). On any failure the existing binary is left untouched.
+	dir := filepath.Dir(bin)
+	tmp, err := os.CreateTemp(dir, ".loom-update-*")
+	if err != nil {
+		return fmt.Errorf("temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(binary); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, bin); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("install: %w", err)
+	}
+	return nil
 }
 
-// isAncestor reports whether commit is an ancestor of ref. git
-// merge-base --is-ancestor signals "no" with exit code 1 and no output,
-// which gitOutput would surface as an error; this distinguishes that
-// expected non-zero exit from a genuine failure.
-func isAncestor(ctx context.Context, dir, commit, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", commit, ref)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return true, nil
-	}
-	if exit, ok := err.(*exec.ExitError); ok && exit.ProcessState.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+// assetName returns the GoReleaser tarball name for tag on this host:
+// loom_<version>_<os>_<arch>.tar.gz, version being the tag without a
+// leading "v".
+func assetName(tag string) string {
+	return fmt.Sprintf("loom_%s_%s_%s.tar.gz", normalizeVersion(tag), runtime.GOOS, runtime.GOARCH)
 }
 
-const short = 8
+// normalizeVersion strips a leading "v" so tags ("v1.1.1") and ldflag
+// versions ("1.1.1") compare equal.
+func normalizeVersion(v string) string {
+	return strings.TrimPrefix(v, "v")
+}
 
-// SourceDir returns the directory the updater pulls and rebuilds in.
-// Order: $LOOM_SOURCE env var (set on the plist when the user
-// installed from a non-default location), then ~/code/loom which is
-// the convention.
-func SourceDir() (string, error) {
-	if v := os.Getenv("LOOM_SOURCE"); v != "" {
-		return v, nil
+// verifyChecksum confirms tarball's sha256 matches the line for name in
+// the checksums.txt body. GoReleaser's default format is "<sha256>  <filename>"
+// (no binary-mode "*" marker); a future binary-mode config would prefix the
+// filename and break the match.
+func verifyChecksum(tarball, sums []byte, name string) error {
+	want := ""
+	for _, line := range strings.Split(string(sums), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == name {
+			want = fields[0]
+			break
+		}
 	}
-	home, err := os.UserHomeDir()
+	if want == "" {
+		return fmt.Errorf("no checksum line for %s", name)
+	}
+	sum := sha256.Sum256(tarball)
+	got := hex.EncodeToString(sum[:])
+	if got != want {
+		return fmt.Errorf("sha256 mismatch: got %s want %s", got, want)
+	}
+	return nil
+}
+
+// extractLoom returns the bytes of the "loom" entry at the root of the
+// gzip+tar archive.
+func extractLoom(tarball []byte) ([]byte, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(tarball))
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("gzip: %w", err)
 	}
-	return filepath.Join(home, "code", "loom"), nil
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("tar: %w", err)
+		}
+		if filepath.Base(hdr.Name) == "loom" {
+			return io.ReadAll(tr)
+		}
+	}
+	return nil, fmt.Errorf("no loom binary in archive")
+}
+
+// githubSource is the default releaseSource: GitHub's REST API for
+// metadata, plain HTTPS GETs for assets. EnderRealm/loom is public, so
+// no auth is needed.
+type githubSource struct{}
+
+func (githubSource) Latest(ctx context.Context) (string, map[string]string, error) {
+	url := githubAPIBase + "/repos/EnderRealm/loom/releases/latest"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name        string `json:"name"`
+			DownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", nil, err
+	}
+	assets := make(map[string]string, len(rel.Assets))
+	for _, a := range rel.Assets {
+		assets[a.Name] = a.DownloadURL
+	}
+	return rel.TagName, assets, nil
+}
+
+func (githubSource) Download(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // intervalFromEnv reads LOOM_UPDATER_INTERVAL_MINUTES (set on the plist
@@ -218,10 +354,10 @@ func intervalFromEnv() time.Duration {
 	return DefaultIntervalMinutes * time.Minute
 }
 
-// loomBinary returns the absolute path of the running loom binary so
-// rebuild can write to the same path. Plists pin this path; rebuilding
-// in place + kickstart is the entire deploy sequence.
-func loomBinary() (string, error) {
+// resolveLoomBinary returns the absolute path of the running loom binary
+// so the install writes to the same path. Plists pin this path;
+// installing in place + kickstart is the entire deploy sequence.
+func resolveLoomBinary() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -230,26 +366,6 @@ func loomBinary() (string, error) {
 		self = rp
 	}
 	return self, nil
-}
-
-func rebuild(ctx context.Context, src, bin string) error {
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", bin, "./cmd/loom")
-	cmd.Dir = src
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 func plistPresent(label string) bool {

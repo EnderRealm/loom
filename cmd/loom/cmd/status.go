@@ -68,7 +68,7 @@ var statusCmd = &cobra.Command{
 			human:    "loom-updater",
 			label:    updater.AgentLabel,
 			logPath:  updater.LogPath(),
-			interval: fmt.Sprintf("%dm (git poll)", updater.DefaultIntervalMinutes),
+			interval: fmt.Sprintf("%dm (release poll)", updater.DefaultIntervalMinutes),
 			role:     role,
 			expected: expected[updater.AgentLabel],
 		})

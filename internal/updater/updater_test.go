@@ -1,212 +1,225 @@
 package updater
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"loom/internal/version"
 )
 
-// newSourceRepo builds a bare origin with one commit on main and a
-// working clone of it, both configured with a local identity so the
-// tests don't depend on global git config. It returns the source
-// checkout (what the updater operates on) and the bare origin path.
-func newSourceRepo(t *testing.T) (src, origin string) {
-	t.Helper()
-	root := t.TempDir()
-	origin = filepath.Join(root, "origin.git")
-	git(t, root, "init", "--bare", "--initial-branch=main", origin)
-
-	seed := filepath.Join(root, "seed")
-	git(t, root, "clone", origin, seed)
-	configIdentity(t, seed)
-	writeFile(t, seed, "file.txt", "v1\n")
-	git(t, seed, "add", "file.txt")
-	git(t, seed, "commit", "-m", "seed")
-	git(t, seed, "push", "origin", "main")
-
-	src = filepath.Join(root, "src")
-	git(t, root, "clone", origin, src)
-	configIdentity(t, src)
-	return src, origin
+// fakeSource is an in-memory releaseSource. Latest returns a fixed tag +
+// asset map; Download returns bytes keyed by URL. No network.
+type fakeSource struct {
+	tag    string
+	assets map[string]string // name -> url
+	blobs  map[string][]byte // url -> bytes
 }
 
-// advanceOrigin pushes a new commit to origin/main from a throwaway
-// clone so the source checkout sees a remote that moved forward.
-func advanceOrigin(t *testing.T, origin, content string) {
-	t.Helper()
-	work := filepath.Join(t.TempDir(), "advance")
-	git(t, "", "clone", origin, work)
-	configIdentity(t, work)
-	writeFile(t, work, "file.txt", content)
-	git(t, work, "add", "file.txt")
-	git(t, work, "commit", "-m", "advance")
-	git(t, work, "push", "origin", "main")
+func (f fakeSource) Latest(ctx context.Context) (string, map[string]string, error) {
+	return f.tag, f.assets, nil
 }
 
-func configIdentity(t *testing.T, dir string) {
-	t.Helper()
-	git(t, dir, "config", "user.name", "Test")
-	git(t, dir, "config", "user.email", "test@example.com")
-}
-
-func git(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
+func (f fakeSource) Download(ctx context.Context, url string) ([]byte, error) {
+	b, ok := f.blobs[url]
+	if !ok {
+		return nil, fmt.Errorf("no blob for %s", url)
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-	return string(out)
+	return b, nil
 }
 
-func writeFile(t *testing.T, dir, name, content string) {
+// makeTarball builds a gzip+tar archive holding a single "loom" file
+// with the given content, mirroring GoReleaser's layout.
+func makeTarball(t *testing.T, content []byte) []byte {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "loom", Mode: 0o755, Size: int64(len(content))}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
-func readFile(t *testing.T, dir, name string) string {
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// newFakeRelease assembles a fakeSource for tag whose tarball holds
+// binContent, plus a checksums.txt. The checksum line is correct unless
+// corruptSum is true, which feeds a wrong digest to exercise the verify
+// failure path.
+func newFakeRelease(t *testing.T, tag string, binContent []byte, corruptSum bool) fakeSource {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, name))
+	tarball := makeTarball(t, binContent)
+	name := assetName(tag)
+	sum := sha256Hex(tarball)
+	if corruptSum {
+		sum = sha256Hex([]byte("not the tarball"))
+	}
+	sums := fmt.Sprintf("%s  %s\n", sum, name)
+
+	tarURL := "https://example.test/" + name
+	sumURL := "https://example.test/" + checksumsAsset
+	return fakeSource{
+		tag: tag,
+		assets: map[string]string{
+			name:           tarURL,
+			checksumsAsset: sumURL,
+		},
+		blobs: map[string][]byte{
+			tarURL: tarball,
+			sumURL: []byte(sums),
+		},
+	}
+}
+
+// installEnv wires Tick to a temp install target, a fake release source,
+// a fixed Current version, and a no-op kickstart (so tests never touch
+// launchctl or the live daemon). It returns the install target path.
+func installEnv(t *testing.T, current string, s releaseSource, binContent []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "loom")
+	if err := os.WriteFile(bin, binContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origSrc := source
+	origVer := version.Current
+	origBin := loomBinary
+	origKick := kickstartAgents
+	source = s
+	version.Current = current
+	loomBinary = func() (string, error) { return bin, nil }
+	kickstartAgents = func() error { return nil }
+	t.Cleanup(func() {
+		source = origSrc
+		version.Current = origVer
+		loomBinary = origBin
+		kickstartAgents = origKick
+	})
+	return bin
+}
+
+func TestAssetName(t *testing.T) {
+	want := fmt.Sprintf("loom_1.2.3_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	if got := assetName("v1.2.3"); got != want {
+		t.Fatalf("assetName(v1.2.3) = %q, want %q", got, want)
+	}
+	if got := assetName("1.2.3"); got != want {
+		t.Fatalf("assetName(1.2.3) = %q, want %q", got, want)
+	}
+}
+
+func TestTickUpToDateNoOp(t *testing.T) {
+	rel := newFakeRelease(t, "v1.1.1", []byte("new binary"), false)
+	bin := installEnv(t, "1.1.1", rel, []byte("current binary"))
+
+	if err := Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := readFile(t, bin); got != "current binary" {
+		t.Fatalf("binary changed on up-to-date tick: %q", got)
+	}
+}
+
+func TestTickInstallsWhenNewer(t *testing.T) {
+	rel := newFakeRelease(t, "v1.1.2", []byte("released binary"), false)
+	bin := installEnv(t, "1.1.1", rel, []byte("old binary"))
+
+	if err := Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := readFile(t, bin); got != "released binary" {
+		t.Fatalf("binary = %q, want released bytes", got)
+	}
+	if fi, err := os.Stat(bin); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o755 {
+		t.Fatalf("mode = %v, want 0755", fi.Mode().Perm())
+	}
+	assertNoTempLeft(t, filepath.Dir(bin))
+}
+
+func TestTickInstallsWhenDev(t *testing.T) {
+	rel := newFakeRelease(t, "v1.1.1", []byte("released binary"), false)
+	bin := installEnv(t, "dev", rel, []byte("dev binary"))
+
+	if err := Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := readFile(t, bin); got != "released binary" {
+		t.Fatalf("dev build did not update: %q", got)
+	}
+}
+
+func TestTickChecksumMismatchLeavesBinary(t *testing.T) {
+	rel := newFakeRelease(t, "v1.1.2", []byte("released binary"), true)
+	bin := installEnv(t, "1.1.1", rel, []byte("old binary"))
+
+	err := Tick(context.Background())
+	if err == nil {
+		t.Fatal("Tick succeeded despite checksum mismatch")
+	}
+	if got := readFile(t, bin); got != "old binary" {
+		t.Fatalf("binary overwritten on checksum failure: %q", got)
+	}
+	assertNoTempLeft(t, filepath.Dir(bin))
+}
+
+func TestVerifyChecksum(t *testing.T) {
+	tarball := makeTarball(t, []byte("x"))
+	name := "loom_1.0.0_test.tar.gz"
+	good := fmt.Sprintf("%s  %s\n", sha256Hex(tarball), name)
+	if err := verifyChecksum(tarball, []byte(good), name); err != nil {
+		t.Fatalf("verifyChecksum(matching) = %v, want nil", err)
+	}
+	bad := fmt.Sprintf("%s  %s\n", sha256Hex([]byte("other")), name)
+	if err := verifyChecksum(tarball, []byte(bad), name); err == nil {
+		t.Fatal("verifyChecksum(mismatch) = nil, want error")
+	}
+	if err := verifyChecksum(tarball, []byte("deadbeef  other.tar.gz\n"), name); err == nil {
+		t.Fatal("verifyChecksum(no matching line) = nil, want error")
+	}
+}
+
+func assertNoTempLeft(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if filepath.Base(e.Name()) != "loom" {
+			t.Fatalf("stray file left in install dir: %s", e.Name())
+		}
+	}
+}
+
+func readFile(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(b)
-}
-
-func head(t *testing.T, dir string) string {
-	t.Helper()
-	out, err := gitOutput(context.Background(), dir, "rev-parse", "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
-}
-
-func TestUpdateSourceUpToDate(t *testing.T) {
-	src, _ := newSourceRepo(t)
-	before := head(t, src)
-
-	updated, err := updateSource(context.Background(), src)
-	if err != nil {
-		t.Fatalf("updateSource: %v", err)
-	}
-	if updated {
-		t.Fatal("updated = true, want false for up-to-date checkout")
-	}
-	if head(t, src) != before {
-		t.Fatal("HEAD moved on an up-to-date checkout")
-	}
-}
-
-func TestUpdateSourceHappyPath(t *testing.T) {
-	src, origin := newSourceRepo(t)
-	advanceOrigin(t, origin, "v2\n")
-
-	updated, err := updateSource(context.Background(), src)
-	if err != nil {
-		t.Fatalf("updateSource: %v", err)
-	}
-	if !updated {
-		t.Fatal("updated = false, want true when origin/main moved ahead of a clean main")
-	}
-	remote, err := gitOutput(context.Background(), src, "rev-parse", "origin/main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := head(t, src); got != remote {
-		t.Fatalf("HEAD = %s, want origin/main %s", got, remote)
-	}
-	if got := readFile(t, src, "file.txt"); got != "v2\n" {
-		t.Fatalf("file.txt = %q, want updated content", got)
-	}
-}
-
-func TestUpdateSourceDirtyTreeSkips(t *testing.T) {
-	src, origin := newSourceRepo(t)
-	advanceOrigin(t, origin, "v2\n")
-	before := head(t, src)
-	writeFile(t, src, "file.txt", "local edit\n")
-
-	updated, err := updateSource(context.Background(), src)
-	if err != nil {
-		t.Fatalf("updateSource: %v", err)
-	}
-	if updated {
-		t.Fatal("updated = true, want false with a dirty working tree")
-	}
-	if got := readFile(t, src, "file.txt"); got != "local edit\n" {
-		t.Fatalf("dirty edit clobbered: file.txt = %q", got)
-	}
-	if head(t, src) != before {
-		t.Fatal("HEAD moved despite dirty tree")
-	}
-}
-
-func TestUpdateSourceFeatureBranchSkips(t *testing.T) {
-	src, origin := newSourceRepo(t)
-	git(t, src, "checkout", "-b", "feature")
-	writeFile(t, src, "feature.txt", "work\n")
-	git(t, src, "add", "feature.txt")
-	git(t, src, "commit", "-m", "feature work")
-	featureSHA := head(t, src)
-	advanceOrigin(t, origin, "v2\n")
-
-	updated, err := updateSource(context.Background(), src)
-	if err != nil {
-		t.Fatalf("updateSource: %v", err)
-	}
-	if updated {
-		t.Fatal("updated = true, want false on a feature branch")
-	}
-	if got := head(t, src); got != featureSHA {
-		t.Fatalf("feature branch ref reset: HEAD = %s, want %s", got, featureSHA)
-	}
-	branch, _ := gitOutput(context.Background(), src, "rev-parse", "--abbrev-ref", "HEAD")
-	if branch != "feature" {
-		t.Fatalf("current branch = %q, want feature", branch)
-	}
-}
-
-func TestUpdateSourceUnpushedCommitSkips(t *testing.T) {
-	src, _ := newSourceRepo(t)
-	writeFile(t, src, "local.txt", "unpushed\n")
-	git(t, src, "add", "local.txt")
-	git(t, src, "commit", "-m", "local unpushed work")
-	localSHA := head(t, src)
-
-	updated, err := updateSource(context.Background(), src)
-	if err != nil {
-		t.Fatalf("updateSource: %v", err)
-	}
-	if updated {
-		t.Fatal("updated = true, want false with an unpushed local commit")
-	}
-	if got := head(t, src); got != localSHA {
-		t.Fatalf("local commit lost: HEAD = %s, want %s", got, localSHA)
-	}
-}
-
-func TestUpdateSourceDetachedHeadSkips(t *testing.T) {
-	src, origin := newSourceRepo(t)
-	sha := head(t, src)
-	git(t, src, "checkout", sha)
-	advanceOrigin(t, origin, "v2\n")
-
-	updated, err := updateSource(context.Background(), src)
-	if err != nil {
-		t.Fatalf("updateSource: %v", err)
-	}
-	if updated {
-		t.Fatal("updated = true, want false on a detached HEAD")
-	}
-	if head(t, src) != sha {
-		t.Fatal("HEAD moved on a detached checkout")
-	}
 }

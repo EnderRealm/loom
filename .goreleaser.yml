@@ -12,7 +12,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X loom/cmd/loom/cmd.Version={{.Version}}
+      - -s -w -X loom/internal/version.Current={{.Version}}
 
 archives:
   - formats:

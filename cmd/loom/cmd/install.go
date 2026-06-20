@@ -206,30 +206,24 @@ func installSummarizer() error {
 }
 
 // installUpdater installs the self-managing auto-updater. The updater
-// polls the source repo's origin/main on a tunable interval and, when
-// new commits land, pulls + rebuilds + kickstarts every other loom
-// agent (itself last). LOOM_SOURCE pins the source-checkout location;
+// polls EnderRealm/loom's latest GitHub Release on a tunable interval
+// and, when a newer release than the running binary ships, downloads the
+// platform tarball, verifies its checksum, installs it over the running
+// binary, and kickstarts every other loom agent (itself last).
 // LOOM_UPDATER_INTERVAL_MINUTES tunes the poll cadence.
 func installUpdater() error {
 	bin, err := loomBinary()
 	if err != nil {
 		return err
 	}
-	src, err := updater.SourceDir()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(filepath.Join(src, ".git")); err != nil {
-		return fmt.Errorf("source dir %s is not a git checkout — set LOOM_SOURCE before installing", src)
-	}
 	logPath := updater.LogPath()
 
 	env := map[string]string{
 		"LOOM_HOME":                     config.Home(),
-		"LOOM_SOURCE":                   src,
 		"LOOM_UPDATER_INTERVAL_MINUTES": strconv.Itoa(updater.DefaultIntervalMinutes),
-		// PATH for git + go discovery; launchd's stripped PATH otherwise
-		// won't find the toolchain the rebuild step needs.
+		// PATH for launchctl discovery; launchd's stripped PATH already
+		// covers /bin, but a comprehensive PATH keeps every loom agent
+		// consistent.
 		"PATH": canonicalPath(),
 	}
 
@@ -249,7 +243,6 @@ func installUpdater() error {
 	fmt.Printf("installed updater:\n")
 	fmt.Printf("  label:    %s\n", spec.Label)
 	fmt.Printf("  binary:   %s\n", bin)
-	fmt.Printf("  source:   %s\n", src)
 	fmt.Printf("  interval: %d min\n", updater.DefaultIntervalMinutes)
 	fmt.Printf("  log:      %s\n", logPath)
 	return nil

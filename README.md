@@ -41,15 +41,37 @@ loom/
   knowledge/                           # eval fixtures only — durable store is ~/.loom/knowledge/
 ```
 
-Everything is driven by the unified `loom` binary. Install from a source checkout:
+Everything is driven by the unified `loom` binary.
+
+### Install (any machine, no toolchain)
+
+Download the latest release tarball for your OS/arch from [GitHub Releases](https://github.com/EnderRealm/loom/releases/latest) and extract `loom` to `~/.local/bin/loom`:
 
 ```sh
-git clone git@github.com:EnderRealm/loom.git ~/code/loom
-cd ~/code/loom
-go build -o ~/.local/bin/loom ./cmd/loom
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')          # darwin | linux
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')   # amd64 | arm64
+VER=$(curl -fsSL https://api.github.com/repos/EnderRealm/loom/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/EnderRealm/loom/releases/download/v${VER}/loom_${VER}_${OS}_${ARCH}.tar.gz" | tar -xzf - -C ~/.local/bin loom
 ```
 
-Updates: pull and rebuild manually, or `loom install updater` to have a daemon do it for you (see "Auto-update" below). Every fleet machine runs the updater off its source checkout — that is the deploy channel.
+Then install the launchd agents you want and the updater that keeps the binary on the latest release:
+
+```sh
+loom install server     # or remote / receiver / summarizer / shipper
+loom install updater     # downloads + installs each new release; see Auto-update
+```
+
+### Develop
+
+Build the binary locally to run unreleased changes — this is independent of the installed/daemon binary:
+
+```sh
+git clone git@github.com:EnderRealm/loom.git
+cd loom
+go build -o ./loom ./cmd/loom    # or: make dev
+./loom <command>
+```
 
 ### Install launchd agents
 
@@ -59,7 +81,7 @@ loom install remote             # shipper (client side); records role=remote
 loom install receiver           # receiver only
 loom install summarizer         # summarizer only
 loom install shipper            # shipper only (no role change)
-loom install updater            # source checkouts only — see Auto-update
+loom install updater            # keep the binary on the latest release — see Auto-update
 loom uninstall                  # remove all loom launchd agents
 loom status                     # show state of all installed components
 loom ui                         # open the dashboard (alias: loom tui)
@@ -69,7 +91,7 @@ The `server` and `remote` profiles also record the machine's role under `$LOOM_H
 
 `install.sh` is preserved as a thin forwarder for muscle memory: each `--install-X` flag does `go build -o $LOOM_BIN_DIR/loom ./cmd/loom` then `loom install X`. Either entry point works; new docs prefer the `loom` binary directly.
 
-State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives where you built it (`~/.local/bin/loom`), the path the launchd plists pin and the updater rebuilds.
+State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives at `~/.local/bin/loom`, the path the launchd plists pin and the updater installs new releases over.
 
 ```sh
 LOOM_BIN_DIR=/usr/local/bin ./install.sh --install-shipper
@@ -80,21 +102,20 @@ LOOM_HOME=/srv/loom         loom install receiver
 
 ### Auto-update
 
-The `loom updater` daemon polls `origin/main` on the source checkout, pulls + rebuilds + kickstarts every loom agent (itself last) when new commits land. This is how loom deploys across the fleet — every machine carries a source checkout and runs the updater.
+The `loom updater` daemon polls EnderRealm/loom's latest GitHub Release on an interval. When a newer release than the running binary ships, it downloads the platform tarball, verifies its `checksums.txt` entry, installs the extracted binary over `~/.local/bin/loom`, and kickstarts every loom agent (itself last). No git checkout and no Go toolchain are needed on the host — the installed binary is always a published semver release.
 
 ```sh
 loom install updater
 tail -f ~/.loom/updater.log
 ```
 
-Defaults: 5-minute poll, source at `~/code/loom`. Override via plist environment:
+Default: 5-minute poll. Override via plist environment:
 
-| env var                          | default            | purpose                                   |
-| -------------------------------- | ------------------ | ----------------------------------------- |
-| `LOOM_SOURCE`                    | `~/code/loom`      | git checkout the updater pulls + rebuilds |
-| `LOOM_UPDATER_INTERVAL_MINUTES`  | `5`                | poll cadence                              |
+| env var                          | default            | purpose       |
+| -------------------------------- | ------------------ | ------------- |
+| `LOOM_UPDATER_INTERVAL_MINUTES`  | `5`                | poll cadence  |
 
-The reusable pattern (Go binary on launchd that updates itself from git push) is documented in [`docs/auto-update-pattern.md`](./docs/auto-update-pattern.md).
+The reusable pattern (Go binary on launchd that updates itself) is documented in [`docs/auto-update-pattern.md`](./docs/auto-update-pattern.md); loom runs its artifact-fetch variant.
 
 ---
 
@@ -274,21 +295,26 @@ rm -f ~/.local/bin/loom
 
 ## Updates
 
-The key design fact: **the launchd plist pins an absolute binary path at install time**. If you rebuild to the same path, the next scheduled tick runs the new binary — no reinstall needed.
+The key design fact: **the launchd plist pins an absolute binary path at install time**. Whatever writes a new binary to that path — the updater installing a release, or you building locally — the next scheduled tick runs it, no reinstall needed.
 
-### Simple updates (code change only)
+### Released updates
 
-Rebuild the loom binary in place; running daemons pick it up on the next respawn. The shipper reads `interval_minutes` at daemon startup, the receiver re-execs on `KeepAlive`, and the summarizer's watch loop is interruptible — kickstarting all three is enough.
+Install the updater (see [Auto-update](#auto-update)). It polls GitHub Releases, installs each new release over `~/.local/bin/loom`, and kickstarts every agent. This is the production update channel; nothing manual is required.
+
+### Testing an unreleased build
+
+To run code that hasn't been released yet, build in place over the pinned path and kickstart the daemons. The shipper reads `interval_minutes` at daemon startup, the receiver re-execs on `KeepAlive`, and the summarizer's watch loop is interruptible — kickstarting all three is enough.
 
 ```sh
-cd ~/code/loom
-git pull
+cd loom
 go build -o ~/.local/bin/loom ./cmd/loom
 
 launchctl kickstart -k gui/$(id -u)/com.loom.receiver
 launchctl kickstart -k gui/$(id -u)/com.loom.summarizer
 launchctl kickstart -k gui/$(id -u)/com.loom.shipper
 ```
+
+The updater will reinstate the latest release on its next tick, so use this only for local testing.
 
 ### When a reinstall is required
 
