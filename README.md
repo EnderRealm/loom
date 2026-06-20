@@ -46,7 +46,7 @@ Everything is driven by the unified `loom` binary. Install from a source checkou
 ```sh
 git clone git@github.com:EnderRealm/loom.git ~/code/loom
 cd ~/code/loom
-go install ./cmd/loom        # or `go build -o ~/.local/bin/loom ./cmd/loom`
+go build -o ~/.local/bin/loom ./cmd/loom
 ```
 
 Updates: pull and rebuild manually, or `loom install updater` to have a daemon do it for you (see "Auto-update" below). Every fleet machine runs the updater off its source checkout — that is the deploy channel.
@@ -69,7 +69,7 @@ The `server` and `remote` profiles also record the machine's role under `$LOOM_H
 
 `install.sh` is preserved as a thin forwarder for muscle memory: each `--install-X` flag does `go build -o $LOOM_BIN_DIR/loom ./cmd/loom` then `loom install X`. Either entry point works; new docs prefer the `loom` binary directly.
 
-State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives wherever your build put it (`~/.local/bin/loom` for `go build`, or `~/go/bin/loom` for `go install`).
+State lives under `$LOOM_HOME` (default `~/.loom`); the binary lives where you built it (`~/.local/bin/loom`), the path the launchd plists pin and the updater rebuilds.
 
 ```sh
 LOOM_BIN_DIR=/usr/local/bin ./install.sh --install-shipper
