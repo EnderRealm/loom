@@ -8,7 +8,9 @@
 # Configuration via environment:
 #   LOOM_BIN_DIR    where the loom binary is installed (default: ~/.local/bin)
 #   LOOM_HOME       state root (default: ~/.loom)
-#   LOOM_RECEIVER_TOKEN   required for --install-receiver / --install-server
+#   LOOM_RECEIVER_TOKEN   receiver bearer token; seeds ~/.loom/receiver-token on
+#                         first --install-receiver / --install-server. Once
+#                         persisted (or set interactively) it's no longer needed.
 #
 set -euo pipefail
 

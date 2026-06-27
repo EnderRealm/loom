@@ -172,6 +172,8 @@ The server can be any Mac reachable from the client(s). It can be the same machi
 export LOOM_RECEIVER_TOKEN="$(openssl rand -hex 32)"
 ```
 
+On first `loom install receiver`, this value is persisted to `~/.loom/receiver-token` (mode 0600), so later installs and the auto-updater's re-bootstrap don't need it re-exported. If you skip the export, an interactive install prompts for the token; a non-interactive install with no env var and no token file errors instead.
+
 The same value goes into the client's `~/.loom/config.json` on each shipping machine.
 
 ### 2. Install the receiver agent
@@ -181,11 +183,12 @@ loom install receiver
 ```
 
 This:
-1. Creates `$LOOM_HOME/received/`
-2. Writes `~/Library/LaunchAgents/com.loom.receiver.plist` with `KeepAlive=true` (restarts on exit), `RunAtLoad=true` (starts immediately), and `LOOM_RECEIVER_TOKEN` + `LOOM_HOME` baked into `EnvironmentVariables`
-3. Validates the plist with `plutil -lint`
-4. Boots out any prior instance, bootstraps the new one, and `kickstart`s it
-5. Polls `http://127.0.0.1:8765/healthz` for up to 10s to confirm it came up
+1. Resolves the bearer token (`LOOM_RECEIVER_TOKEN` → `~/.loom/receiver-token` → interactive prompt) and persists it to `~/.loom/receiver-token` (0600)
+2. Creates `$LOOM_HOME/received/`
+3. Writes `~/Library/LaunchAgents/com.loom.receiver.plist` with `KeepAlive=true` (restarts on exit), `RunAtLoad=true` (starts immediately), and `LOOM_HOME` baked into `EnvironmentVariables`. The token is read from `~/.loom/receiver-token` at runtime, not the plist, so it's not exposed via the plist or `launchctl print`
+4. Validates the plist with `plutil -lint`
+5. Boots out any prior instance, bootstraps the new one, and `kickstart`s it
+6. Polls `http://127.0.0.1:8765/healthz` for up to 10s to confirm it came up
 
 The plist runs the loom binary at the absolute path of whichever `loom` was on `$PATH` at install time. Rebuild to the same path and the next respawn picks up new code.
 
@@ -206,7 +209,7 @@ LOOM_RECEIVER_TOKEN=<token> loom receiver
 | `--storage`     | `$LOOM_HOME/received`            | Where to write session files             |
 | `--auth-token`  | (empty; falls back to env)       | Shared bearer token; empty disables auth |
 
-Auth token can also come from `LOOM_RECEIVER_TOKEN`. If neither is set, the server accepts all requests (dev/localhost only).
+Auth token can also come from `LOOM_RECEIVER_TOKEN`, or the persisted `~/.loom/receiver-token` written at install time. If none is set, the server accepts all requests (dev/localhost only).
 
 ---
 
@@ -323,7 +326,7 @@ Re-run `loom install <component>` when any of these change:
 - **Binary path** — you moved the loom binary off the absolute path the plist pinned
 - **`interval_minutes`** in config — only takes effect at daemon startup; reinstall (or kickstart -k) the shipper after editing
 - **`LOOM_HOME`** — if non-default, it's baked into `EnvironmentVariables` on every plist
-- **`LOOM_RECEIVER_TOKEN`** — baked into the receiver plist at install time
+- **`LOOM_RECEIVER_TOKEN`** — persisted to `~/.loom/receiver-token` at install time; re-export and reinstall (or edit the file) to rotate
 
 `loom install` boots out any prior instance with the same label before bootstrapping the new plist, so reinstall is always safe.
 
@@ -359,9 +362,9 @@ First stop for any issue: `loom status`. It reports which agents are loaded, whe
 
 **`config not found at ~/.loom/config.json`** — client hasn't been configured. Create the file (see "Client setup" step 1), then re-run `loom install shipper`.
 
-**`LOOM_RECEIVER_TOKEN is not set`** (from `loom install receiver`) — export the token in your shell first: `export LOOM_RECEIVER_TOKEN="$(openssl rand -hex 32)"`, then re-run the install.
+**`LOOM_RECEIVER_TOKEN not set and no ~/.loom/receiver-token`** (from a non-interactive `loom install receiver`) — export the token first: `export LOOM_RECEIVER_TOKEN="$(openssl rand -hex 32)"`, then re-run the install, or run the install interactively to be prompted.
 
-**All POSTs return 401** — token mismatch. Check that `LOOM_RECEIVER_TOKEN` on the server matches `auth_token` in `~/.loom/config.json` on the client. A token change on the server requires `loom install receiver` to rewrite the plist.
+**All POSTs return 401** — token mismatch. Check that the server's `~/.loom/receiver-token` matches `auth_token` in `~/.loom/config.json` on the client. To rotate, edit `~/.loom/receiver-token` (or re-export `LOOM_RECEIVER_TOKEN` and reinstall) and reload the receiver.
 
 **Shipper logs `shipped=0 skipped=60 failed=0`** — nothing to ship. All cursors are at EOF for every session. This is the steady state.
 

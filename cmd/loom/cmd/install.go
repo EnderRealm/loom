@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -129,10 +131,70 @@ func installShipper() error {
 	return nil
 }
 
+// stdinIsTTY reports whether stdin is an interactive terminal. A package
+// var so tests can force the non-interactive path deterministically.
+var stdinIsTTY = func() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// resolveReceiverToken returns the receiver bearer token, persisting it to
+// ~/.loom/receiver-token so later runs (and the updater's re-bootstrap)
+// resolve it without the secret in their env. Resolution order: env
+// LOOM_RECEIVER_TOKEN (also seeds/migrates the file), then the persisted
+// file, then an interactive prompt. Non-interactive with neither errors
+// rather than blocking on stdin.
+func resolveReceiverToken() (string, error) {
+	if tok := strings.TrimSpace(os.Getenv("LOOM_RECEIVER_TOKEN")); tok != "" {
+		if err := config.WriteReceiverToken(tok); err != nil {
+			return "", err
+		}
+		return tok, nil
+	}
+	if tok := config.ReadReceiverToken(); tok != "" {
+		return tok, nil
+	}
+	if !stdinIsTTY() {
+		return "", fmt.Errorf("LOOM_RECEIVER_TOKEN not set and no %s; export it or run install interactively", config.ReceiverTokenPath())
+	}
+	// Plain line read: echo is on (x/term is not in the module graph, so
+	// no no-echo prompt is available without adding a dependency).
+	fmt.Fprint(os.Stderr, "Receiver bearer token: ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("read token: %w", err)
+	}
+	tok := strings.TrimSpace(line)
+	if tok == "" {
+		return "", fmt.Errorf("receiver token is empty")
+	}
+	if err := config.WriteReceiverToken(tok); err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// receiverSpec builds the receiver's launchd Spec. The token is read from
+// ~/.loom/receiver-token at runtime, not the plist, so it isn't exposed via
+// the plist file or `launchctl print`.
+func receiverSpec(bin, logPath string) launchd.Spec {
+	return launchd.Spec{
+		Label:     receiver.AgentLabel,
+		Program:   bin,
+		Args:      []string{"receiver"},
+		LogPath:   logPath,
+		Env:       map[string]string{"LOOM_HOME": config.Home()},
+		KeepAlive: true,
+		RunAtLoad: true,
+	}
+}
+
 func installReceiver() error {
-	token := os.Getenv("LOOM_RECEIVER_TOKEN")
-	if token == "" {
-		return fmt.Errorf("LOOM_RECEIVER_TOKEN is not set; export it before installing the receiver")
+	if _, err := resolveReceiverToken(); err != nil {
+		return err
 	}
 	bin, err := loomBinary()
 	if err != nil {
@@ -143,20 +205,7 @@ func installReceiver() error {
 	}
 	logPath := filepath.Join(config.Home(), "receiver.log")
 
-	env := map[string]string{
-		"LOOM_RECEIVER_TOKEN": token,
-		"LOOM_HOME":           config.Home(),
-	}
-
-	spec := launchd.Spec{
-		Label:     receiver.AgentLabel,
-		Program:   bin,
-		Args:      []string{"receiver"},
-		LogPath:   logPath,
-		Env:       env,
-		KeepAlive: true,
-		RunAtLoad: true,
-	}
+	spec := receiverSpec(bin, logPath)
 	if err := launchd.Install(spec); err != nil {
 		return err
 	}

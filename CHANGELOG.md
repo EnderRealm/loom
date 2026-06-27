@@ -4,6 +4,21 @@ All notable changes to Loom are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Receiver bearer token is now persisted to `~/.loom/receiver-token`
+  (0600) instead of living only in the receiver plist's
+  `EnvironmentVariables`. `loom install receiver` resolves the token from
+  `LOOM_RECEIVER_TOKEN` (seeding the file), then the persisted file, then
+  an interactive prompt; non-interactive installs with neither error
+  rather than blocking on stdin. The receiver daemon reads the persisted
+  token at runtime, and the token no longer appears in the plist (so it's
+  not exposed via the plist file or `launchctl print`). This fixes the
+  updater's re-bootstrap of the receiver, which shells `loom install
+  receiver` with no token in its env.
+
 ## [1.2.1] — 2026-06-20 — Reliable release activation
 
 ### Fixed

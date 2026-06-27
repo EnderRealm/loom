@@ -37,7 +37,9 @@ Global flags:
 
 Environment:
   LOOM_HOME             state root (default: ~/.loom)
-  LOOM_RECEIVER_TOKEN   shared bearer token (required for install receiver)
+  LOOM_RECEIVER_TOKEN   shared bearer token; on first 'install receiver' it's
+                        persisted to ~/.loom/receiver-token (0600), or prompted
+                        for interactively, so later installs need not re-export it
 `
 
 var rootCmd = &cobra.Command{

@@ -32,12 +32,12 @@ import (
 const AgentLabel = "com.loom.receiver"
 
 // Options configures Run. Zero values follow flag defaults: bind :8765,
-// storage at $LOOM_HOME/received, auth from $LOOM_RECEIVER_TOKEN if Token
-// is empty.
+// storage at $LOOM_HOME/received, auth from $LOOM_RECEIVER_TOKEN or the
+// persisted ~/.loom/receiver-token if Token is empty.
 type Options struct {
 	Addr    string // listen address (default ":8765")
 	Storage string // storage root (default $LOOM_HOME/received)
-	Token   string // bearer token; empty means look at LOOM_RECEIVER_TOKEN
+	Token   string // bearer token; empty falls back to env then the persisted token file
 }
 
 // Run starts the receiver. Blocks until ctx is cancelled or the listener
@@ -51,6 +51,9 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.Token == "" {
 		opts.Token = os.Getenv("LOOM_RECEIVER_TOKEN")
+		if opts.Token == "" {
+			opts.Token = config.ReadReceiverToken()
+		}
 	}
 	if err := os.MkdirAll(opts.Storage, 0o700); err != nil {
 		return fmt.Errorf("mkdir storage: %w", err)
