@@ -12,7 +12,7 @@ import (
 	"loom/internal/summaries"
 	"loom/transport/cursor"
 
-	"github.com/EnderRealm/ticket/pkg/ticket"
+	"github.com/EnderRealm/ticket/v7/pkg/ticket"
 )
 
 // Project aggregates session and ticket state for one identity-keyed
@@ -610,6 +610,74 @@ func loadTicketSummary(projectPath string) *TicketSummary {
 	}
 	s.OpenTop = open
 	return s
+}
+
+// TicketActivity is the rolling-window rollup of tickets created and closed
+// across every project in the central tk store, newest-first. Available is
+// false when the store couldn't be resolved, so the screen can distinguish a
+// genuinely quiet window from a missing store.
+type TicketActivity struct {
+	Since     time.Time
+	Available bool
+	Created   []TicketChange
+	Closed    []TicketChange
+}
+
+// TicketChange is one created or closed ticket. When is the relevant
+// timestamp: Created for the created list, Completed for the closed list.
+type TicketChange struct {
+	ID      string
+	Title   string
+	Project string
+	Status  string
+	When    time.Time
+}
+
+// LoadTicketActivity reads every ticket across all projects in the central tk
+// store and buckets them by Created/Completed within [now-window, now).
+// Completed is tk's authoritative close timestamp (zero for non-terminal
+// tickets). Resilient: an unresolvable store yields an empty rollup rather
+// than failing the whole screen.
+func LoadTicketActivity(window time.Duration) TicketActivity {
+	since := time.Now().Add(-window)
+	centralRoot, err := config.CentralStoreRoot()
+	if err != nil {
+		return TicketActivity{Since: since}
+	}
+	tickets, err := ticket.NewMultiStore(filepath.Join(centralRoot, "tickets")).List()
+	if err != nil {
+		return TicketActivity{Since: since}
+	}
+	return bucketTicketActivity(tickets, since)
+}
+
+// bucketTicketActivity splits a ticket list into the created/closed changes
+// that fall within [since, now), newest-first. Pure over its inputs so the
+// window/zero-value logic is testable without a real central store.
+func bucketTicketActivity(tickets []*ticket.Ticket, since time.Time) TicketActivity {
+	ta := TicketActivity{Since: since, Available: true}
+	for _, t := range tickets {
+		project, _ := ticket.ParseNamespacedID(t.ID)
+		if !t.Created.IsZero() && !t.Created.Before(since) {
+			ta.Created = append(ta.Created, TicketChange{
+				ID: t.ID, Title: t.Title, Project: project,
+				Status: string(t.Status), When: t.Created,
+			})
+		}
+		if !t.Completed.IsZero() && !t.Completed.Before(since) {
+			ta.Closed = append(ta.Closed, TicketChange{
+				ID: t.ID, Title: t.Title, Project: project,
+				Status: string(t.Status), When: t.Completed,
+			})
+		}
+	}
+	sort.Slice(ta.Created, func(i, j int) bool {
+		return ta.Created[i].When.After(ta.Created[j].When)
+	})
+	sort.Slice(ta.Closed, func(i, j int) bool {
+		return ta.Closed[i].When.After(ta.Closed[j].When)
+	})
+	return ta
 }
 
 // attachSummary joins a project's sessions with rows from summaries.db and

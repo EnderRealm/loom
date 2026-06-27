@@ -1,5 +1,5 @@
-github.com/EnderRealm/ticket v0.1.0 h1:DQIlfsgCazMLCsJJjgKOgBTRIbIzbq0jDmHGeAjvMW8=
-github.com/EnderRealm/ticket v0.1.0/go.mod h1:MHtaSY47YadLWb06yGhTPGzQZF+nsKDWLiW5vDSFjdc=
+github.com/EnderRealm/ticket/v7 v7.6.1 h1:x7bbfwRg/06w6aJ6b7jkfqotxe6rDhbXYkIrpp8qgUE=
+github.com/EnderRealm/ticket/v7 v7.6.1/go.mod h1:5l0PaUrRm7W/bhl4ygy9biV/thwuw6Ef86mkdylcNg8=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/charmbracelet/bubbletea v1.3.10 h1:otUDHWMMzQSB0Pkc87rm691KZ3SWa4KUlvF9nRvCICw=

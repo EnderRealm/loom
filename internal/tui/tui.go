@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"loom/internal/config"
+	"loom/internal/summaries"
 )
 
 type overlayID int
@@ -21,12 +22,14 @@ const (
 	overlayNone overlayID = iota
 	overlayDetail
 	overlayKnowledge
+	overlayActivity
 )
 
 type App struct {
 	dashboard dashboardModel
 	detail    detailModel
 	knowledge knowledgeModel
+	activity  activityModel
 	overlay   overlayID
 	width     int
 	height    int
@@ -52,6 +55,10 @@ func defaultSortCol() int {
 
 type projectsLoadedMsg []Project
 type knowledgeLoadedMsg []Artifact
+type activityLoadedMsg struct {
+	view    *summaries.ActivityView
+	tickets TicketActivity
+}
 type errMsg error
 type statusMsg string
 type clearStatusMsg struct{}
@@ -77,6 +84,18 @@ func loadKnowledgeCmd() tea.Cmd {
 	}
 }
 
+// loadActivityCmd gathers the rolling 24h summary view and ticket created/
+// closed activity in one shot for the activity overlay.
+func loadActivityCmd() tea.Cmd {
+	return func() tea.Msg {
+		av, err := summaries.LoadActivity(24 * time.Hour)
+		if err != nil {
+			return errMsg(err)
+		}
+		return activityLoadedMsg{view: av, tickets: LoadTicketActivity(24 * time.Hour)}
+	}
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(15*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -99,6 +118,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.dashboard.setSize(a.width, a.contentHeight())
 		a.detail.setSize(a.width, a.contentHeight())
 		a.knowledge.setSize(a.width, a.contentHeight())
+		a.activity.setSize(a.width, a.contentHeight())
 		return a, nil
 
 	case projectsLoadedMsg:
@@ -115,6 +135,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case knowledgeLoadedMsg:
 		a.knowledge.setArtifacts([]Artifact(msg))
+		return a, nil
+
+	case activityLoadedMsg:
+		a.activity.setData(msg.view, msg.tickets)
 		return a, nil
 
 	case tickMsg:
@@ -159,12 +183,30 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.knowledge, cmd = a.knowledge.update(msg)
 			return a, cmd
 		}
+		if a.overlay == overlayActivity {
+			switch msg.String() {
+			case "esc", "q":
+				a.overlay = overlayNone
+				return a, nil
+			case "r":
+				a.status = "refreshing…"
+				return a, tea.Batch(loadActivityCmd(), clearStatusAfter(2*time.Second))
+			}
+			var cmd tea.Cmd
+			a.activity, cmd = a.activity.update(msg)
+			return a, cmd
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return a, tea.Quit
 		case "r":
 			a.status = "refreshing…"
 			return a, tea.Batch(loadCmd(), loadKnowledgeCmd(), clearStatusAfter(2*time.Second))
+		case "a":
+			a.activity = activityModel{}
+			a.activity.setSize(a.width, a.contentHeight())
+			a.overlay = overlayActivity
+			return a, loadActivityCmd()
 		case "c":
 			a.overlay = overlayKnowledge
 			return a, loadKnowledgeCmd()
@@ -188,6 +230,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.overlay == overlayKnowledge {
 		var cmd tea.Cmd
 		a.knowledge, cmd = a.knowledge.update(msg)
+		return a, cmd
+	}
+	if a.overlay == overlayActivity {
+		var cmd tea.Cmd
+		a.activity, cmd = a.activity.update(msg)
 		return a, cmd
 	}
 	var cmd tea.Cmd
@@ -245,6 +292,9 @@ func (a App) View() string {
 	if a.overlay == overlayKnowledge {
 		body = a.knowledge.view()
 	}
+	if a.overlay == overlayActivity {
+		body = a.activity.view()
+	}
 	b.WriteString(body)
 
 	// Footer: status or help.
@@ -268,7 +318,10 @@ func (a App) helpLine() string {
 		}
 		return "↑↓ select  │  enter view  │  p promote  │  x reject  │  e edit  │  s skip  │  esc/q close"
 	}
-	return "↑↓ select  │  enter open  │  s sort  │  c knowledge  │  r refresh  │  q quit"
+	if a.overlay == overlayActivity {
+		return "↑↓ scroll  │  r refresh  │  esc/q close"
+	}
+	return "↑↓ select  │  enter open  │  s sort  │  a activity  │  c knowledge  │  r refresh  │  q quit"
 }
 
 // launchTk shells out to `tk ui --repo <path>` via tea.ExecProcess so the

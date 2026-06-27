@@ -1,15 +1,14 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/EnderRealm/ticket/pkg/ticket"
+	"github.com/EnderRealm/ticket/v7/pkg/ticket"
 	"github.com/spf13/cobra"
 
+	"loom/internal/config"
 	"loom/internal/knowledge"
 )
 
@@ -28,7 +27,7 @@ var relevantCmd = &cobra.Command{
 			return fmt.Errorf("--for-ticket is required")
 		}
 
-		centralRoot, err := centralStoreRoot()
+		centralRoot, err := config.CentralStoreRoot()
 		if err != nil {
 			return err
 		}
@@ -69,38 +68,6 @@ var relevantCmd = &cobra.Command{
 		fmt.Print(b.String())
 		return nil
 	},
-}
-
-// centralStoreRoot reads the tk central store root from ~/.ticket/config.yaml.
-// loom carries no YAML dependency, so it scans for the single top-level
-// `central_root:` key rather than parsing the whole document.
-func centralStoreRoot() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("tk central store not configured: %w", err)
-	}
-	cfgPath := filepath.Join(home, ".ticket", "config.yaml")
-	f, err := os.Open(cfgPath)
-	if err != nil {
-		return "", fmt.Errorf("tk central store not configured: %w", err)
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
-			continue // nested key, not the top-level central_root
-		}
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "central_root:"); ok {
-			root := strings.TrimSpace(v)
-			if root == "" {
-				break
-			}
-			return root, nil
-		}
-	}
-	return "", fmt.Errorf("tk central store not configured: no central_root in %s", cfgPath)
 }
 
 // relPath renders an artifact path relative to the knowledge root, falling

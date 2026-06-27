@@ -4,6 +4,11 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 4: adds the commits table, derived from git's commit
+// confirmation line in bash tool output. Existing v3 databases lack the
+// table, so the 24h activity view treats them as outdated until a
+// `loom summarize --rebuild` repopulates them.
+//
 // schemaVersion 3: sessions gains git_remote and cwd_raw columns sourced
 // from the per-session meta sidecar (~/.loom/received/<agent>/<project>/
 // <session>.meta.json) the receiver writes when the wire payload carries
@@ -14,7 +19,7 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -166,4 +171,19 @@ CREATE TABLE IF NOT EXISTS unknown_records (
     PRIMARY KEY (agent, session_id, type, subtype)
 );
 CREATE INDEX IF NOT EXISTS idx_unknown_type ON unknown_records(agent, type, subtype);
+
+CREATE TABLE IF NOT EXISTS commits (
+    agent         TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    seq           INTEGER NOT NULL,
+    committed_at  TEXT,
+    git_remote    TEXT,
+    cwd           TEXT,
+    commit_hash   TEXT NOT NULL,
+    branch        TEXT,
+    subject       TEXT,
+    files_changed INTEGER,
+    PRIMARY KEY (agent, session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_commits_committed ON commits(committed_at);
 `

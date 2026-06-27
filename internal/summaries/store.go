@@ -125,7 +125,7 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 
 	agent := string(sum.Agent)
 	for _, table := range []string{
-		"sessions", "turns", "tool_calls", "errors", "compactions",
+		"sessions", "turns", "tool_calls", "commits", "errors", "compactions",
 		"token_counts", "files_touched", "subagents", "unknown_records",
 	} {
 		if _, err := tx.ExecContext(ctx,
@@ -183,6 +183,9 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		return err
 	}
 	if err := writeToolCalls(ctx, tx, sum); err != nil {
+		return err
+	}
+	if err := writeCommits(ctx, tx, sum, source); err != nil {
 		return err
 	}
 	if err := writeErrors(ctx, tx, sum); err != nil {
@@ -277,6 +280,47 @@ func writeToolCalls(ctx context.Context, tx *sql.Tx,
 			tc.ResultSummary,
 		); err != nil {
 			return fmt.Errorf("insert tool_call %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// writeCommits derives git commits from the session's bash tool output and
+// inserts one row each. git_remote/cwd are stamped from the same SourceInfo
+// the sessions row uses so the 24h activity view can group by repo. The
+// DELETE-first loop in WriteSummary already cleared this session's rows, so a
+// plain seq-keyed INSERT keeps the write idempotent across re-folds.
+func writeCommits(ctx context.Context, tx *sql.Tx,
+	sum *summary.SessionSummary, source SourceInfo) error {
+	agent := string(sum.Agent)
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO commits (
+		    agent, session_id, seq, committed_at, git_remote, cwd,
+		    commit_hash, branch, subject, files_changed
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i, c := range extractCommits(sum.ToolCalls) {
+		var files any
+		if c.filesChanged != nil {
+			files = *c.filesChanged
+		}
+		// A bash call's StartedAt can be zero when the transcript record
+		// carried no parseable timestamp; fall back to the session start so
+		// the commit still lands in the 24h window rather than vanishing
+		// behind the reader's committed_at IS NOT NULL guard.
+		committedAt := c.committedAt
+		if committedAt.IsZero() {
+			committedAt = sum.StartTime
+		}
+		if _, err := stmt.ExecContext(ctx,
+			agent, sum.SessionID, i, isoOrNull(committedAt),
+			source.GitRemote, source.CwdRaw, c.commitHash, c.branch,
+			c.subject, files,
+		); err != nil {
+			return fmt.Errorf("insert commit %d: %w", i, err)
 		}
 	}
 	return nil
