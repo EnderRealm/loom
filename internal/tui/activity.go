@@ -21,6 +21,11 @@ const (
 	maxActTickets  = 8
 )
 
+// ticketIDCol is the fixed width of the ticket-id column in the TICKETS
+// section. Namespaced ids vary widely in length, so they're truncated to fit
+// rather than allowed to swallow the gap before the title.
+const ticketIDCol = 30
+
 // activityModel is the rolling last-24-hours overlay: repos touched, sessions
 // started, commits landed, and tickets created/closed. Content can exceed the
 // viewport, so it scrolls vertically by offset.
@@ -269,7 +274,7 @@ func (m activityModel) ticketList(label string, items []TicketChange, width int)
 	if len(items) == 0 {
 		return append(out, StyleDim.Render("    (none)"))
 	}
-	titleW := width - 30
+	titleW := width - ticketIDCol - 6
 	if titleW < 16 {
 		titleW = 16
 	}
@@ -279,8 +284,11 @@ func (m activityModel) ticketList(label string, items []TicketChange, width int)
 	}
 	for i := 0; i < n; i++ {
 		t := items[i]
+		// Truncate the id to the column: padRight won't shorten an over-wide
+		// string, so a long namespaced id would otherwise butt against the
+		// title with no gap.
 		out = append(out, "    "+
-			padRight(StyleDim.Render(t.ID), 26)+
+			padRight(StyleDim.Render(truncate(t.ID, ticketIDCol-2)), ticketIDCol)+
 			lipgloss.NewStyle().Foreground(colorWhite).Render(truncate(t.Title, titleW)))
 	}
 	if len(items) > n {

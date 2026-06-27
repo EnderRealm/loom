@@ -1,12 +1,17 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"loom/internal/summaries"
 )
+
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
 // TestActivityViewStates confirms the activity overlay renders every degraded
 // state without panicking: unloaded, DB missing, and outdated schema.
@@ -51,6 +56,37 @@ func TestActivityViewStates(t *testing.T) {
 	}
 	if strings.Contains(out, "no activity") {
 		t.Errorf("must not claim no activity when the tk store is unavailable")
+	}
+}
+
+// TestActivityTicketIDTruncation guards the TICKETS-section rendering bug where
+// a namespaced id longer than the id column swallowed the gap before the title
+// (padRight doesn't shorten over-wide input). A long id must be truncated and a
+// visible gap must precede the title.
+func TestActivityTicketIDTruncation(t *testing.T) {
+	now := time.Now()
+	longID := "anvil/anvilengine-core-supervised-8353" // 38 chars, wider than ticketIDCol
+	const title = "Some descriptive title"
+	av := &summaries.ActivityView{
+		Available: true,
+		Since:     now.Add(-24 * time.Hour),
+		Repos:     []summaries.RepoActivity{{Repo: "https://github.com/EnderRealm/loom.git", Sessions: 1}},
+	}
+	ta := TicketActivity{
+		Available: true,
+		Created:   []TicketChange{{ID: longID, Title: title, Project: "anvil", When: now}},
+	}
+
+	var m activityModel
+	m.setSize(120, 80)
+	m.setData(av, ta)
+	out := stripANSI(m.view())
+
+	if strings.Contains(out, longID) {
+		t.Errorf("long ticket id should be truncated, but the full id is present")
+	}
+	if !strings.Contains(out, "  "+title) {
+		t.Errorf("expected a gap before the title; render:\n%s", out)
 	}
 }
 
