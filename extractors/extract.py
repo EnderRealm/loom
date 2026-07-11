@@ -202,13 +202,15 @@ def _extract_session_id(input_path: Path) -> str:
     return ""
 
 
-def build_prompt(template: str, refs: list[dict], input_text: str, today: str, input_format: str = "summary") -> str:
+def build_prompt(template: str, refs: list[dict], input_text: str, today: str, input_format: str = "summary", session_id: str = "") -> str:
     ref_block = EXAMPLE_DELIMITER.join(r["raw"] for r in refs)
     guidance = INPUT_GUIDANCE_RAW if input_format == "raw" else INPUT_GUIDANCE_SUMMARY
+    session_value = session_id or "<session uuid from input frontmatter>"
     return (
         template
         .replace("{INPUT_GUIDANCE}", guidance)
         .replace("{REFERENCE_EXAMPLES}", ref_block)
+        .replace("{SESSION_ID}", session_value)
         .replace("{INPUT}", input_text)
         .replace("{TODAY}", today)
     )
@@ -311,8 +313,34 @@ def inject_frontmatter(raw: str, fields: dict) -> str:
     return f"---\n{fm}\n{extra}\n---\n{body}"
 
 
+def override_source_sessions(raw: str, session_id: str) -> str:
+    """Force every `session:` key in the frontmatter to the authoritative id.
+
+    Model-emitted session ids are unreliable (hallucinated slugs instead of the
+    real UUID), so the id derived from the input file is authoritative. Only the
+    `sources:` block carries `session:` keys in practice; the body is never
+    touched. If the model omitted the sources block entirely, append a minimal
+    one so the candidate still cites its source.
+    """
+    if not session_id:
+        return raw
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.DOTALL)
+    if not m:
+        return raw
+    fm, body = m.group(1), m.group(2)
+    # Anchored to line start so `session:` inside prose values (e.g. an
+    # evidence note) is never rewritten.
+    key_pattern = re.compile(r"^(\s*-?\s*session:[ \t]*)\S+", re.MULTILINE)
+    if key_pattern.search(fm):
+        fm = key_pattern.sub(lambda m: m.group(1) + session_id, fm)
+    else:
+        fm = f"{fm}\nsources:\n  - session: {session_id}"
+    return f"---\n{fm}\n---\n{body}"
+
+
 def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
-                    provider: str, model: str, reasoning: str | None) -> list[Path]:
+                    provider: str, model: str, reasoning: str | None,
+                    session_id: str) -> list[Path]:
     """Write each valid candidate to base_dir/scope/<id>--<timestamp>.md.
 
     Adds `status: candidate`, `extracted_at`, `extracted_by` to frontmatter.
@@ -332,7 +360,8 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
     for c in candidates:
         if not c.get("id"):
             continue
-        body = inject_frontmatter(c["raw"], {
+        raw = override_source_sessions(c["raw"], session_id)
+        body = inject_frontmatter(raw, {
             "status": "candidate",
             "extracted_at": extracted_at,
             "extracted_by": extracted_by,
@@ -581,6 +610,11 @@ def main():
     if not input_path.exists():
         sys.exit(f"input not found: {input_path}")
 
+    # Authoritative session id derived from the input file (filename for raw
+    # jsonl, frontmatter for summaries). Model-emitted ids are overridden with
+    # this value at emission.
+    session_id = _extract_session_id(input_path)
+
     # Resolve type-specific config (prompt, directories, sentinel)
     tcfg = TYPE_CONFIG[args.extract_type]
     prompt_path = tcfg["prompt"]
@@ -608,15 +642,13 @@ def main():
         if not all_eval_refs:
             sys.exit(f"no eval truths in {eval_dir} — cannot benchmark without eval set")
 
-        # Extract session ID from input to filter eval refs.
-        # Summary: frontmatter session_id field. Raw: filename is the session ID.
-        input_session_id = _extract_session_id(input_path)
-        if input_session_id:
+        # Filter eval refs to those sourced from the input's session.
+        if session_id:
             scoring_refs = [r for r in all_eval_refs
-                           if any(input_session_id.startswith(sid) or sid.startswith(input_session_id)
+                           if any(session_id.startswith(sid) or sid.startswith(session_id)
                                   for sid in r.get("source_sessions", []))]
             if not scoring_refs:
-                print(f"warning: no eval truths match session {input_session_id} — scoring against all {len(all_eval_refs)} eval refs", file=sys.stderr)
+                print(f"warning: no eval truths match session {session_id} — scoring against all {len(all_eval_refs)} eval refs", file=sys.stderr)
                 scoring_refs = all_eval_refs
         else:
             print(f"warning: could not extract session ID from input — scoring against all {len(all_eval_refs)} eval refs", file=sys.stderr)
@@ -675,7 +707,7 @@ def main():
         print(f"[extract] --summarize ignored (input is already a summary)", file=sys.stderr)
 
     today = date.today().isoformat()
-    prompt = build_prompt(template, refs, input_text, today, input_format)
+    prompt = build_prompt(template, refs, input_text, today, input_format, session_id)
 
     if args.dry_run:
         print(prompt)
@@ -737,10 +769,10 @@ def main():
     if args.emit_candidates and not args.benchmark and valid:
         reasoning = args.reasoning if args.provider == "codex" else None
         written = emit_candidates(valid, tcfg["candidates"], args.scope,
-                                  args.provider, args.model, reasoning)
+                                  args.provider, args.model, reasoning, session_id)
         print(f"[extract] wrote {len(written)} candidate(s) → {tcfg['candidates']}/{args.scope}/", file=sys.stderr)
         append_extract_log(args.extract_type, args.scope,
-                           _extract_session_id(input_path), len(written))
+                           session_id, len(written))
 
     if not scoring_refs:
         print("\n[extract] no scoring refs to compare against — skipping scoring")

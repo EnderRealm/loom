@@ -60,7 +60,7 @@ evidence:
   - commit: <sha, if cited in input>
     note: <what the commit changed>
 sources:
-  - session: <session uuid from input frontmatter>
+  - session: {SESSION_ID}
     project: <project name>
     date: <YYYY-MM-DD from session>
     role: <one line: how this session surfaced the truth>

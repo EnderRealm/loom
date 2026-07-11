@@ -37,7 +37,7 @@ type: decision
 status: candidate
 tag: <human|auto>
 sources:
-  - session: <session uuid from input frontmatter>
+  - session: {SESSION_ID}
     project: <project name>
     date: <YYYY-MM-DD from session>
     role: <context in which this decision arose>
