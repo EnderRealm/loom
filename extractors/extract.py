@@ -338,6 +338,15 @@ def override_source_sessions(raw: str, session_id: str) -> str:
     return f"---\n{fm}\n---\n{body}"
 
 
+# A candidate id becomes a filename, and it comes from model output steered by
+# a transcript this process did not author — one that reaches the extractor
+# unattended from any machine holding a receiver token. Bound it to a single
+# conservative path segment so no `../` in an id can place a write outside the
+# candidates directory.
+# `\Z`, not `$`: `$` would also match before a trailing newline.
+CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\Z")
+
+
 def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
                     provider: str, model: str, reasoning: str | None,
                     session_id: str) -> list[Path]:
@@ -345,7 +354,8 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
 
     Adds `status: candidate`, `extracted_at`, `extracted_by` to frontmatter.
     Filename suffix is the wall-clock timestamp at run start, so a re-run on
-    the same session produces a sibling rather than overwriting.
+    the same session produces a sibling rather than overwriting. Candidates
+    whose id isn't a safe filename are skipped with a warning.
     """
     out_dir = base_dir / scope
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -356,9 +366,18 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
         extracted_by += f":{reasoning}"
     extracted_at = now.replace(microsecond=0).isoformat()
 
+    resolved_out = out_dir.resolve()
     written = []
     for c in candidates:
-        if not c.get("id"):
+        cid = c.get("id") or ""
+        if not CANDIDATE_ID_RE.match(cid):
+            print(f"  warn: skipping candidate with unusable id {cid!r}", file=sys.stderr)
+            continue
+        path = out_dir / f"{cid}--{timestamp_slug}.md"
+        # Belt and braces: the write must land in out_dir even if the pattern
+        # above is ever loosened.
+        if path.resolve().parent != resolved_out:
+            print(f"  warn: skipping candidate {cid!r}: {path} escapes {out_dir}", file=sys.stderr)
             continue
         raw = override_source_sessions(c["raw"], session_id)
         body = inject_frontmatter(raw, {
@@ -366,7 +385,6 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
             "extracted_at": extracted_at,
             "extracted_by": extracted_by,
         })
-        path = out_dir / f"{c['id']}--{timestamp_slug}.md"
         path.write_text(body)
         written.append(path)
     return written

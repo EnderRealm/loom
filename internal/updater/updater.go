@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"loom/internal/config"
+	"loom/internal/extract"
 	"loom/internal/launchd"
 	"loom/internal/version"
 	"loom/transport/receiver"
@@ -147,6 +148,7 @@ var workerComponents = []struct {
 	{shipper.AgentLabel, "shipper"},
 	{receiver.AgentLabel, "receiver"},
 	{SummarizerLabel, "summarizer"},
+	{extract.AgentLabel, "extractor"},
 }
 
 // reBootstrapAgents reinstalls every loaded loom agent under the freshly

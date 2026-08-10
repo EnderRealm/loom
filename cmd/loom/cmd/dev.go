@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"loom/internal/config"
+	"loom/internal/extract"
 	"loom/internal/launchd"
 	"loom/internal/tui"
 	"loom/internal/updater"
@@ -182,16 +183,17 @@ func unreleasedChangelogEntries(repoPath string) (count int, ok bool) {
 
 // expectedDaemons returns the set of daemon labels that should be running
 // for a machine's role, used as the denominator of the dev health rollup.
-// A server folds sessions (receiver + summarizer); a remote only ships
-// them. The updater is appended for either role only when its plist is
-// actually installed — brew-installed machines lack a source checkout and
-// never install it, so its absence must not count against health. An
-// unknown or empty role falls back to the legacy all-four set.
+// A server folds sessions (receiver + summarizer) and extracts knowledge
+// from them (extractor); a remote only ships them. The updater is appended
+// for either role only when its plist is actually installed — brew-installed
+// machines lack a source checkout and never install it, so its absence must
+// not count against health. An unknown or empty role falls back to the legacy
+// all-four set.
 func expectedDaemons(role string, updaterInstalled bool) []string {
 	var labels []string
 	switch role {
 	case config.RoleServer:
-		labels = []string{receiver.AgentLabel, summarizerLabel}
+		labels = []string{receiver.AgentLabel, summarizerLabel, extract.AgentLabel}
 	case config.RoleRemote:
 		labels = []string{shipper.AgentLabel}
 	default:

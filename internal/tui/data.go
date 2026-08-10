@@ -172,7 +172,7 @@ func LoadProjects() ([]Project, error) {
 		}
 		switch {
 		case gitRemote != "":
-			key = "remote:" + normalizeRemote(gitRemote)
+			key = "remote:" + summaries.NormalizeRemote(gitRemote)
 		case cwd != "":
 			key = "cwd:" + cwd
 		default:
@@ -330,36 +330,12 @@ func readSidecarIdentity(jsonlPath string) (gitRemote, cwd string) {
 	return m.GitRemote, m.Cwd
 }
 
-// normalizeRemote collapses common URL variants of the same origin to
-// one key. We strip a trailing ".git", lowercase, and convert SSH-style
-// "git@host:owner/repo" to "host/owner/repo" so HTTPS and SSH clones
-// of the same repo group together.
-func normalizeRemote(url string) string {
-	s := strings.TrimSpace(url)
-	s = strings.TrimSuffix(s, ".git")
-	s = strings.TrimSuffix(s, "/")
-	switch {
-	case strings.HasPrefix(s, "git@"):
-		// git@github.com:owner/repo → github.com/owner/repo
-		s = strings.TrimPrefix(s, "git@")
-		s = strings.Replace(s, ":", "/", 1)
-	case strings.HasPrefix(s, "ssh://"):
-		s = strings.TrimPrefix(s, "ssh://")
-		s = strings.TrimPrefix(s, "git@")
-	case strings.HasPrefix(s, "https://"):
-		s = strings.TrimPrefix(s, "https://")
-	case strings.HasPrefix(s, "http://"):
-		s = strings.TrimPrefix(s, "http://")
-	}
-	return strings.ToLower(s)
-}
-
 // displayName picks a human label for a project. Prefers the repo
 // basename from a git remote (e.g. "EnderRealm/loom" → "Loom"), then
 // the cwd basename, then the slug's last segment.
 func displayName(gitRemote, cwd, slug string) string {
 	if gitRemote != "" {
-		s := normalizeRemote(gitRemote)
+		s := summaries.NormalizeRemote(gitRemote)
 		// host/owner/repo or owner/repo — take the last component.
 		if i := strings.LastIndex(s, "/"); i >= 0 {
 			s = s[i+1:]

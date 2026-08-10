@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"loom/internal/summaries"
 )
 
 // TestLoadProjectsWithSummary confirms LoadProjects() merges in summary
@@ -119,7 +121,7 @@ func TestLoadProjectsIdentityGrouping(t *testing.T) {
 	for i := range projects {
 		p := &projects[i]
 		if p.GitRemote != "" {
-			byRemote[normalizeRemote(p.GitRemote)] = p
+			byRemote[summaries.NormalizeRemote(p.GitRemote)] = p
 		}
 	}
 

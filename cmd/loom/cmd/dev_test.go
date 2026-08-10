@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"loom/internal/config"
+	"loom/internal/extract"
 	"loom/internal/updater"
 	"loom/transport/receiver"
 	"loom/transport/shipper"
@@ -22,13 +23,13 @@ func TestExpectedDaemons(t *testing.T) {
 		{
 			name: "server without updater",
 			role: config.RoleServer,
-			want: []string{receiver.AgentLabel, summarizerLabel},
+			want: []string{receiver.AgentLabel, summarizerLabel, extract.AgentLabel},
 		},
 		{
 			name:             "server with updater",
 			role:             config.RoleServer,
 			updaterInstalled: true,
-			want:             []string{receiver.AgentLabel, summarizerLabel, updater.AgentLabel},
+			want:             []string{receiver.AgentLabel, summarizerLabel, extract.AgentLabel, updater.AgentLabel},
 		},
 		{
 			name: "remote without updater",

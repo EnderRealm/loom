@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"loom/internal/config"
+	"loom/internal/extract"
 	"loom/internal/launchd"
 	"loom/internal/updater"
 	"loom/transport/receiver"
@@ -26,8 +27,8 @@ const (
 var installCmd = &cobra.Command{
 	Use:       "install <component>",
 	Short:     "Install a loom launchd agent",
-	Long:      "Components: server | remote | receiver | summarizer | shipper | updater. Each writes a launchd plist that runs the current loom binary. The server and remote profiles also record the machine's role for health reporting.",
-	ValidArgs: []string{"server", "remote", "receiver", "summarizer", "shipper", "updater"},
+	Long:      "Components: server | remote | receiver | summarizer | extractor | shipper | updater. Each writes a launchd plist that runs the current loom binary. The server and remote profiles also record the machine's role for health reporting.",
+	ValidArgs: []string{"server", "remote", "receiver", "summarizer", "extractor", "shipper", "updater"},
 	Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		switch args[0] {
@@ -36,6 +37,9 @@ var installCmd = &cobra.Command{
 				return err
 			}
 			if err := installSummarizer(); err != nil {
+				return err
+			}
+			if err := installExtractor(); err != nil {
 				return err
 			}
 			return config.WriteRole(config.RoleServer)
@@ -48,6 +52,8 @@ var installCmd = &cobra.Command{
 			return installReceiver()
 		case "summarizer":
 			return installSummarizer()
+		case "extractor":
+			return installExtractor()
 		case "shipper":
 			return installShipper()
 		case "updater":
@@ -251,6 +257,64 @@ func installSummarizer() error {
 	fmt.Printf("  label:    %s\n", spec.Label)
 	fmt.Printf("  binary:   %s\n", bin)
 	fmt.Printf("  log:      %s\n", logPath)
+	return nil
+}
+
+// installExtractor installs the knowledge extraction trigger: a watch-mode
+// sweep that runs extractors/extract.py over each newly summarized session.
+// The extractor script and the CLIs it drives are checkout/Homebrew
+// artifacts, so the plist carries a full PATH plus the extractor's tunables.
+func installExtractor() error {
+	bin, err := loomBinary()
+	if err != nil {
+		return err
+	}
+	logPath := extract.LogPath()
+
+	env := map[string]string{
+		"LOOM_HOME": config.Home(),
+		"PATH":      canonicalPath(),
+	}
+	// A launchd job inherits nothing from a login shell, so the tunables only
+	// take effect if they're baked into the plist. They're persisted under
+	// LOOM_HOME rather than read from this process's environment alone,
+	// because the updater re-runs this install from the daemon's environment,
+	// which carries none of them.
+	tunables, err := extract.PersistTunables()
+	if err != nil {
+		return err
+	}
+	for k, v := range tunables {
+		env[k] = v
+	}
+
+	spec := launchd.Spec{
+		Label:     extract.AgentLabel,
+		Program:   bin,
+		Args:      []string{"extract", "--watch"},
+		LogPath:   logPath,
+		Env:       env,
+		KeepAlive: true,
+		RunAtLoad: true,
+	}
+	if err := launchd.Install(spec); err != nil {
+		return err
+	}
+	if err := launchd.Kickstart(spec.Label); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: kickstart: %v\n", err)
+	}
+	settings := extract.CurrentSettings()
+	fmt.Printf("installed extractor:\n")
+	fmt.Printf("  label:    %s\n", spec.Label)
+	fmt.Printf("  binary:   %s\n", bin)
+	fmt.Printf("  interval: %s (sweep ticker)\n", extract.DefaultInterval)
+	fmt.Printf("  model:    %s:%s\n", settings.Provider, settings.Model)
+	fmt.Printf("  log:      %s\n", logPath)
+	if script, err := extract.ScriptPath(); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: %v — sweeps will no-op until it resolves\n", err)
+	} else {
+		fmt.Printf("  script:   %s\n", script)
+	}
 	return nil
 }
 

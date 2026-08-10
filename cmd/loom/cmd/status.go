@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"loom/internal/config"
+	"loom/internal/extract"
 	"loom/internal/launchd"
 	"loom/internal/updater"
 	"loom/transport/receiver"
@@ -55,6 +56,31 @@ var statusCmd = &cobra.Command{
 			interval: "30s (sweep ticker)",
 			role:     role,
 			expected: expected[summarizerLabel],
+		})
+		// The extractor shells out to extract.py from a loom checkout, which
+		// the release tarball doesn't carry; surface whether it resolves so a
+		// silently no-op agent is visible here and not only in its log. The
+		// settings are the agent's own resolution (persisted tunables, then
+		// defaults) rather than whatever this shell happens to export.
+		es := extract.CurrentSettings()
+		scriptNote := "script    = " + filepath.Join(es.ExtractorsDir, "extract.py")
+		if script, err := extract.ScriptPath(); err == nil {
+			scriptNote = "script    = " + script
+		} else {
+			scriptNote += " (MISSING — set LOOM_EXTRACTORS_DIR)"
+		}
+		printAgent(agentReport{
+			human:    "loom-extractor",
+			label:    extract.AgentLabel,
+			logPath:  extract.LogPath(),
+			interval: fmt.Sprintf("%s (sweep ticker)", extract.DefaultInterval),
+			notes: []string{
+				scriptNote,
+				fmt.Sprintf("model     = %s:%s", es.Provider, es.Model),
+				"knowledge = " + es.KnowledgeRoot,
+			},
+			role:     role,
+			expected: expected[extract.AgentLabel],
 		})
 		printAgent(agentReport{
 			human:    "loom-shipper",
@@ -102,8 +128,9 @@ type agentReport struct {
 	label    string
 	logPath  string
 	interval string
-	role     string // machine role, for the not-installed marker
-	expected bool   // whether this role expects the component installed
+	notes    []string // optional extra lines, e.g. resolved external dependencies
+	role     string   // machine role, for the not-installed marker
+	expected bool     // whether this role expects the component installed
 }
 
 func printAgent(r agentReport) {
@@ -150,6 +177,9 @@ func printAgent(r agentReport) {
 	}
 	if r.interval != "" {
 		fmt.Printf("  interval = %s\n", r.interval)
+	}
+	for _, n := range r.notes {
+		fmt.Printf("  %s\n", n)
 	}
 	if mtime, ok := fileMtime(r.logPath); ok {
 		ago := time.Since(mtime).Round(time.Second)

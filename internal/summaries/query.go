@@ -239,6 +239,63 @@ func loadCompactions(db *sql.DB, v *View) error {
 	return rows.Err()
 }
 
+// SessionSource is one summarized session's identity plus the raw artifact
+// the summarizer folded. Consumed by the knowledge extraction trigger, which
+// re-reads the artifact rather than the derived rows.
+type SessionSource struct {
+	Agent      string
+	SessionID  string
+	SourcePath string
+	GitRemote  string
+}
+
+// LoadSessionSources returns every summarized session that still records its
+// source artifact and was summarized at or after since, newest-summarized
+// first. A zero since is unbounded. Returns nil when summaries.db doesn't
+// exist yet (the summarizer may not be installed), mirroring Load's
+// degrade-silently contract.
+func LoadSessionSources(since time.Time) ([]SessionSource, error) {
+	dbPath := filepath.Join(config.Home(), "summaries.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, nil
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open summaries.db: %w", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT agent, session_id, source_path, git_remote
+		FROM sessions
+		WHERE source_path IS NOT NULL AND source_path != ''
+		  AND summarized_at >= ?
+		ORDER BY summarized_at DESC
+	`, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("query session sources: %w", err)
+	}
+	defer rows.Close()
+
+	var out []SessionSource
+	for rows.Next() {
+		var (
+			s          SessionSource
+			sourcePath sql.NullString
+			gitRemote  sql.NullString
+		)
+		if err := rows.Scan(&s.Agent, &s.SessionID, &sourcePath, &gitRemote); err != nil {
+			return nil, err
+		}
+		s.SourcePath = sourcePath.String
+		s.GitRemote = gitRemote.String
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // ActivityView is the rolling-window rollup the "loom ui" activity screen
 // renders: repos touched, sessions started, and commits landed since Since.
 // Available is false when summaries.db is missing; Outdated is true when the

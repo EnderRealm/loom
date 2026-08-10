@@ -4,6 +4,41 @@ All notable changes to Loom are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Knowledge extraction now runs without a human command. The new
+  `com.loom.extractor` LaunchAgent (`loom extract --watch`, installed by
+  `loom install server` and `loom install extractor`) sweeps summarized
+  sessions and runs `extractors/extract.py` over each one, so candidates
+  land in `~/.loom/knowledge/_candidates/` and appear in the TUI review
+  screen. Scope comes from the session's git remote basename; a session
+  with no remote, one whose remote yields an unsafe scope name, one from an
+  agent the extractor's preprocessor can't read (codex, for now), or one
+  whose scope has no directory in the knowledge store, is skipped with the
+  reason logged rather than filed under a default scope. The sweep is
+  bounded by a watermark stamped when the agent first runs, so it covers
+  new sessions and leaves the historical backlog to a deliberate batch run.
+  Every visited session is recorded in `~/.loom/extract.state`, so a
+  session is extracted at most once and re-running a sweep is a no-op.
+  `extract.py` is resolved via `LOOM_EXTRACTORS_DIR` (default
+  `~/code/loom/extractors`) because it isn't in the release tarball; when
+  it's missing, sweeps log a no-op instead of crash-looping and
+  `loom status` shows the unresolved path. The extractor's tunables
+  (`LOOM_EXTRACTORS_DIR`, `LOOM_KNOWLEDGE_ROOT`, `LOOM_EXTRACT_PROVIDER`,
+  `LOOM_EXTRACT_MODEL`) are persisted to `$LOOM_HOME/extract-env` at
+  install, so the auto-updater's re-install — which runs from the updater
+  daemon's environment — reproduces the same plist.
+
+### Fixed
+
+- `extractors/extract.py` no longer derives a candidate's filename from an
+  unsanitized model-emitted `id`. Ids that aren't a single safe path
+  segment are skipped with a warning, and each write is confirmed to land
+  inside the candidates directory — a transcript can no longer steer the
+  extraction model into writing markdown outside the knowledge store.
+
 ## [1.2.2] — 2026-06-27 — Persisted receiver token
 
 ### Fixed

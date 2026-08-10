@@ -8,12 +8,13 @@ Loom captures agent session transcripts, ships them to a central receiver, folds
 | ------------ | ---------- | ------------------------------------------------------------------ |
 | `transport`  | v1, usable | Ships agent session JSONL files to a central receiver              |
 | `summarizer` | v1, usable | Folds received sessions into `~/.loom/summaries.db` (sqlite)       |
+| `extractor`  | v1, usable | Runs `extractors/extract.py` over newly summarized sessions        |
 | `tui`        | v1, usable | Interactive dashboard for projects, sessions, and knowledge        |
 | `loom` CLI   | v1, usable | Unified entry point (`tui`, `summarize`, `install`, `status`, ...) |
 
 **Agents supported:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/**/rollout-<ts>-<uuid>.jsonl`).
 
-`extractors/` is a Python research project (truth/decision extraction from session summaries) that operates over the durable knowledge store at `~/.loom/knowledge/` — its own git repo, see that store's `SCHEMA.md`. The TUI reads that store; the Go code does not write to it.
+`extractors/` is a Python project (truth/decision extraction from session summaries) that operates over the durable knowledge store at `~/.loom/knowledge/` — its own git repo, see that store's `SCHEMA.md`. The TUI reads that store and the `loom extract` agent invokes `extract.py` against new sessions; the Go code never writes the store itself.
 
 ## Prerequisites
 
@@ -58,7 +59,7 @@ curl -fsSL "https://github.com/EnderRealm/loom/releases/download/v${VER}/loom_${
 Then install the launchd agents you want and the updater that keeps the binary on the latest release:
 
 ```sh
-loom install server     # or remote / receiver / summarizer / shipper
+loom install server     # or remote / receiver / summarizer / extractor / shipper
 loom install updater     # downloads + installs each new release; see Auto-update
 ```
 
@@ -76,10 +77,11 @@ go build -o ./loom ./cmd/loom    # or: make dev
 ### Install launchd agents
 
 ```sh
-loom install server             # receiver + summarizer; records role=server
+loom install server             # receiver + summarizer + extractor; records role=server
 loom install remote             # shipper (client side); records role=remote
 loom install receiver           # receiver only
 loom install summarizer         # summarizer only
+loom install extractor          # knowledge extraction trigger only
 loom install shipper            # shipper only (no role change)
 loom install updater            # keep the binary on the latest release — see Auto-update
 loom uninstall                  # remove all loom launchd agents
@@ -87,7 +89,7 @@ loom status                     # show state of all installed components
 loom ui                         # open the dashboard (alias: loom tui)
 ```
 
-The `server` and `remote` profiles also record the machine's role under `$LOOM_HOME/role`. `loom dev` and `loom status` scope their health rollup to the daemons that role expects, so a `remote` machine running only the shipper no longer reports "degraded" for the receiver/summarizer it was never meant to run. Installing individual components (`receiver`, `summarizer`, `shipper`, `updater`) leaves the role untouched.
+The `server` and `remote` profiles also record the machine's role under `$LOOM_HOME/role`. `loom dev` and `loom status` scope their health rollup to the daemons that role expects, so a `remote` machine running only the shipper no longer reports "degraded" for the receiver/summarizer it was never meant to run. Installing individual components (`receiver`, `summarizer`, `extractor`, `shipper`, `updater`) leaves the role untouched.
 
 `install.sh` is preserved as a thin forwarder for muscle memory: each `--install-X` flag does `go build -o $LOOM_BIN_DIR/loom ./cmd/loom` then `loom install X`. Either entry point works; new docs prefer the `loom` binary directly.
 
@@ -117,6 +119,30 @@ Default: 5-minute poll. Override via plist environment:
 
 The reusable pattern (Go binary on launchd that updates itself) is documented in [`docs/auto-update-pattern.md`](./docs/auto-update-pattern.md); loom runs its artifact-fetch variant.
 
+### Knowledge extraction
+
+The `loom extract` agent closes the loop between capture and the durable knowledge store: every sweep it walks summarized sessions that have not been extracted yet and runs `extractors/extract.py` over each one, so candidates land in `~/.loom/knowledge/_candidates/<type>s/<scope>/` and show up in the TUI's candidate review screen.
+
+```sh
+loom install extractor
+tail -f ~/.loom/extractor.log
+```
+
+- **Scope** is the basename of the session's normalized git remote (`github.com/enderrealm/loom` → `loom`). A session with no remote, one whose remote yields an unsafe scope name, or one whose scope has no `knowledge/truths/<scope>/` directory, is **skipped with a logged reason** — there is no default scope.
+- **Forward only.** A watermark is stamped in `~/.loom/extract.state` the first time the agent runs; sessions summarized before it are left alone. Extracting the historical backlog is a separate, deliberate batch run.
+- **Claude Code only** for now: `extractors/preprocess.py` reads Claude Code jsonl, so codex sessions are skipped with a logged reason.
+- **At most once**: every visited session is recorded in `~/.loom/extract.state` with its outcome (`extracted` / `skipped` / `failed`), so re-running a sweep is a no-op. Re-running one session means deleting its entry. A run that completed but scored below the extractor's coverage threshold is `extracted`, not `failed` — only a run that never produced a result is a failure.
+- **`extract.py` is not in the release tarball.** The agent resolves it from a checkout; a missing script makes each sweep a logged no-op instead of a crash loop, and `loom status` shows the resolved path.
+
+| env var                 | default                  | purpose                          |
+| ----------------------- | ------------------------ | -------------------------------- |
+| `LOOM_EXTRACTORS_DIR`   | `~/code/loom/extractors` | where `extract.py` lives         |
+| `LOOM_KNOWLEDGE_ROOT`   | `$LOOM_HOME/knowledge`   | the knowledge store to write into |
+| `LOOM_EXTRACT_PROVIDER` | `claude`                 | extractor LLM provider           |
+| `LOOM_EXTRACT_MODEL`    | `sonnet`                 | extractor model                  |
+
+Set them before `loom install extractor`. Install persists them to `$LOOM_HOME/extract-env` and bakes them into the plist, since launchd jobs don't inherit a login shell's environment and the auto-updater re-installs the agent from its own. `loom status` prints what the agent resolves, which is the persisted value unless the invoking environment overrides it.
+
 ---
 
 # Transport
@@ -145,6 +171,9 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
         <uuid>.meta.json                       # project identity (git remote, raw cwd)
   summaries.db                                 # server: normalized summary database
   summarizer.log                               # server: summarizer launchd capture
+  extract.state                                # server: extractor watermark + visited sessions
+  extract-env                                  # server: extractor tunables baked into its plist
+  extractor.log                                # server: extractor launchd capture
   knowledge/                                   # durable knowledge store (separate git repo)
 ```
 
@@ -287,8 +316,9 @@ rm -f ~/.local/bin/loom
 | `loom receiver`               | Run the ingest server (`:8765` by default).                                 |
 | `loom summarize [--watch]`    | Fold received sessions into `~/.loom/summaries.db`.                         |
 | `loom summarize --rebuild`    | Drop and re-fold the summary DB; the upgrade path for schema bumps.         |
+| `loom extract [--watch]`      | Run `extract.py` over summarized sessions that haven't been extracted yet.  |
 | `loom ui`                     | Interactive dashboard (alias: `loom tui`).                                  |
-| `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `shipper`. `server`/`remote` also record the machine role. |
+| `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `extractor` / `shipper`. `server`/`remote` also record the machine role. |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |
 | `loom status`                 | Launchctl state per component + sync health + config presence.              |
 

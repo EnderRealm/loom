@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"loom/internal/extract"
 	"loom/internal/launchd"
 	"loom/internal/updater"
 	"loom/transport/receiver"
@@ -17,7 +18,7 @@ var uninstallCmd = &cobra.Command{
 	Use:   "uninstall",
 	Short: "Remove all loom launchd agents (state preserved)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		labels := []string{shipper.AgentLabel, receiver.AgentLabel, summarizerLabel, updater.AgentLabel}
+		labels := []string{shipper.AgentLabel, receiver.AgentLabel, summarizerLabel, extract.AgentLabel, updater.AgentLabel}
 		for _, label := range labels {
 			plistPath, _ := launchd.PlistPath(label)
 			if plistPath != "" {
