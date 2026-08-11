@@ -8,6 +8,33 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `loom extract --backfill` — an operator-run pass over the historical
+  backlog the trigger's watermark excludes, which is where most of the
+  durable knowledge captured before the trigger existed still sits. One
+  pass, no watch loop, and no per-sweep cap, so hundreds of sessions
+  aren't paced at four per quarter hour. `--dry-run` reports the
+  selection — sessions per resolved scope, and how many are excluded for
+  which reason — while spending nothing: no LLM call, no candidates, no
+  ledger entry, not even a watermark stamp on a host where the trigger
+  has never run. `--scope` restricts the run to named scopes so one can
+  be judged before committing to the rest, and `--limit` bounds it,
+  stopping between sessions. Both are validated rather than trusted: a
+  scope is matched case-insensitively and rejected when the store has no
+  directory for it, a negative `--limit` is rejected instead of reading
+  as unbounded, and passing any of the three to a sweep is an error even
+  when the value looks like the default. The backfill shares
+  `~/.loom/extract.state` with the trigger, so neither re-extracts what
+  the other visited and an interrupted run resumes where it stopped;
+  ledger writes now merge under a file lock, so a backfill running for
+  hours and the agent's quarter-hour sweep can't erase each other's
+  records, and the backfill re-reads the ledger before each extraction so
+  a session the trigger claimed mid-run is logged and dropped rather than
+  paid for twice. Being a foreground run, it appends its own output to
+  `~/.loom/extractor.log` as well as printing it, so the trail of what it
+  spent survives without a shell redirect. Unlike a sweep, it logs skips
+  without recording them: most are `unknown scope`, and recording those
+  would mean creating `knowledge/truths/<scope>/` later could never
+  rescue the sessions it was created for.
 - Knowledge extraction now runs without a human command. The new
   `com.loom.extractor` LaunchAgent (`loom extract --watch`, installed by
   `loom install server` and `loom install extractor`) sweeps summarized

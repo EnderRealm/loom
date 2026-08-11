@@ -129,7 +129,7 @@ tail -f ~/.loom/extractor.log
 ```
 
 - **Scope** is the basename of the session's normalized git remote (`github.com/enderrealm/loom` → `loom`). A session with no remote, one whose remote yields an unsafe scope name, or one whose scope has no `knowledge/truths/<scope>/` directory, is **skipped with a logged reason** — there is no default scope.
-- **Forward only.** A watermark is stamped in `~/.loom/extract.state` the first time the agent runs; sessions summarized before it are left alone. Extracting the historical backlog is a separate, deliberate batch run.
+- **Forward only.** A watermark is stamped in `~/.loom/extract.state` the first time the agent runs; sessions summarized before it are left alone. The historical backlog is `loom extract --backfill`'s job (below).
 - **Claude Code only** for now: `extractors/preprocess.py` reads Claude Code jsonl, so codex sessions are skipped with a logged reason.
 - **At most once**: every visited session is recorded in `~/.loom/extract.state` with its outcome (`extracted` / `skipped` / `failed`), so re-running a sweep is a no-op. Re-running one session means deleting its entry. A run that completed but scored below the extractor's coverage threshold is `extracted`, not `failed` — only a run that never produced a result is a failure.
 - **`extract.py` is not in the release tarball.** The agent resolves it from a checkout; a missing script makes each sweep a logged no-op instead of a crash loop, and `loom status` shows the resolved path.
@@ -142,6 +142,22 @@ tail -f ~/.loom/extractor.log
 | `LOOM_EXTRACT_MODEL`    | `sonnet`                 | extractor model                  |
 
 Set them before `loom install extractor`. Install persists them to `$LOOM_HOME/extract-env` and bakes them into the plist, since launchd jobs don't inherit a login shell's environment and the auto-updater re-installs the agent from its own. `loom status` prints what the agent resolves, which is the persisted value unless the invoking environment overrides it.
+
+#### Backfilling the historical backlog
+
+`loom extract --backfill` is the operator-run pass over the sessions the watermark excludes. It runs once — `--watch` is rejected — and ignores the per-sweep cap, so clearing hundreds of sessions isn't paced at four per quarter hour. It shares `~/.loom/extract.state` and the same provider/model tunables with the trigger, so neither re-extracts what the other already visited, and an interrupted run resumes where it stopped.
+
+```sh
+loom extract --backfill --dry-run                 # what a real run would do, spending nothing
+loom extract --backfill --scope loom --limit 20
+```
+
+- `--dry-run` reports the selection — how many sessions resolve to each scope, and how many are excluded and why — and spends nothing: no LLM call, no write to the knowledge store, no ledger entry (not even the watermark, on a host where the trigger has never run).
+- `--scope` restricts the run to named scopes (repeatable, or comma-separated) so one can be judged before committing to the rest. It is matched case-insensitively, and a value with no `knowledge/truths/<scope>/` directory is rejected up front — no scope resolves to it, so the run would otherwise report "0 to extract" and exit 0, which reads exactly like an already-cleared backlog.
+- `--limit` bounds the run, stopping between sessions rather than mid-session. A negative value is rejected; `0` is the default and means unbounded. All three flags require `--backfill`, and that is judged on the flag being passed, so `--limit 0` or `--dry-run=false` handed to a sweep is an error rather than a silent no-op.
+- Skips are logged but **not** recorded, unlike a sweep's. Most of the backlog's skips are `unknown scope`; recording them would mean creating `knowledge/truths/<scope>/` later could never rescue the sessions it was created for.
+- Progress — the selection report, one line per session as it completes, and a running count every 10 — prints to the terminal and is appended to `~/.loom/extractor.log`, so a run that spends hours of LLM time leaves its trail in the same audit log the agent writes, without a shell redirect.
+- **Safe to run while the agent sweeps**, in this specific sense: ledger writes merge under a file lock, so a backfill holding its snapshot for hours and a quarter-hour sweep holding its own don't erase each other's records; and the backfill re-reads the ledger immediately before each extraction, dropping — with a logged line, and a `skipped=` count in its final tally — any session the trigger recorded since the plan was computed. The plan's up-front counts are therefore a forecast: a run can extract fewer sessions than it announced. What is not covered is the overlap window itself — neither side records a session until it finishes, so the trigger can still start on one the backfill is mid-way through.
 
 ---
 

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -73,11 +74,46 @@ type Options struct {
 	Watch    bool
 	Interval time.Duration
 	Idle     time.Duration
+
+	// Backfill covers the historical backlog the watermark excludes. It is
+	// operator-initiated — one pass, no watch loop, no maxPerSweep cap — and
+	// bounded by Scopes and Limit instead. DryRun reports what such a run
+	// would do without spending anything.
+	Backfill bool
+	Scopes   []string
+	Limit    int
+	DryRun   bool
 }
 
 // LogPath returns the canonical extractor log file path.
 func LogPath() string {
 	return filepath.Join(config.Home(), "extractor.log")
+}
+
+// teeToLog appends this process's log output to extractor.log alongside its
+// current destination, and returns a function restoring that destination. The
+// LaunchAgent's output lands there because launchd redirects its stdout, but a
+// backfill is always a foreground invocation (--backfill and --watch are
+// mutually exclusive), and a multi-hour run spending real LLM quota must leave
+// the same audit trail without the operator remembering a redirect. Stderr is
+// kept so the run stays watchable in the terminal it was started from.
+func teeToLog() func() {
+	prev := log.Writer()
+	p := LogPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		log.Printf("open %s: %v", p, err)
+		return func() {}
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		log.Printf("open %s: %v", p, err)
+		return func() {}
+	}
+	log.SetOutput(io.MultiWriter(prev, f))
+	return func() {
+		log.SetOutput(prev)
+		f.Close()
+	}
 }
 
 // ExtractorsDir returns the directory holding extract.py. The script lives in
@@ -118,10 +154,22 @@ func ScriptPath() (string, error) {
 }
 
 // Run performs one sweep and, in watch mode, keeps sweeping on a ticker until
-// SIGINT/SIGTERM.
+// SIGINT/SIGTERM. With Backfill set it performs one backfill pass instead.
 func Run(opts Options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if opts.Backfill {
+		// Before the log is teed: a rejected run spends nothing, so it has no
+		// trail to leave in extractor.log.
+		if err := validateScopes(opts.Scopes); err != nil {
+			return err
+		}
+		restore := teeToLog()
+		defer restore()
+		backfill(ctx, opts)
+		return nil
+	}
 
 	sweep(ctx, opts)
 
@@ -207,34 +255,16 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 			continue
 		}
 
-		log.Printf("extract %s/%s scope=%s input=%s", logSafe(s.Agent), logSafe(s.SessionID), scope, logSafe(s.SourcePath))
-		start := time.Now()
-		run, err := runExtractor(ctx, script, s.SourcePath, scope)
-		if err != nil {
-			if ctx.Err() != nil {
-				// Shutdown killed the child, not the extractor failing; leave
-				// the session unvisited so the next run retries it.
-				log.Printf("extract %s/%s: interrupted", logSafe(s.Agent), logSafe(s.SessionID))
-				break
-			}
-			// Recorded as visited so one poisoned session can't consume the
-			// per-sweep budget forever. Re-running it means deleting its entry
-			// from the state file.
+		outcome := extractOne(ctx, st, script, s, scope)
+		if outcome == "" {
+			// Interrupted; the session stays unvisited for the next run.
+			break
+		}
+		if outcome == outcomeFailed {
 			r.failed++
-			log.Printf("extract %s/%s: FAILED after %s: %v", logSafe(s.Agent), logSafe(s.SessionID),
-				time.Since(start).Round(time.Second), err)
-			st.mark(s.Agent, s.SessionID, record{Outcome: outcomeFailed, Scope: scope, Reason: err.Error()})
 			continue
 		}
 		r.extracted++
-		log.Printf("extract %s/%s: ok in %s (candidates=%d score=%.2f)", logSafe(s.Agent), logSafe(s.SessionID),
-			time.Since(start).Round(time.Second), run.Candidates, run.Score)
-		st.mark(s.Agent, s.SessionID, record{
-			Outcome:    outcomeExtracted,
-			Scope:      scope,
-			Candidates: run.Candidates,
-			Score:      run.Score,
-		})
 	}
 
 	log.Printf("sweep sessions=%d extracted=%d skipped=%d failed=%d deferred=%d",
@@ -242,13 +272,50 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 	return r
 }
 
-// markSkip escapes the reason as well as the identity: the "artifact
+// extractOne runs one session through the extractor and records the outcome in
+// the ledger. Returns outcomeExtracted or outcomeFailed, or "" when a shutdown
+// killed the child rather than the extractor failing — the caller stops there
+// and leaves the session unvisited so the next run retries it.
+func extractOne(ctx context.Context, st *state, script string, s summaries.SessionSource, scope string) string {
+	log.Printf("extract %s/%s scope=%s input=%s", logSafe(s.Agent), logSafe(s.SessionID), scope, logSafe(s.SourcePath))
+	start := time.Now()
+	run, err := runExtractor(ctx, script, s.SourcePath, scope)
+	if err != nil {
+		if ctx.Err() != nil {
+			log.Printf("extract %s/%s: interrupted", logSafe(s.Agent), logSafe(s.SessionID))
+			return ""
+		}
+		// Recorded as visited so one poisoned session can't consume the
+		// per-sweep budget forever. Re-running it means deleting its entry
+		// from the state file.
+		log.Printf("extract %s/%s: FAILED after %s: %v", logSafe(s.Agent), logSafe(s.SessionID),
+			time.Since(start).Round(time.Second), err)
+		st.mark(s.Agent, s.SessionID, record{Outcome: outcomeFailed, Scope: scope, Reason: err.Error()})
+		return outcomeFailed
+	}
+	log.Printf("extract %s/%s: ok in %s (candidates=%d score=%.2f)", logSafe(s.Agent), logSafe(s.SessionID),
+		time.Since(start).Round(time.Second), run.Candidates, run.Score)
+	st.mark(s.Agent, s.SessionID, record{
+		Outcome:    outcomeExtracted,
+		Scope:      scope,
+		Candidates: run.Candidates,
+		Score:      run.Score,
+	})
+	return outcomeExtracted
+}
+
+// markSkip records the skip as visited so it isn't re-logged every sweep.
+func markSkip(st *state, s summaries.SessionSource, reason string) {
+	logSkip(s, reason)
+	st.mark(s.Agent, s.SessionID, record{Outcome: outcomeSkipped, Reason: reason})
+}
+
+// logSkip escapes the reason as well as the identity: the "artifact
 // unreadable" case wraps an *os.PathError whose path is derived from the
 // session id, so the id reaches the line through the reason too. The ledger
 // keeps the raw reason — json.MarshalIndent escapes it there.
-func markSkip(st *state, s summaries.SessionSource, reason string) {
+func logSkip(s summaries.SessionSource, reason string) {
 	log.Printf("skip %s/%s: %s", logSafe(s.Agent), logSafe(s.SessionID), logSafe(reason))
-	st.mark(s.Agent, s.SessionID, record{Outcome: outcomeSkipped, Reason: reason})
 }
 
 // logSafe renders a client-supplied value for extractor.log. Agent, session
@@ -275,6 +342,11 @@ func logSafe(s string) string {
 // "..", which filepath.Join would otherwise clean into the store's parent.
 var scopePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
+// errNoRemote is the commonest unresolvable case — a session captured outside
+// a git checkout — and a sentinel so the backfill's report can count it apart
+// from a scope the store simply doesn't have.
+var errNoRemote = errors.New("no git remote")
+
 // resolveScope derives the knowledge scope from a session's git remote: the
 // basename of the normalized remote (github.com/enderrealm/loom → loom). A
 // session with no remote, one whose basename isn't a safe scope name, or one
@@ -283,7 +355,7 @@ var scopePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 // traversed) scope.
 func resolveScope(gitRemote string) (string, error) {
 	if strings.TrimSpace(gitRemote) == "" {
-		return "", errors.New("no git remote")
+		return "", errNoRemote
 	}
 	scope := summaries.NormalizeRemote(gitRemote)
 	if i := strings.LastIndex(scope, "/"); i >= 0 {
