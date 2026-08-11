@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"loom/internal/config"
 	"loom/internal/parse/summary"
@@ -194,6 +196,99 @@ func TestSweepSkipsUnsupportedAgents(t *testing.T) {
 	}
 	if got := st.Sessions[sessionKey("codex-cli", "rollout-1")].Outcome; got != outcomeSkipped {
 		t.Fatalf("outcome = %q, want %q (the skip must be auditable)", got, outcomeSkipped)
+	}
+}
+
+// extractor.log is the audit record for what the sweep declined to do, and
+// agent/session id/source path all come from a remote shipper. A control
+// character in one of them must not open a line of its own, or a shipper can
+// forge an entry saying a session it controls was handled.
+func TestSweepEscapesHostileIdentityInTheLog(t *testing.T) {
+	const remote = "https://github.com/EnderRealm/loom.git"
+	cases := []struct {
+		name     string
+		injected string
+	}{
+		{name: "newline", injected: "\nskip forged: extracted"},
+		{name: "carriage return", injected: "\rskip forged: extracted"},
+		{name: "ansi escape", injected: "\x1b[2Kskip forged: extracted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, "loom")
+			okID := "ok" + tc.injected
+			failID := "fail" + tc.injected
+			skipID := "skip" + tc.injected
+			e.addSession(okID, remote)
+			e.addSession(failID, remote)
+			e.addSession(skipID, "")
+			e.addSessionAs(summary.Agent("codex-cli"+tc.injected), "rollout", remote)
+
+			orig := runExtractor
+			runExtractor = func(ctx context.Context, script, input, scope string) (extractRun, error) {
+				if strings.HasPrefix(filepath.Base(input), "fail") {
+					return extractRun{}, errExtractorFailed
+				}
+				return extractRun{Candidates: 2, Score: 0.13}, nil
+			}
+			t.Cleanup(func() { runExtractor = orig })
+
+			sweep(context.Background(), Options{})
+
+			// extract + ok, extract + FAILED, two skips, and the sweep summary.
+			logs := e.logs.String()
+			if got := strings.Count(logs, "\n"); got != 7 {
+				t.Fatalf("log has %d lines, want 7 — one per statement:\n%q", got, logs)
+			}
+			if strings.ContainsFunc(strings.ReplaceAll(logs, "\n", ""), unicode.IsControl) {
+				t.Fatalf("log carries a raw control character:\n%q", logs)
+			}
+			for _, want := range []string{
+				strconv.Quote(okID),
+				strconv.Quote(failID),
+				strconv.Quote(skipID),
+				strconv.Quote("codex-cli" + tc.injected),
+			} {
+				if !strings.Contains(logs, want) {
+					t.Fatalf("log missing the escaped identity %q:\n%q", want, logs)
+				}
+			}
+
+			// The ledger must name the real id too — json.MarshalIndent escapes
+			// the key, so the file stays one unambiguous record per session.
+			data, err := os.ReadFile(statePath())
+			if err != nil {
+				t.Fatalf("read state: %v", err)
+			}
+			if strings.ContainsFunc(strings.ReplaceAll(string(data), "\n", ""), unicode.IsControl) {
+				t.Fatalf("ledger carries a raw control character:\n%s", data)
+			}
+			st, err := loadState()
+			if err != nil {
+				t.Fatalf("load state: %v", err)
+			}
+			if got := st.Sessions[sessionKey("claude-code", okID)].Outcome; got != outcomeExtracted {
+				t.Fatalf("outcome = %q for %q, want %q", got, okID, outcomeExtracted)
+			}
+			if got := st.Sessions[sessionKey("claude-code", skipID)].Outcome; got != outcomeSkipped {
+				t.Fatalf("outcome = %q for %q, want %q", got, skipID, outcomeSkipped)
+			}
+		})
+	}
+}
+
+// The escaping above must stay invisible on the ordinary path: a log that
+// quotes every routine line is a log operators stop reading.
+func TestSweepLogsOrdinaryIdentityUnquoted(t *testing.T) {
+	e := newEnv(t, "loom")
+	const id = "195f819e-1e11-4e08-8c16-a340f512f892"
+	input := e.addSession(id, "https://github.com/EnderRealm/loom.git")
+
+	sweep(context.Background(), Options{})
+
+	want := "extract claude-code/" + id + " scope=loom input=" + input
+	if !strings.Contains(e.logs.String(), want) {
+		t.Fatalf("log missing %q — a real session id must read unquoted:\n%s", want, e.logs.String())
 	}
 }
 

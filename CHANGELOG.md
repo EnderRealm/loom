@@ -33,6 +33,19 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The extraction trigger no longer writes client-supplied session identity
+  into `~/.loom/extractor.log` unescaped. Agent, session id and source path
+  reach the sweep from a remote shipper, so a control character in one let
+  that shipper open lines of its own in the log — a forged
+  `skip claude-code/x: extracted` made an unhandled session look handled in
+  the one record of what the sweep declined to do. Values that aren't plain
+  printable text are now quoted (ordinary UUID ids and paths still read
+  unquoted), and the receiver rejects an agent, project or session id
+  carrying a control character at ingest, so such an identifier no longer
+  reaches the summary DB, the lines of `receiver.log` that record it, or an
+  on-disk `<session_id>.jsonl` name. The project-identity fields
+  (`git_remote`, `cwd`) are not covered by that check and still reach
+  `receiver.log` unescaped.
 - `extractors/extract.py` no longer derives a candidate's filename from an
   unsanitized model-emitted `id`. Ids that aren't a single safe path
   segment are skipped with a warning, and each write is confirmed to land

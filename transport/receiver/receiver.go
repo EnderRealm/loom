@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"loom/internal/config"
 	"loom/transport/internal/wire"
@@ -228,7 +229,7 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := writeOffsetFile(offsetPath, req.ToOffset); err != nil {
-		log.Printf("error from=%s session=%s err=%q (write offset)", r.RemoteAddr, req.SessionID, err)
+		log.Printf("error from=%s session=%q err=%q (write offset)", r.RemoteAddr, req.SessionID, err)
 		http.Error(w, "write offset: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -242,7 +243,7 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if req.ProjectIdentity != nil && *req.ProjectIdentity != (wire.ProjectIdentity{}) {
 		metaPath := filepath.Join(dir, req.SessionID+".meta.json")
 		if err := writeProjectIdentity(metaPath, req.ProjectIdentity); err != nil {
-			log.Printf("warn from=%s session=%s err=%q (write meta)", r.RemoteAddr, req.SessionID, err)
+			log.Printf("warn from=%s session=%q err=%q (write meta)", r.RemoteAddr, req.SessionID, err)
 		}
 		switch {
 		case req.ProjectIdentity.GitRemote != "":
@@ -314,6 +315,13 @@ func safeComponent(s string) bool {
 		return false
 	}
 	if strings.Contains(s, "..") {
+		return false
+	}
+	// A control character in a component becomes a control character in the
+	// on-disk name (<session_id>.jsonl) and lets a shipper forge extra lines
+	// in the logs that record the component verbatim. Real session ids are
+	// UUIDs on both agents, so nothing legitimate is refused.
+	if strings.ContainsFunc(s, unicode.IsControl) {
 		return false
 	}
 	return true

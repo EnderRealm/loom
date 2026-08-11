@@ -21,9 +21,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"loom/internal/config"
 	"loom/internal/knowledge"
@@ -205,27 +207,27 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 			continue
 		}
 
-		log.Printf("extract %s/%s scope=%s input=%s", s.Agent, s.SessionID, scope, s.SourcePath)
+		log.Printf("extract %s/%s scope=%s input=%s", logSafe(s.Agent), logSafe(s.SessionID), scope, logSafe(s.SourcePath))
 		start := time.Now()
 		run, err := runExtractor(ctx, script, s.SourcePath, scope)
 		if err != nil {
 			if ctx.Err() != nil {
 				// Shutdown killed the child, not the extractor failing; leave
 				// the session unvisited so the next run retries it.
-				log.Printf("extract %s/%s: interrupted", s.Agent, s.SessionID)
+				log.Printf("extract %s/%s: interrupted", logSafe(s.Agent), logSafe(s.SessionID))
 				break
 			}
 			// Recorded as visited so one poisoned session can't consume the
 			// per-sweep budget forever. Re-running it means deleting its entry
 			// from the state file.
 			r.failed++
-			log.Printf("extract %s/%s: FAILED after %s: %v", s.Agent, s.SessionID,
+			log.Printf("extract %s/%s: FAILED after %s: %v", logSafe(s.Agent), logSafe(s.SessionID),
 				time.Since(start).Round(time.Second), err)
 			st.mark(s.Agent, s.SessionID, record{Outcome: outcomeFailed, Scope: scope, Reason: err.Error()})
 			continue
 		}
 		r.extracted++
-		log.Printf("extract %s/%s: ok in %s (candidates=%d score=%.2f)", s.Agent, s.SessionID,
+		log.Printf("extract %s/%s: ok in %s (candidates=%d score=%.2f)", logSafe(s.Agent), logSafe(s.SessionID),
 			time.Since(start).Round(time.Second), run.Candidates, run.Score)
 		st.mark(s.Agent, s.SessionID, record{
 			Outcome:    outcomeExtracted,
@@ -240,9 +242,29 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 	return r
 }
 
+// markSkip escapes the reason as well as the identity: the "artifact
+// unreadable" case wraps an *os.PathError whose path is derived from the
+// session id, so the id reaches the line through the reason too. The ledger
+// keeps the raw reason — json.MarshalIndent escapes it there.
 func markSkip(st *state, s summaries.SessionSource, reason string) {
-	log.Printf("skip %s/%s: %s", s.Agent, s.SessionID, reason)
+	log.Printf("skip %s/%s: %s", logSafe(s.Agent), logSafe(s.SessionID), logSafe(reason))
 	st.mark(s.Agent, s.SessionID, record{Outcome: outcomeSkipped, Reason: reason})
+}
+
+// logSafe renders a client-supplied value for extractor.log. Agent, session
+// id and source path all originate from a remote shipper (the receiver stores
+// what it is sent, the summarizer copies it into sessions), so a control
+// character in one would otherwise write extra lines into the log — a
+// fabricated "skip claude-code/x: extracted" makes an unhandled session look
+// handled, and the log is the audit record for what the sweep declined to do.
+// Quoting only values that aren't plain printable text, rather than %q
+// everywhere, keeps routine lines (UUID ids, ordinary paths) unquoted so the
+// log stays readable enough that operators keep reading it.
+func logSafe(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsPrint(r) }) {
+		return s
+	}
+	return strconv.Quote(s)
 }
 
 // scopePattern bounds a derived scope to one conservative path segment.
