@@ -35,6 +35,32 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   without recording them: most are `unknown scope`, and recording those
   would mean creating `knowledge/truths/<scope>/` later could never
   rescue the sessions it was created for.
+- `.loom-project` — a repo-root marker naming the project a path
+  belongs to, so knowledge scopes, session cwds and the tk registry
+  stop drifting into three competing lists. One line of plain text,
+  `#` comments allowed above it, owned by the project and read-only to
+  loom and tk: neither ever writes one, and this repo now carries its
+  own. `extractors/resolve_project.py` is the resolver, importable and
+  runnable on its own (`./resolve_project.py [path]` prints the name on
+  stdout and its reasoning on stderr). It resolves the path, walks up to
+  the repo root — the first ancestor with a `.git` entry, file or
+  directory, so worktrees and submodules count — and takes the nearest
+  usable marker. The walk stops at the repo root, so a stray marker in
+  `$HOME` can't capture an unrelated repo, and a marker that wins below
+  the root is used but flagged, because a vendored subtree's
+  declaration shouldn't read like the project's own. A name must be one
+  safe path segment (`^[a-z0-9][a-z0-9._-]*$`, exact case — `Loom` is
+  rejected rather than lowercased, since folding a human declaration
+  would hide the typo); a marker that fails it, holds nothing, is a
+  symlink, or isn't UTF-8 is ignored with the reason logged and the
+  repo directory's basename used instead, so a repo without a marker
+  still resolves. The resolved name is then checked against tk's
+  registry, which never changes it: an unregistered name is a warning,
+  and so is a registry that can't be located, read or decoded — never a
+  failure. Resolution writes nothing, anywhere. `extract.py --scope
+  auto` runs it against `--project-path` (default: cwd) and exits
+  telling the caller to pass an explicit `--scope` when no name can be
+  reached.
 - Knowledge extraction now runs without a human command. The new
   `com.loom.extractor` LaunchAgent (`loom extract --watch`, installed by
   `loom install server` and `loom install extractor`) sweeps summarized

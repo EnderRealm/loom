@@ -4,7 +4,11 @@ via the claude CLI, parses the output, and compares to hand-written reference
 truths in knowledge/truths/<scope>/.
 
 Usage:
-    ./extract.py --input <session.md> [--scope forge] [--model haiku] [--threshold 0.5]
+    ./extract.py --input <session.md> [--scope forge|auto] [--project-path .]
+                 [--model haiku] [--threshold 0.5]
+
+`--scope auto` resolves the scope from --project-path via the repo's
+`.loom-project` marker (see resolve_project.py).
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ KNOWLEDGE_ROOT = Path(os.environ.get(
 # Import the pre-processor (sibling module)
 sys.path.insert(0, str(LOOM_ROOT / "extractors"))
 from preprocess import preprocess as preprocess_jsonl
+from resolve_project import describe as describe_project, resolve_project
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
 EXAMPLE_DELIMITER = "\n\n===REFERENCE-EXAMPLE===\n\n"
@@ -589,7 +594,10 @@ def main():
     p.add_argument("--input", required=True, help="path to session artifact (markdown or jsonl)")
     p.add_argument("--input-format", default="auto", choices=["auto", "summary", "raw"],
                     help="input format: summary (markdown), raw (jsonl), or auto (detect from extension)")
-    p.add_argument("--scope", default="forge", help="scope directory under knowledge/truths")
+    p.add_argument("--scope", default="forge",
+                    help="scope directory under knowledge/truths, or 'auto' to resolve it "
+                         "from --project-path via the repo's .loom-project marker")
+    p.add_argument("--project-path", default=".", help="path --scope auto resolves from (default: cwd)")
     p.add_argument("--preset", choices=list(PRESETS), help="shortcut: fast (gpt-5 low) or deep (sonnet)")
     p.add_argument("--provider", default="codex", choices=["claude", "codex"], help="LLM provider (default: codex)")
     p.add_argument("--model", default="gpt-5", help="model alias/id (default: gpt-5)")
@@ -623,6 +631,17 @@ def main():
         preset = PRESETS[args.preset]
         for k, v in preset.items():
             setattr(args, k, v)
+
+    # --scope auto derives the scope from the project's .loom-project marker, so
+    # everything downstream sees a resolved name.
+    if args.scope == "auto":
+        resolved = resolve_project(args.project_path)
+        for warning in resolved.warnings:
+            print(f"[extract] scope auto: {warning}", file=sys.stderr)
+        if resolved.name is None:
+            sys.exit(f"scope auto: cannot resolve a project name for {args.project_path} — pass an explicit --scope")
+        print(f"[extract] scope auto: {describe_project(resolved)}", file=sys.stderr)
+        args.scope = resolved.name
 
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
