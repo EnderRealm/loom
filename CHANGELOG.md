@@ -8,6 +8,41 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Knowledge extraction now resolves a session's scope from its repo's
+  `.loom-project` marker, so `--watch` and `--backfill` file the same
+  repo's candidates under the same name the marker declares rather than
+  under whatever its git remote's basename happens to be. The session's
+  recorded cwd is a real absolute path, so the marker is read
+  opportunistically: when that path is a directory on this host, the walk
+  up to its repo root runs as `resolve_project.py`'s does — nearest usable
+  marker wins, an unusable one continues the walk rather than ending it,
+  never above the repo root, a symlinked marker skipped rather than read,
+  since the cwd is client-supplied, and a winning marker below the repo
+  root warned about, since it is as likely a vendored subtree's own
+  declaration as the project's. Everything else falls back to the git
+  remote — a cwd that has moved or never existed here, a chain holding
+  nothing usable — because the marker is an additional source of truth,
+  never a new way to fail: a session that resolved before still resolves.
+  A marker-derived name clears the same gate a remote-derived one does
+  before it becomes a `--scope` argument and a path under the store. The
+  extract log now names the derivation (`source=marker`,
+  `source=git-remote`) — including in a `--backfill --dry-run`'s plan
+  line, which is the only place a run that spends nothing can report it —
+  names the marker file that won, logs a marker that disagrees with the
+  remote outright, since one of the two is then stale and only an
+  operator can say which, and says why a marker that exists was declined
+  rather than leaving it indistinguishable from no marker at all. Those
+  lines state a fact about a repo, so each is stated once per run rather
+  than once per session, and a rejected name is echoed truncated: the
+  marker is read through a 4 KiB bound and its value is arbitrary content
+  reached through a client-supplied path, so neither the read nor the
+  audit line it lands in is unbounded. Two deliberate divergences
+  from `resolve_project.py`: this path lowercases the marker's value —
+  resolved scopes are lowercase by construction here, and an exact-case
+  derivation would make `--backfill --scope Loom` stop matching sessions
+  it matches today — and it counts a marker naming a scope with no
+  `truths/` directory as unusable, a check `resolve_project.py` has no
+  knowledge store to make.
 - `loom extract --backfill` — an operator-run pass over the historical
   backlog the trigger's watermark excludes, which is where most of the
   durable knowledge captured before the trigger existed still sits. One

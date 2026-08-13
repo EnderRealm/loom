@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -40,8 +39,8 @@ type backfillResult struct {
 // backfillItem is one selected session and the scope it resolved to, so the
 // run doesn't re-derive what the selection pass already decided.
 type backfillItem struct {
-	src   summaries.SessionSource
-	scope string
+	src summaries.SessionSource
+	res resolution
 }
 
 // backfillPlan is what the run will do, decided before anything is spent so a
@@ -52,6 +51,7 @@ type backfillPlan struct {
 	items    []backfillItem
 	scanned  int
 	byScope  map[string]int
+	bySource map[string]int
 	excluded map[string]int
 }
 
@@ -97,6 +97,11 @@ func backfill(ctx context.Context, opts Options) backfillResult {
 	if len(plan.byScope) > 0 {
 		line += " (" + formatCounts(plan.byScope) + ")"
 	}
+	// A dry run never reaches extractOne, so this is the only place its
+	// derivations are accounted for.
+	if len(plan.bySource) > 0 {
+		line += " via " + formatCounts(plan.bySource)
+	}
 	log.Print(line)
 	if len(plan.excluded) > 0 {
 		log.Printf("%s: %d excluded (%s)", label, total(plan.excluded), formatCounts(plan.excluded))
@@ -129,7 +134,7 @@ func backfill(ctx context.Context, opts Options) backfillResult {
 			continue
 		}
 
-		outcome := extractOne(ctx, st, script, item.src, item.scope)
+		outcome := extractOne(ctx, st, script, item.src, item.res)
 		if outcome == "" {
 			// Interrupted; the session stays unvisited so a restart resumes here.
 			break
@@ -167,7 +172,12 @@ func planBackfill(st *state, sessions []summaries.SessionSource, opts Options) b
 
 	var items []backfillItem
 	byScope := map[string]int{}
+	bySource := map[string]int{}
 	excluded := map[string]int{}
+
+	// A backfill resolves the whole DB, so a repo's marker facts would otherwise
+	// be restated once per session ahead of the report below.
+	seen := logOnce{}
 
 	scanned := 0
 	for _, s := range sessions {
@@ -197,8 +207,11 @@ func planBackfill(st *state, sessions []summaries.SessionSource, opts Options) b
 			excluded[reasonActive]++
 			continue
 		}
-		scope, err := resolveScope(s.GitRemote)
+		res, err := resolveScope(s.CwdRaw, s.GitRemote, seen)
 		if err != nil {
+			// errNoRemote still means "nothing named this session's project":
+			// resolveScope only reaches it once the marker derivation has
+			// failed too, so the bucket keeps counting the same sessions.
 			if errors.Is(err, errNoRemote) {
 				excluded[reasonNoRemote]++
 			} else {
@@ -207,14 +220,15 @@ func planBackfill(st *state, sessions []summaries.SessionSource, opts Options) b
 			logSkip(s, err.Error())
 			continue
 		}
-		if len(want) > 0 && !want[scope] {
+		if len(want) > 0 && !want[res.scope] {
 			excluded[reasonOtherScope]++
 			continue
 		}
-		items = append(items, backfillItem{src: s, scope: scope})
-		byScope[scope]++
+		items = append(items, backfillItem{src: s, res: res})
+		byScope[res.scope]++
+		bySource[res.source]++
 	}
-	return backfillPlan{items: items, scanned: scanned, byScope: byScope, excluded: excluded}
+	return backfillPlan{items: items, scanned: scanned, byScope: byScope, bySource: bySource, excluded: excluded}
 }
 
 // wantedScopes normalizes the --scope values into the shape resolveScope
@@ -242,15 +256,10 @@ func wantedScopes(scopes []string) []string {
 // still reports zero, which is the honest answer.
 func validateScopes(scopes []string) error {
 	for _, scope := range wantedScopes(scopes) {
-		// scopePattern bounds a scope to one path segment; a requested value
-		// outside it can't match a resolved scope, and stat'ing it unchecked
-		// would reach outside the store.
-		if !scopePattern.MatchString(scope) {
-			return fmt.Errorf("unsafe scope %q", scope)
-		}
-		dir := filepath.Join(knowledgeRoot(), "truths", scope)
-		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-			return fmt.Errorf("unknown scope %q (no %s)", scope, dir)
+		// The same gate, not a copy of it: a requested value that couldn't clear
+		// what a derived scope clears can never match one.
+		if err := validScope(scope); err != nil {
+			return fmt.Errorf("--scope: %w", err)
 		}
 	}
 	return nil

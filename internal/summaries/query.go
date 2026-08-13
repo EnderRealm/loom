@@ -247,6 +247,7 @@ type SessionSource struct {
 	SessionID  string
 	SourcePath string
 	GitRemote  string
+	CwdRaw     string // sidecar-captured raw cwd, the checkout the session ran in
 }
 
 // LoadSessionSources returns every summarized session that still records its
@@ -268,7 +269,7 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 	defer db.Close()
 
 	rows, err := db.Query(`
-		SELECT agent, session_id, source_path, git_remote
+		SELECT agent, session_id, source_path, git_remote, cwd_raw
 		FROM sessions
 		WHERE source_path IS NOT NULL AND source_path != ''
 		  AND summarized_at >= ?
@@ -285,12 +286,14 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 			s          SessionSource
 			sourcePath sql.NullString
 			gitRemote  sql.NullString
+			cwdRaw     sql.NullString
 		)
-		if err := rows.Scan(&s.Agent, &s.SessionID, &sourcePath, &gitRemote); err != nil {
+		if err := rows.Scan(&s.Agent, &s.SessionID, &sourcePath, &gitRemote, &cwdRaw); err != nil {
 			return nil, err
 		}
 		s.SourcePath = sourcePath.String
 		s.GitRemote = gitRemote.String
+		s.CwdRaw = cwdRaw.String
 		out = append(out, s)
 	}
 	return out, rows.Err()

@@ -131,7 +131,7 @@ func TestBackfillDryRunReportsEveryExclusion(t *testing.T) {
 	e.addSession("f1", forgeRemote)
 	e.addSession("ghost", "https://github.com/EnderRealm/ghostwheel.git")
 	e.addSession("bare", "")
-	e.addSessionAs(summary.AgentCodex, "rollout", loomRemote)
+	e.addSessionAs(summary.AgentCodex, "rollout", loomRemote, "")
 
 	st, err := loadState()
 	if err != nil {
@@ -206,6 +206,67 @@ func TestBackfillStopsAtTheLimit(t *testing.T) {
 			t.Fatalf("runs = %v, want no session extracted twice", e.runs)
 		}
 		seen[r] = true
+	}
+}
+
+// The backfill resolves scopes through the same path the sweep does, so a
+// repo's marker decides which scope its backlog lands in — and which --scope
+// selects it.
+func TestBackfillPrefersTheMarkerOverTheRemote(t *testing.T) {
+	e := newEnv(t, "loom", "forge")
+	e.historical()
+	input := e.addSessionIn("l1", loomRemote, newCheckout(t, "forge\n"))
+
+	backfill(context.Background(), Options{Backfill: true, Scopes: []string{"forge"}})
+
+	want := "forge " + input
+	if len(e.runs) != 1 || e.runs[0] != want {
+		t.Fatalf("runs = %v, want exactly [%q] — the marker names the scope", e.runs, want)
+	}
+	if !strings.Contains(e.logs.String(), "extract claude-code/l1 scope=forge source=marker") {
+		t.Fatalf("log missing the marker-sourced extraction:\n%s", e.logs.String())
+	}
+}
+
+// A dry run never reaches extractOne, so the plan line is the only place it can
+// report how the sessions it selected were derived.
+func TestBackfillDryRunReportsTheDerivation(t *testing.T) {
+	e := newEnv(t, "loom", "forge")
+	e.historical()
+	e.addSessionIn("l1", loomRemote, newCheckout(t, "forge\n"))
+	e.addSession("l2", loomRemote)
+
+	backfill(context.Background(), Options{Backfill: true, DryRun: true})
+
+	want := "backfill dry run: scanned 2/2 sessions, 2 to extract (forge=1, loom=1) via git-remote=1, marker=1"
+	if !strings.Contains(e.logs.String(), want) {
+		t.Fatalf("log missing %q; got:\n%s", want, e.logs.String())
+	}
+}
+
+// The marker lines state a fact about a repo, not about a session. A backfill
+// resolves every scanned session, so restating one per session would bury the
+// selection report a dry run exists to be read from.
+func TestBackfillStatesARepoFactOnce(t *testing.T) {
+	e := newEnv(t, "loom", "forge")
+	e.historical()
+	cwd := newCheckout(t, "forge\n")
+	for _, id := range []string{"s1", "s2", "s3"} {
+		e.addSessionIn(id, loomRemote, cwd)
+	}
+
+	backfill(context.Background(), Options{Backfill: true, DryRun: true})
+
+	logs := e.logs.String()
+	if got := strings.Count(logs, "names scope=forge"); got != 1 {
+		t.Fatalf("disagreement stated %d times, want 1:\n%s", got, logs)
+	}
+	// And a later run says it again — the dedupe is per run, not a decision to
+	// stop reporting it.
+	e.logs.Reset()
+	backfill(context.Background(), Options{Backfill: true, DryRun: true})
+	if got := strings.Count(e.logs.String(), "names scope=forge"); got != 1 {
+		t.Fatalf("second run stated the disagreement %d times, want 1:\n%s", got, e.logs.String())
 	}
 }
 
@@ -488,7 +549,7 @@ func TestBackfillPersistsItsLog(t *testing.T) {
 	}
 	for _, want := range []string{
 		"backfill: scanned 1/1 sessions, 1 to extract (loom=1)",
-		"extract claude-code/s1 scope=loom",
+		"extract claude-code/s1 scope=loom source=git-remote",
 		"backfill done: extracted=1 failed=0 skipped=0 of 1 selected",
 	} {
 		if !strings.Contains(string(data), want) {
@@ -521,8 +582,8 @@ func TestBackfillLogsEachOutcome(t *testing.T) {
 
 	logs := e.logs.String()
 	for _, want := range []string{
-		"extract claude-code/ok scope=loom input=" + ok,
-		"extract claude-code/fail scope=loom input=" + fail,
+		"extract claude-code/ok scope=loom source=git-remote input=" + ok,
+		"extract claude-code/fail scope=loom source=git-remote input=" + fail,
 		errExtractorFailed.Error(),
 		"backfill done: extracted=1 failed=1 skipped=0 of 2 selected",
 	} {
