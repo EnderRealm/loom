@@ -351,10 +351,199 @@ def override_source_sessions(raw: str, session_id: str) -> str:
 # `\Z`, not `$`: `$` would also match before a trailing newline.
 CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\Z")
 
+# Git's commit confirmation line, e.g. "[main 2bbeb99] [loom/x-1a2b] Subject".
+# Mirrors commitLineRe in internal/summaries/commits.go — keep the two in step.
+# Requiring the line establishes that the transcript *recorded* a commit, which
+# a bare scan for `[id]`-shaped tokens does not: a transcript is thick with
+# prose mentions and quoted file contents. It says nothing about the client
+# being honest — a transcript is fully client-authored and reaches us on a
+# receiver token, so a citation inherits the transcript's trust level.
+COMMIT_LINE_RE = re.compile(r"^\[(.+) ([0-9a-f]{7,40})\] (.+)$")
+
+# The ticket marker is the `[...]` prefix of the commit subject.
+COMMIT_MARKER_RE = re.compile(r"^\[([^\[\]]+)\]")
+
+# A ticket id derived this way reaches frontmatter from a transcript this
+# process did not author — the same threat model as CANDIDATE_ID_RE. Require a
+# namespaced `<project>/<slug>` on a conservative charset (no whitespace, colon,
+# newline or bracket), which also stops git's own `[main 2bbeb99]` bracket from
+# ever reading as a marker.
+# `\Z`, not `$`: `$` would also match before a trailing newline.
+TICKET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}/[A-Za-z0-9][A-Za-z0-9._-]{0,60}\Z")
+
+# Any frontmatter line carrying a `ticket:` key, list entry or not. YAML also
+# accepts a quoted key and whitespace before the colon, so `- "ticket" : x` has
+# to read as the same key.
+TICKET_ENTRY_RE = re.compile(r"^[ \t]*-?[ \t]*[\"']?ticket[\"']?[ \t]*:")
+
+# Every derived id appends a line to every candidate the run emits, and a
+# client can author as many distinct commit confirmation lines as it likes.
+# Bound the collection the way the rest of this path bounds transcript-derived
+# values (CANDIDATE_ID_RE's length, preprocess.py's result truncation).
+MAX_SOURCE_TICKETS = 32
+
+
+def _ticket_ids_from_jsonl(path: Path) -> list[str]:
+    """Scan a raw session jsonl for ticket ids in git commit confirmations."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    rejected: set[str] = set()
+    bash_tool_use_ids: set[str] = set()
+    # Session jsonl is UTF-8 by construction; name it rather than inheriting
+    # the locale's encoding, so `replace` only ever absorbs genuine corruption.
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            if not raw.strip():
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            rtype = record.get("type", "")
+            if rtype not in ("assistant", "user"):
+                continue
+            message = record.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if rtype == "assistant" and btype == "tool_use":
+                    if block.get("name") == "Bash" and isinstance(block.get("id"), str):
+                        bash_tool_use_ids.add(block["id"])
+                    continue
+                # Only Bash results carry git output; a commit-shaped line in
+                # any other tool's result is quoted text, not a commit.
+                if rtype != "user" or btype != "tool_result":
+                    continue
+                if block.get("tool_use_id") not in bash_tool_use_ids:
+                    continue
+                text = block.get("content", "")
+                # Same part shapes preprocess.py's _process_user normalizes:
+                # text blocks and bare strings.
+                if isinstance(text, list):
+                    parts = []
+                    for part in text:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            parts.append(part.get("text", ""))
+                        elif isinstance(part, str):
+                            parts.append(part)
+                    text = "\n".join(parts)
+                if not isinstance(text, str):
+                    continue
+                for line in text.split("\n"):
+                    commit = COMMIT_LINE_RE.match(line.strip())
+                    if not commit:
+                        continue
+                    marker = COMMIT_MARKER_RE.match(commit.group(3))
+                    if not marker:
+                        continue
+                    ticket_id = marker.group(1)
+                    if not TICKET_ID_RE.match(ticket_id):
+                        # Say so rather than dropping it silently: otherwise a
+                        # session whose markers were all rejected logs exactly
+                        # like one that committed nothing, and the transcript
+                        # is the only evidence on an unattended path.
+                        if ticket_id not in rejected:
+                            rejected.add(ticket_id)
+                            print(f"[extract] warning: ignoring malformed ticket "
+                                  f"marker {ticket_id[:80]!r}", file=sys.stderr)
+                        continue
+                    if ticket_id in seen:
+                        continue
+                    seen.add(ticket_id)
+                    ids.append(ticket_id)
+                    if len(ids) >= MAX_SOURCE_TICKETS:
+                        print(f"[extract] warning: {path} hit the "
+                              f"{MAX_SOURCE_TICKETS}-ticket cap — later ids ignored",
+                              file=sys.stderr)
+                        return ids
+    return ids
+
+
+def extract_ticket_ids(input_path: Path) -> list[str]:
+    """Ticket ids cited by the commits an input session landed, first seen first.
+
+    Only raw jsonl carries commit data, so the caller gates on the resolved
+    input format rather than this function re-deriving it. Read from the jsonl
+    rather than preprocess.py's output because that truncates non-error tool
+    results to 500 chars and git hooks print preamble, so a commit confirmation
+    can fall outside that window.
+
+    Never raises: extraction of knowledge must not be lost because a citation
+    could not be derived, so an unreadable file or an unexpected record shape
+    degrades to no ticket ids.
+    """
+    try:
+        return _ticket_ids_from_jsonl(input_path)
+    except Exception as e:
+        print(f"[extract] warning: could not derive ticket ids from {input_path}: {e}",
+              file=sys.stderr)
+        return []
+
+
+def inject_source_tickets(raw: str, ticket_ids: list[str]) -> str:
+    """Add one `ticket:` entry to the frontmatter `sources:` block per id.
+
+    The ids are derived from the session's own git commit confirmation lines,
+    so — like `override_source_sessions` — they are authoritative: any
+    model-emitted `ticket:` *list entry* is dropped, including when the
+    derivation yielded nothing. That is the common case, not the rare one (a
+    session that landed no commits), and it is exactly where an unvalidated
+    model-emitted id would otherwise survive into the store. The strip covers
+    the block-sequence spellings YAML accepts for the key (bare, quoted,
+    space before the colon) — not a flow mapping like `- {ticket: x}`, which
+    neither template invites and which no reader parses today.
+
+    This keeps the *field* trustworthy; it is not a trust boundary on the
+    artifact's citations. `knowledge.Rank` (internal/knowledge/relevant.go)
+    tests citation by plain substring over the whole body, so a model set on a
+    `--for-ticket` hit can simply name the id in its claim prose, key or no
+    key. What actually bounds that is promotion: `Rank` skips anything not
+    `status: validated`, so a forged citation has to clear a human first.
+
+    Entries land at the end of the `sources:` block rather than the end of the
+    frontmatter, because `sources:` is followed by top-level keys in both
+    extractor templates (`related:` then `verified_at:` for truths,
+    `recorded_at:` for decisions).
+    """
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.DOTALL)
+    if not m:
+        return raw
+    fm, body = m.group(1), m.group(2)
+    # Line-anchored, so `ticket:` inside a prose value (e.g. an evidence note)
+    # is never dropped.
+    lines = [ln for ln in fm.split("\n") if not TICKET_ENTRY_RE.match(ln)]
+    if ticket_ids:
+        entries = [f"  - ticket: {t}" for t in ticket_ids]
+        # The last `sources:`, not the first: `override_source_sessions`
+        # appends its own block whenever the model's frontmatter carries no
+        # `session:` key (including under a model-emitted `sources: []`), and
+        # the block holding the session id is the one these entries belong in.
+        sources_at = next((i for i in range(len(lines) - 1, -1, -1)
+                           if lines[i].startswith("sources:")), None)
+        if sources_at is None:
+            lines.append("sources:")
+            lines.extend(entries)
+        else:
+            # Insert at the end of the block's items: the frontmatter carries
+            # top-level keys after `sources:`, and no top-level key can begin
+            # with `-`, so a flush-left sequence item still reads as one.
+            end = sources_at + 1
+            while end < len(lines) and lines[end][:1] in (" ", "\t", "-"):
+                end += 1
+            lines[end:end] = entries
+    fm = "\n".join(lines)
+    return f"---\n{fm}\n---\n{body}"
+
 
 def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
                     provider: str, model: str, reasoning: str | None,
-                    session_id: str) -> list[Path]:
+                    session_id: str, ticket_ids: list[str]) -> list[Path]:
     """Write each valid candidate to base_dir/scope/<id>--<timestamp>.md.
 
     Adds `status: candidate`, `extracted_at`, `extracted_by` to frontmatter.
@@ -385,6 +574,7 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
             print(f"  warn: skipping candidate {cid!r}: {path} escapes {out_dir}", file=sys.stderr)
             continue
         raw = override_source_sessions(c["raw"], session_id)
+        raw = inject_source_tickets(raw, ticket_ids)
         body = inject_frontmatter(raw, {
             "status": "candidate",
             "extracted_at": extracted_at,
@@ -703,6 +893,18 @@ def main():
     if input_format == "auto":
         input_format = "raw" if str(input_path).endswith(".jsonl") else "summary"
 
+    # Tickets the session's commits cited, derived from the raw jsonl. Emitted
+    # into every candidate's sources block as a citation back to the intent.
+    # Must be derived here: only raw input carries commit data, and the
+    # --summarize block below reassigns input_format to "summary" once it has
+    # replaced the transcript with its summary.
+    ticket_ids: list[str] = []
+    if input_format == "raw":
+        ticket_ids = extract_ticket_ids(input_path)
+        print(f"[extract] source tickets: {', '.join(ticket_ids) if ticket_ids else 'none found'}", file=sys.stderr)
+    else:
+        print("[extract] source tickets: n/a (summary input carries no commits)", file=sys.stderr)
+
     # Pre-process raw jsonl into a conversation thread
     if input_format == "raw":
         print(f"[extract] pre-processing raw jsonl...", file=sys.stderr)
@@ -806,7 +1008,8 @@ def main():
     if args.emit_candidates and not args.benchmark and valid:
         reasoning = args.reasoning if args.provider == "codex" else None
         written = emit_candidates(valid, tcfg["candidates"], args.scope,
-                                  args.provider, args.model, reasoning, session_id)
+                                  args.provider, args.model, reasoning, session_id,
+                                  ticket_ids)
         print(f"[extract] wrote {len(written)} candidate(s) → {tcfg['candidates']}/{args.scope}/", file=sys.stderr)
         append_extract_log(args.extract_type, args.scope,
                            session_id, len(written))

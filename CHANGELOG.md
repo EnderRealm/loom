@@ -8,6 +8,32 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Extracted candidates now cite the tickets their source session worked
+  under: one `ticket:` entry per id in the `sources:` block, alongside the
+  `session:` entry that is already forced there. The ids come from git's
+  own commit confirmation lines (`[main 2bbeb99] [loom/x-1a2b] Subject`)
+  in the session's raw jsonl, correlated back to a `Bash` tool_use so a
+  commit-shaped line quoted inside some other tool's output can't pose as
+  one. Never a prose mention of an id — a transcript is thick with those,
+  and citing every ticket a session merely discussed would make the field
+  worthless. A session that landed commits under several tickets gets an
+  entry each, first seen first, capped at 32 so a hostile transcript can't
+  append unbounded lines to every candidate a run emits. The scan reads
+  the raw jsonl rather than the preprocessed transcript, because
+  preprocessing truncates non-error tool results to 500 chars and commit
+  hooks print enough preamble to push the confirmation line past that.
+  Model-emitted `ticket:` list entries are stripped — including when the
+  derivation yields nothing, which is the ordinary case for a session that
+  committed nothing — since an id the model chose has been validated by
+  nobody. That keeps the field trustworthy without pretending to be a
+  trust boundary: `knowledge.Rank` matches citations by substring over the
+  whole artifact, so a model after a `--for-ticket` hit can name the id in
+  its claim prose instead. What bounds that is promotion — `Rank` ranks
+  only `status: validated` artifacts, so a planted citation has to get past
+  a human before it can surface. Citations are allowed to dangle: nothing
+  resolves them at read time, and a renamed, closed or deleted ticket does
+  not invalidate the truth — a truth that dies with its ticket was never
+  durable enough to promote.
 - Knowledge extraction now resolves a session's scope from its repo's
   `.loom-project` marker, so `--watch` and `--backfill` file the same
   repo's candidates under the same name the marker declares rather than
