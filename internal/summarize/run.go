@@ -49,6 +49,11 @@ func Run(opts Options) error {
 		if errors.Is(err, summaries.ErrSchemaOutdated) {
 			return fmt.Errorf("%w\n\n  re-run with --rebuild to drop and re-fold from %s", err, opts.ReceivedDir)
 		}
+		// No --rebuild hint here: the DB is intact and holds data this binary
+		// can't write, so dropping it would throw away the newer store.
+		if errors.Is(err, summaries.ErrSchemaTooNew) {
+			return fmt.Errorf("%w\n\n  update loom to a build that writes this schema", err)
+		}
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer st.Close()

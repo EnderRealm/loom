@@ -15,11 +15,20 @@ import (
 	"loom/internal/parse/summary"
 )
 
-// ErrSchemaOutdated is returned by Open when the on-disk database is at an
-// older schema version than this binary writes. The summary DB is permanently
-// disposable; the caller (summarize CLI) handles this by surfacing the
-// `--rebuild` flag, which drops and rebuilds from ~/.loom/received/.
+// ErrSchemaOutdated is returned by Open when the database is older than this
+// binary: the on-disk schema version is below schemaVersion. The summary DB is
+// permanently disposable; the caller (summarize CLI) handles this by surfacing
+// the `--rebuild` flag, which drops and rebuilds from ~/.loom/received/.
 var ErrSchemaOutdated = errors.New("summary db schema is outdated")
+
+// ErrSchemaTooNew is the mirror case: the database is newer than this binary,
+// its schema version above schemaVersion. Without this guard an old binary
+// stamps its own lower version over the marker and then folds old-shaped data
+// into a newer DB — the tables it doesn't know about simply stop being
+// written, and nothing surfaces the gap. The remedy is updating loom, never
+// `--rebuild`: the database isn't corrupt, only unreadable by this binary, and
+// a rebuild would discard it.
+var ErrSchemaTooNew = errors.New("summary db schema is newer than this binary")
 
 // Store is a thin wrapper over a SQLite database.
 type Store struct {
@@ -72,6 +81,15 @@ func migrate(db *sql.DB) error {
 	}
 	if current != 0 && current < schemaVersion {
 		return fmt.Errorf("%w: on disk %d, want %d", ErrSchemaOutdated, current, schemaVersion)
+	}
+	// Must precede both the schema apply and the marker write below: on a
+	// too-new DB neither may run, or this binary silently downgrades the
+	// marker and keeps writing old-shaped data.
+	if current > schemaVersion {
+		// Shaped like the outdated wrap above; the remedy belongs to the
+		// caller, which is the layer that already owns the --rebuild hint for
+		// the sibling case.
+		return fmt.Errorf("%w: on disk %d, this binary writes %d", ErrSchemaTooNew, current, schemaVersion)
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)

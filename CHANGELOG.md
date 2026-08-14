@@ -174,6 +174,20 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An older loom no longer silently downgrades a newer `summaries.db`.
+  `migrate` guarded the outdated direction only, so a binary opening a
+  database *ahead* of its own `schemaVersion` fell through the check and
+  then stamped its lower version over the marker — after which it kept
+  folding sessions in the old shape, leaving the tables it did not know
+  about simply unwritten with nothing to surface the gap. Observed in
+  production: a store recorded schema 3 while holding the v4 `commits`
+  table, and roughly seven weeks of commit rows were never extracted
+  because a pre-v4 summarizer had been running against it. `Open` now
+  returns `ErrSchemaTooNew` — distinct from `ErrSchemaOutdated` — before
+  applying the schema or touching the marker, and names both versions.
+  The remedy is updating loom, deliberately not `--rebuild`, which would
+  discard a database that is not corrupt, only unreadable by this binary.
+
 - The extraction trigger no longer writes client-supplied session identity
   into `~/.loom/extractor.log` unescaped. Agent, session id and source path
   reach the sweep from a remote shipper, so a control character in one let
