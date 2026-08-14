@@ -30,7 +30,7 @@ MARKER_NAME = ".loom-project"
 # typo'd project name, which is what the warning is for.
 VALUE_ECHO_LIMIT = 40
 
-# Same shape rule as scopePattern in internal/extract/extract.go: the resolved
+# Same shape rule as scopePattern in internal/extract/scope.go: the resolved
 # name becomes both a --scope argument and a directory under the knowledge
 # store, so it must be exactly one safe path segment. Requiring a leading
 # alphanumeric is what rejects "." and "..", which a path join would otherwise
