@@ -25,9 +25,10 @@ var errExtractorFailed = errors.New("extract.py: exit status 1: input not found"
 // env wires an isolated LOOM_HOME + knowledge store + extractors checkout,
 // captures the log, and returns the recorded extractor invocations.
 type env struct {
-	t    *testing.T
-	logs *bytes.Buffer
-	runs []string // "<scope> <input>" per invocation
+	t     *testing.T
+	logs  *bytes.Buffer
+	runs  []string // "<scope> <input>" per invocation
+	kinds []string // --extract-type per invocation, parallel to runs
 }
 
 func newEnv(t *testing.T, scopes ...string) *env {
@@ -50,8 +51,9 @@ func newEnv(t *testing.T, scopes ...string) *env {
 	e := &env{t: t, logs: &bytes.Buffer{}}
 
 	orig := runExtractor
-	runExtractor = func(ctx context.Context, script, input, scope string) (extractRun, error) {
+	runExtractor = func(ctx context.Context, script, input, scope, kind string) (extractRun, error) {
 		e.runs = append(e.runs, scope+" "+input)
+		e.kinds = append(e.kinds, kind)
 		// A fresh session rarely covers a scope's reference truths, so the
 		// stub's default is a completed run that scored below --threshold.
 		return extractRun{Candidates: 2, Score: 0.13}, nil
@@ -92,7 +94,14 @@ func (e *env) addSessionIn(sessionID, gitRemote, cwdRaw string) string {
 	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, cwdRaw)
 }
 
-func (e *env) addSessionAs(agent summary.Agent, sessionID, gitRemote, cwdRaw string) string {
+// addSessionWithCommits records the commit subjects the session landed too,
+// which is what a ticket id is resolved back to sessions through.
+func (e *env) addSessionWithCommits(sessionID, gitRemote string, subjects ...string) string {
+	e.t.Helper()
+	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, "", subjects...)
+}
+
+func (e *env) addSessionAs(agent summary.Agent, sessionID, gitRemote, cwdRaw string, subjects ...string) string {
 	e.t.Helper()
 	received := filepath.Join(config.Home(), "received", string(agent), "proj")
 	if err := os.MkdirAll(received, 0o755); err != nil {
@@ -113,6 +122,16 @@ func (e *env) addSessionAs(agent summary.Agent, sessionID, gitRemote, cwdRaw str
 	}
 	defer st.Close()
 	sum := &summary.SessionSummary{SessionID: sessionID, Agent: agent}
+	// Commits reach summaries.db the way the summarizer puts them there: derived
+	// from git's confirmation line in a bash result, one per call so each carries
+	// its own committed_at.
+	for i, subject := range subjects {
+		sum.ToolCalls = append(sum.ToolCalls, summary.ToolCall{
+			Kind:          summary.KindBash,
+			StartedAt:     time.Now().Add(time.Duration(i) * time.Minute),
+			ResultSummary: fmt.Sprintf("[main abc123%d] %s", i, subject),
+		})
+	}
 	src := summaries.SourceInfo{
 		Project:   "proj",
 		Path:      path,
@@ -233,7 +252,7 @@ func TestSweepEscapesHostileIdentityInTheLog(t *testing.T) {
 			e.addSessionAs(summary.Agent("codex-cli"+tc.injected), "rollout", remote, "")
 
 			orig := runExtractor
-			runExtractor = func(ctx context.Context, script, input, scope string) (extractRun, error) {
+			runExtractor = func(ctx context.Context, script, input, scope, _ string) (extractRun, error) {
 				if strings.HasPrefix(filepath.Base(input), "fail") {
 					return extractRun{}, errExtractorFailed
 				}
@@ -400,7 +419,7 @@ func TestSweepRecordsFailures(t *testing.T) {
 	e.addSession("s1", "https://github.com/EnderRealm/loom.git")
 
 	orig := runExtractor
-	runExtractor = func(ctx context.Context, script, input, scope string) (extractRun, error) {
+	runExtractor = func(ctx context.Context, script, input, scope, _ string) (extractRun, error) {
 		return extractRun{}, errExtractorFailed
 	}
 	t.Cleanup(func() { runExtractor = orig })
@@ -475,7 +494,7 @@ done
 exit 1
 `, argsPath, resultPath))
 
-	run, err := runExtractor(context.Background(), script, "/tmp/session.jsonl", "loom")
+	run, err := runExtractor(context.Background(), script, "/tmp/session.jsonl", "loom", extractType)
 	if err != nil {
 		t.Fatalf("runExtractor: %v (a below-threshold verdict is not a failure)", err)
 	}
@@ -499,7 +518,7 @@ func TestRunExtractorFailsWhenNoResultIsWritten(t *testing.T) {
 	t.Setenv("LOOM_HOME", t.TempDir())
 	script := writeScript(t, t.TempDir(), "#!/bin/sh\necho 'claude CLI failed (exit 1)' >&2\nexit 2\n")
 
-	if _, err := runExtractor(context.Background(), script, "/tmp/session.jsonl", "loom"); err == nil {
+	if _, err := runExtractor(context.Background(), script, "/tmp/session.jsonl", "loom", extractType); err == nil {
 		t.Fatal("runExtractor = nil error, want failure when the run wrote no result")
 	} else if !strings.Contains(err.Error(), "claude CLI failed") {
 		t.Fatalf("error %v drops the extractor's own message", err)

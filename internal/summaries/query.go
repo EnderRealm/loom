@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"loom/internal/config"
@@ -297,6 +298,106 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// LoadSessionsForTicket returns every summarized session that landed a commit
+// for ticketID, deduped to one entry per session and ordered by that session's
+// earliest such commit. Returns nil when summaries.db doesn't exist yet,
+// mirroring LoadSessionSources' degrade-silently contract — but a DB predating
+// the commits table is an error rather than an empty answer, because "no
+// sessions" from a DB that cannot hold the answer reads exactly like a ticket
+// that landed no commits, and the caller acts on that reading.
+func LoadSessionsForTicket(ticketID string) ([]SessionSource, error) {
+	dbPath := filepath.Join(config.Home(), "summaries.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, nil
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open summaries.db: %w", err)
+	}
+	defer db.Close()
+
+	if v := schemaVersionOf(db); v < commitsSchemaVersion {
+		return nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, commitsSchemaVersion)
+	}
+
+	rows, err := db.Query(`
+		SELECT c.agent, c.session_id, c.subject, c.committed_at,
+		       s.source_path, s.git_remote, s.cwd_raw
+		FROM commits c
+		JOIN sessions s ON s.agent = c.agent AND s.session_id = c.session_id
+		WHERE s.source_path IS NOT NULL AND s.source_path != ''
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query ticket sessions: %w", err)
+	}
+	defer rows.Close()
+
+	// The commit subject's `[<id>]` marker is matched here rather than by a SQL
+	// LIKE: a tk ticket id may legally contain `_`, which LIKE reads as a
+	// single-character wildcard, and an ESCAPE clause around it is more fragile
+	// than an exact prefix test.
+	marker := "[" + ticketID + "]"
+
+	type hit struct {
+		src   SessionSource
+		first time.Time
+	}
+	idx := map[string]int{}
+	var hits []hit
+
+	for rows.Next() {
+		var (
+			s                             SessionSource
+			subject, committedAt          sql.NullString
+			sourcePath, gitRemote, cwdRaw sql.NullString
+		)
+		if err := rows.Scan(&s.Agent, &s.SessionID, &subject, &committedAt,
+			&sourcePath, &gitRemote, &cwdRaw); err != nil {
+			return nil, err
+		}
+		if !strings.HasPrefix(subject.String, marker) {
+			continue
+		}
+		var at time.Time
+		if committedAt.Valid {
+			at, _ = time.Parse(time.RFC3339Nano, committedAt.String)
+		}
+		// One session commonly lands several commits for the same ticket; keep
+		// the earliest, so the order below is the order the work happened in.
+		if i, ok := idx[SessionKey(s.Agent, s.SessionID)]; ok {
+			if !at.IsZero() && (hits[i].first.IsZero() || at.Before(hits[i].first)) {
+				hits[i].first = at
+			}
+			continue
+		}
+		s.SourcePath = sourcePath.String
+		s.GitRemote = gitRemote.String
+		s.CwdRaw = cwdRaw.String
+		idx[SessionKey(s.Agent, s.SessionID)] = len(hits)
+		hits = append(hits, hit{src: s, first: at})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// committed_at can be NULL or unparseable, so the session id breaks the tie:
+	// the order matters less than it being the same on every run.
+	sort.Slice(hits, func(i, j int) bool {
+		if !hits[i].first.Equal(hits[j].first) {
+			return hits[i].first.Before(hits[j].first)
+		}
+		return hits[i].src.SessionID < hits[j].src.SessionID
+	})
+
+	var out []SessionSource
+	for _, h := range hits {
+		out = append(out, h.src)
+	}
+	return out, nil
 }
 
 // ActivityView is the rolling-window rollup the "loom ui" activity screen

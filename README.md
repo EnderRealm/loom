@@ -160,6 +160,18 @@ loom extract --backfill --scope loom --limit 20
 - Progress — the selection report, one line per session as it completes, and a running count every 10 — prints to the terminal and is appended to `~/.loom/extractor.log`, so a run that spends hours of LLM time leaves its trail in the same audit log the agent writes, without a shell redirect.
 - **Safe to run while the agent sweeps**, in this specific sense: ledger writes merge under a file lock, so a backfill holding its snapshot for hours and a quarter-hour sweep holding its own don't erase each other's records; and the backfill re-reads the ledger immediately before each extraction, dropping — with a logged line, and a `skipped=` count in its final tally — any session the trigger recorded since the plan was computed. The plan's up-front counts are therefore a forecast: a run can extract fewer sessions than it announced. What is not covered is the overlap window itself — neither side records a session until it finishes, so the trigger can still start on one the backfill is mid-way through.
 
+#### Retrospecting a closed ticket
+
+`loom retrospect <namespaced-ticket-id>` pushes new memory out of completed work: it resolves every summarized session whose commits carry the ticket's `[<id>]` subject marker and runs the extractor over each, for truths and for decisions.
+
+```sh
+loom retrospect loom/add-loom-retrospect-e222
+```
+
+- **Candidates only.** Output lands in `~/.loom/knowledge/_candidates/<type>s/<scope>/` with `session:` and `ticket:` sources filled in, and each run appends one `## [date] retrospect <ticket-id> | <scope> | N truth candidates, M decision candidates` line to the store's `log.md`. `truths/` and `decisions/` are never written — promotion stays human-gated.
+- **The ledger is bypassed on purpose.** `~/.loom/extract.state` exists to stop the *unattended* trigger double-spending, and the sweep has usually already visited a just-closed ticket's sessions; honoring it would make the command a no-op in exactly the case it exists for. Candidate filenames carry a run timestamp, so a re-run files siblings rather than overwriting.
+- **A ticket with no commits in the summary DB** is reported and exits 0. A missing `extract.py`, an extraction backend that isn't installed at the absolute path `extract.py` invokes it by, or a malformed ticket id are errors and exit non-zero — this is a foreground command, not a daemon that must not crash-loop. Sessions skipped for the sweep's own reasons (unsupported agent, unresolvable scope) are reported and don't fail the run.
+
 ---
 
 # Transport
@@ -334,6 +346,7 @@ rm -f ~/.local/bin/loom
 | `loom summarize [--watch]`    | Fold received sessions into `~/.loom/summaries.db`.                         |
 | `loom summarize --rebuild`    | Drop and re-fold the summary DB; the upgrade path for schema bumps.         |
 | `loom extract [--watch]`      | Run `extract.py` over summarized sessions that haven't been extracted yet.  |
+| `loom retrospect <ticket-id>` | Re-extract every session whose commits closed a ticket, truths + decisions. |
 | `loom ui`                     | Interactive dashboard (alias: `loom tui`).                                  |
 | `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `extractor` / `shipper`. `server`/`remote` also record the machine role. |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |

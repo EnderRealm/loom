@@ -3,11 +3,37 @@ package summaries
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"loom/internal/parse/summary"
 )
+
+// A DB predating the commits table cannot answer which sessions closed a
+// ticket, and an empty answer would read exactly like a ticket that landed no
+// commits — so it errors rather than degrading.
+func TestLoadSessionsForTicketRejectsAnOutdatedSchema(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOOM_HOME", dir)
+
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := st.DB().Exec(`UPDATE schema_meta SET value = '3' WHERE key = 'schema_version'`); err != nil {
+		t.Fatalf("downgrade schema: %v", err)
+	}
+	st.Close()
+
+	_, err = LoadSessionsForTicket("loom/some-ticket-0001")
+	if err == nil {
+		t.Fatal("LoadSessionsForTicket = nil error, want a failure on a pre-commits schema")
+	}
+	if !strings.Contains(err.Error(), "--rebuild") {
+		t.Fatalf("error %v doesn't say how to fix it", err)
+	}
+}
 
 // TestLoadActivityWindow writes sessions and commits both inside and outside
 // the 24h window and asserts LoadActivity returns only the in-window rows,

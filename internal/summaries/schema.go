@@ -21,6 +21,12 @@ package summaries
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
 const schemaVersion = 4
 
+// commitsSchemaVersion is the version that introduced the commits table.
+// Deliberately pinned rather than tracked to schemaVersion: readers that need
+// commits gate on this, so bumping schemaVersion must not start rejecting
+// databases that already hold every commit those readers query.
+const commitsSchemaVersion = 4
+
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,

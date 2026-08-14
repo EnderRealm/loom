@@ -62,11 +62,19 @@ const (
 	defaultModel    = "sonnet"
 )
 
+// extract.py's --extract-type values (its TYPE_CONFIG keys). Named because a
+// retrospect runs both and keys its per-type candidate counts off the same
+// values.
+const (
+	extractTypeTruth    = "truth"
+	extractTypeDecision = "decision"
+)
+
 // extractType pins extract.py's --extract-type instead of relying on its
 // default, for the same reason provider and model are pinned: the trigger
 // runs unattended, so a change to the script's defaults must not silently
 // redirect what it produces.
-const extractType = "truth"
+const extractType = extractTypeTruth
 
 // Options configure one Run. Zero Interval/Idle mean "no wait", which only
 // tests want; the CLI supplies the Default* values.
@@ -283,7 +291,7 @@ func extractOne(ctx context.Context, st *state, script string, s summaries.Sessi
 	log.Printf("extract %s/%s scope=%s source=%s input=%s", logSafe(s.Agent), logSafe(s.SessionID),
 		res.scope, res.source, logSafe(s.SourcePath))
 	start := time.Now()
-	run, err := runExtractor(ctx, script, s.SourcePath, res.scope)
+	run, err := runExtractor(ctx, script, s.SourcePath, res.scope, extractType)
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Printf("extract %s/%s: interrupted", logSafe(s.Agent), logSafe(s.SessionID))
@@ -420,7 +428,7 @@ type extractRun struct {
 // case, and it emits candidates and appends to log.md before that exit. A
 // CLI or provider error dies earlier and leaves no result file, which is the
 // failure worth recording.
-var runExtractor = func(ctx context.Context, script, input, scope string) (extractRun, error) {
+var runExtractor = func(ctx context.Context, script, input, scope, kind string) (extractRun, error) {
 	// extract.py derives its raw-output and intermediate-summary paths from
 	// --json-out, so the whole run's scratch lives in one throwaway dir.
 	dir, err := os.MkdirTemp("", "loom-extract-")
@@ -434,7 +442,7 @@ var runExtractor = func(ctx context.Context, script, input, scope string) (extra
 		"--input", input,
 		"--scope", scope,
 		"--input-format", "raw",
-		"--extract-type", extractType,
+		"--extract-type", kind,
 		"--provider", tunableOr(EnvProvider, defaultProvider),
 		"--model", tunableOr(EnvModel, defaultModel),
 		// Keyword scoring: the score is recorded for auditing only, and the

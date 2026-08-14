@@ -8,6 +8,33 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `loom retrospect <namespaced-ticket-id>` runs the extraction pipeline
+  over every summarized session whose commits carry the ticket's
+  `[<id>]` subject marker, for truths and for decisions, so closing a
+  ticket can push what it taught back into the store. Candidates land in
+  `_candidates/<type>s/<scope>/` with their `session:` and `ticket:`
+  sources filled in by `extract.py`'s existing derivation, and each run
+  appends one `## [date] retrospect <ticket-id> | <scope> | N truth
+  candidates, M decision candidates` entry to the store's `log.md` —
+  skipped, with a logged reason, when `log.md` doesn't exist, since that
+  file is bootstrapped at store init and not by the extractor. `truths/`
+  and `decisions/` are never written: promotion stays human-gated. The
+  marker is matched in Go rather than by a SQL `LIKE`, because a tk id
+  may legally contain `_`, which `LIKE` reads as a wildcard. The
+  at-most-once ledger is deliberately neither read nor written — it
+  exists to stop the unattended trigger double-spending, and the sweep
+  has usually already visited a just-closed ticket's sessions, so
+  honoring it would no-op the command in exactly the case it exists for;
+  candidate filenames carry a run timestamp, so a re-run files siblings.
+  Unlike a sweep, which no-ops rather than crash-looping the daemon, a
+  foreground retrospect exits non-zero on a malformed ticket id, a
+  missing `extract.py`, an extraction backend absent from the absolute
+  path `extract.py` invokes it by (`$PATH` is not consulted, because the
+  script doesn't consult it either), or a failed extraction. A ticket
+  with no commits in the summary DB is reported and exits 0, as are
+  sessions skipped for the sweep's own reasons. A summary DB predating
+  the commits table is an error rather than an empty answer, which would
+  read exactly like a ticket that landed nothing.
 - Extracted candidates now cite the tickets their source session worked
   under: one `ticket:` entry per id in the `sources:` block, alongside the
   `session:` entry that is already forced there. The ids come from git's

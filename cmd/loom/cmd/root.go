@@ -25,6 +25,7 @@ Interactive:
 
 Knowledge:
   relevant --for-ticket <id>   Rank stored truths/decisions relevant to a ticket
+  retrospect <id>              Extract candidates from the sessions that closed a ticket
 
 Lifecycle:
   install <component>          Install a launchd agent for the running loom binary
