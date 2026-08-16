@@ -4,6 +4,25 @@ All notable changes to Loom are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The knowledge screen's AGE column, and the ordering of the list under
+  it, now measure from when a fact was first noticed — the earliest
+  parseable `date:` in the artifact's `sources:` block — instead of the
+  file's mtime. mtime records when the pipeline wrote the file
+  (extraction for a candidate, promotion or a later edit for a validated
+  artifact), which is a property of the pipeline rather than of the
+  fact, so an April discovery extracted last week read as days old and
+  the column said nothing about whether the claim needed re-verifying.
+  Artifacts whose sources carry no parseable date fall back to mtime, so
+  no row goes blank; dates are parsed strictly as `YYYY-MM-DD`, and the
+  handful of non-conforming values in the live corpus (a `<YYYY-MM-DD>`
+  placeholder, ranges such as `2026-03-19 to 2026-03-22`) take that
+  fallback rather than being guessed at. The sort key and the rendered
+  value come from one accessor so they cannot drift apart.
+
 ## [1.3.0] — 2026-08-16 — Automatic knowledge extraction
 
 ### Added

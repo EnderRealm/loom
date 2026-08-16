@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseArtifactEvidenceAndClaim(t *testing.T) {
@@ -53,10 +55,129 @@ This must not be captured as claim.
 	}
 }
 
+func TestParseArtifactFirstNoticed(t *testing.T) {
+	cases := []struct {
+		name    string
+		sources string
+		want    string // "" means zero
+	}{
+		{
+			name: "earliest of several wins",
+			sources: `sources:
+  - session: aaa
+    project: loom
+    date: 2026-04-08
+    role: discovery
+  - session: bbb
+    date: 2026-01-17
+  - date: 2026-06-30
+    session: ccc
+`,
+			want: "2026-01-17",
+		},
+		{
+			name:    "no sources block",
+			sources: "",
+		},
+		{
+			name: "undated source entry",
+			sources: `sources:
+  - session: aaa
+    project: loom
+    role: discovery
+`,
+		},
+		{
+			name: "malformed date values",
+			sources: `sources:
+  - session: aaa
+    date: <YYYY-MM-DD>
+  - session: bbb
+    date: 2026-03-19 to 2026-03-22
+  - session: ccc
+    date: 2026-03-09/2026-03-10
+`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "---\nid: loom-example\ntitle: Example\n" + tc.sources + "verified_at: 2020-01-01\n---\n\n## Claim\n\nyes\n"
+			a := parseArtifact(body, "/tmp/x.md", "loom", "truths", "validated")
+			if tc.want == "" {
+				if !a.FirstNoticed.IsZero() {
+					t.Fatalf("FirstNoticed = %v, want zero", a.FirstNoticed)
+				}
+				mtime := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+				a.Modified = mtime
+				if !a.AgeBasis().Equal(mtime) {
+					t.Errorf("AgeBasis = %v, want mtime %v", a.AgeBasis(), mtime)
+				}
+				return
+			}
+			if got := a.FirstNoticed.Format("2006-01-02"); got != tc.want {
+				t.Fatalf("FirstNoticed = %q, want %q", got, tc.want)
+			}
+			a.Modified = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+			if !a.AgeBasis().Equal(a.FirstNoticed) {
+				t.Errorf("AgeBasis = %v, want FirstNoticed %v", a.AgeBasis(), a.FirstNoticed)
+			}
+		})
+	}
+}
+
 func TestParseArtifactNoFrontmatter(t *testing.T) {
 	a := parseArtifact("just a body, no frontmatter\n", "/tmp/x.md", "loom", "truths", "validated")
 	if a.ID != "" {
 		t.Errorf("expected empty ID for frontmatter-less file, got %q", a.ID)
+	}
+}
+
+// TestLoadOrdersByFirstNoticed confirms candidates still lead, and that within
+// a status group the ordering follows AgeBasis (first-noticed date, mtime
+// fallback) rather than mtime alone.
+func TestLoadOrdersByFirstNoticed(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+
+	write := func(rel, sources string, mtime time.Time) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		id := strings.TrimSuffix(filepath.Base(rel), ".md")
+		body := "---\nid: " + id + "\ntitle: " + id + "\n" + sources + "---\n\n## Claim\n\nyes\n"
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src := func(date string) string {
+		return "sources:\n  - session: aaa\n    date: " + date + "\n"
+	}
+
+	// mtime order would be no-date, old-date, new-date; first-noticed order is
+	// no-date (mtime fallback), new-date, old-date.
+	write("truths/loom/no-date.md", "", time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+	write("truths/loom/old-date.md", src("2026-01-01"), time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
+	write("truths/loom/new-date.md", src("2026-06-01"), time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC))
+	write("_candidates/truths/loom/cand.md", src("2020-01-01"), time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	arts, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var got []string
+	for _, a := range arts {
+		got = append(got, a.ID)
+	}
+	want := []string{"cand", "no-date", "new-date", "old-date"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("order = %v, want %v", got, want)
 	}
 }
 

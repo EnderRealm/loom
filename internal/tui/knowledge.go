@@ -323,11 +323,14 @@ func (m knowledgeModel) renderRow(a Artifact, selected bool) string {
 	scopeCell := padRightBg(selBg.Foreground(colorInfo).Render(truncate(a.Scope, colKnowScope-1)), colKnowScope, bg)
 	idCell := padRightBg(selBg.Foreground(colorWhite).Render(truncate(a.ID, colKnowID-1)), colKnowID, bg)
 
+	// AGE is time since the fact was first noticed (earliest source date),
+	// falling back to the file mtime when no source carried a usable date.
 	var ageCell string
-	if a.Modified.IsZero() {
+	basis := a.AgeBasis()
+	if basis.IsZero() {
 		ageCell = padRightBg(selBg.Foreground(colorMuted).Render("—"), colKnowAge, bg)
 	} else {
-		ageCell = padRightBg(selBg.Foreground(colorGray).Render(humanDuration(time.Since(a.Modified))), colKnowAge, bg)
+		ageCell = padRightBg(selBg.Foreground(colorGray).Render(humanDuration(time.Since(basis))), colKnowAge, bg)
 	}
 
 	titleW := m.width - (2 + colKnowStatus + colKnowType + colKnowScope + colKnowID + colKnowAge)

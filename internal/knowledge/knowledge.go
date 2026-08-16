@@ -29,11 +29,27 @@ type Artifact struct {
 	Body     string // full file contents (eager-loaded; corpus is small)
 	Modified time.Time
 
+	// FirstNoticed is the earliest parseable `sources[].date` in the
+	// frontmatter — when the fact was learned, as opposed to when the
+	// pipeline wrote the file. Zero when no source carries a usable date.
+	FirstNoticed time.Time
+
 	// EvidencePaths are project-relative paths from the `evidence:` block,
 	// used by the ranker for file-overlap scoring.
 	EvidencePaths []string
 	// Claim is the text of the `## Claim` section, used for keyword overlap.
 	Claim string
+}
+
+// AgeBasis returns the timestamp an artifact's age is measured from:
+// FirstNoticed when the frontmatter carried a usable source date, else the
+// file mtime. Both the list's AGE column and Load's ordering use it so the
+// sort key cannot drift from the displayed value.
+func (a Artifact) AgeBasis() time.Time {
+	if !a.FirstNoticed.IsZero() {
+		return a.FirstNoticed
+	}
+	return a.Modified
 }
 
 // Root returns the durable knowledge store path, honoring
@@ -46,10 +62,11 @@ func Root() string {
 	return filepath.Join(config.Home(), "knowledge")
 }
 
-// Load walks the store and returns every artifact: validated first
-// (status=validated), then candidates (status=candidate). Within each
-// status group, results are sorted newest-first by file mtime so recent
-// extractions surface at the top of the review list.
+// Load walks the store and returns every artifact: candidates first
+// (status=candidate), then validated (status=validated). Within each
+// status group, results are sorted newest-first by AgeBasis (first-noticed
+// date, falling back to file mtime) so recently learned facts surface at the
+// top of the review list.
 func Load() ([]Artifact, error) {
 	root := Root()
 	var out []Artifact
@@ -79,7 +96,7 @@ func Load() ([]Artifact, error) {
 		if out[i].Status != out[j].Status {
 			return out[i].Status == "candidate"
 		}
-		return out[i].Modified.After(out[j].Modified)
+		return out[i].AgeBasis().After(out[j].AgeBasis())
 	})
 	return out, nil
 }
@@ -141,6 +158,15 @@ var frontmatterKey = regexp.MustCompile(`^([a-z_]+):\s*(.*)$`)
 // `evidence:` block.
 var evidencePath = regexp.MustCompile(`^\s*-\s*path:\s*(.*)$`)
 
+// sourceDate matches an indented "date: <value>" sub-line inside the
+// `sources:` block, with or without the entry's leading dash.
+var sourceDate = regexp.MustCompile(`^\s*-?\s*date:\s*(.*)$`)
+
+// sourceDateLayout is the only accepted `sources[].date` shape. Values that
+// don't conform (placeholders, ranges) are dropped; the artifact then falls
+// back to its file mtime.
+const sourceDateLayout = "2006-01-02"
+
 func parseArtifact(body, path, scope, plural, status string) Artifact {
 	a := Artifact{Path: path, Scope: scope, Body: body, Status: status}
 	switch plural {
@@ -168,11 +194,21 @@ func parseArtifact(body, path, scope, plural, status string) Artifact {
 	var curKey string
 	for _, line := range lines[1:end] {
 		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "-") {
-			// Sub-line of the current top-level key. Collect evidence paths;
-			// other sub-fields (note:, line:, sources: entries) are ignored.
+			// Sub-line of the current top-level key. Collect evidence paths
+			// and source dates; other sub-fields (note:, line:, session:) are
+			// ignored.
 			if curKey == "evidence" {
 				if m := evidencePath.FindStringSubmatch(line); m != nil {
 					a.EvidencePaths = append(a.EvidencePaths, strings.TrimSpace(m[1]))
+				}
+			}
+			if curKey == "sources" {
+				if m := sourceDate.FindStringSubmatch(line); m != nil {
+					if d, err := time.Parse(sourceDateLayout, strings.TrimSpace(m[1])); err == nil {
+						if a.FirstNoticed.IsZero() || d.Before(a.FirstNoticed) {
+							a.FirstNoticed = d
+						}
+					}
 				}
 			}
 			continue
