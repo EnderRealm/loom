@@ -174,6 +174,34 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The updater no longer treats a successful install as proof that an agent
+  restarted onto it. An install's exit code says the launchd job was
+  re-registered, nothing more, so a job that bootstrapped without ever
+  spawning — or one launchd never respawned — kept serving the pre-update
+  image while the log reported success. Observed in production: a daemon
+  ran a twelve-day-old process image ten days after a newer binary landed,
+  which is how a pre-v4 summarizer went on downgrading the schema marker
+  (above) long after a v4 binary was on disk. Every agent is now held
+  against the artifact after its install: a bounded poll for a live pid
+  whose start time — from `launchctl print`, then `ps -o etime=`, which
+  unlike `lstart` is not locale-formatted — is not older than the binary's
+  mtime. A job still processless partway through the window gets one
+  `launchctl kickstart`; bootstrap has re-registered the launch constraint
+  by then, so it is a nudge rather than the activation path that cannot
+  swap a differently-signed binary. Every outcome is logged by label,
+  including the one where the binary can't be stat'd: with nothing to
+  compare against, the log says the image was not verified rather than
+  claiming a restart it never observed. The updater's own job is checked
+  from inside the detached re-exec helper, the only process that outlives
+  the teardown far enough to see the result; its output previously went
+  nowhere and is now appended to `updater.log`. This was never a
+  regression in the earlier re-bootstrap fix, which runs and has always
+  covered every agent — and which equally cannot cover an out-of-band
+  replacement, where something other than the updater writes the pinned
+  binary and no install runs at all. `loom status` applies the same
+  comparison per agent, so a stale daemon is visible without running `ps`
+  by hand.
+
 - An older loom no longer silently downgrades a newer `summaries.db`.
   `migrate` guarded the outdated direction only, so a binary opening a
   database *ahead* of its own `schemaVersion` fell through the check and
