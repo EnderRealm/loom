@@ -17,11 +17,14 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   fact, so an April discovery extracted last week read as days old and
   the column said nothing about whether the claim needed re-verifying.
   Artifacts whose sources carry no parseable date fall back to mtime, so
-  no row goes blank; dates are parsed strictly as `YYYY-MM-DD`, and the
-  handful of non-conforming values in the live corpus (a `<YYYY-MM-DD>`
-  placeholder, ranges such as `2026-03-19 to 2026-03-22`) take that
-  fallback rather than being guessed at. The sort key and the rendered
-  value come from one accessor so they cannot drift apart.
+  no row goes blank; a `<YYYY-MM-DD>` placeholder is such a value. A date
+  range — `2026-03-19 to 2026-03-22`, `2026-03-09/2026-03-10`, which the
+  extractor emits for a session spanning several days — is read as its
+  start, since that is when the fact was first noticed. Without that the
+  ten ranged artifacts in the live corpus took the mtime fallback, which
+  dated them to the newest timestamp in the store and sorted them into
+  the first ten rows of the screen. The sort key and the rendered value
+  come from one accessor so they cannot drift apart.
 
 ## [1.3.0] — 2026-08-16 — Automatic knowledge extraction
 

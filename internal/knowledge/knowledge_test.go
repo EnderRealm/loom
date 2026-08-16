@@ -88,15 +88,45 @@ func TestParseArtifactFirstNoticed(t *testing.T) {
 `,
 		},
 		{
-			name: "malformed date values",
+			name: "unparseable date values",
 			sources: `sources:
   - session: aaa
     date: <YYYY-MM-DD>
   - session: bbb
-    date: 2026-03-19 to 2026-03-22
+    date: 2026-13-45 to x
   - session: ccc
+    date: 2026-
+`,
+		},
+		{
+			name: "range with a trailing end date",
+			sources: `sources:
+  - session: aaa
+    date: 2026-03-19 to 2026-03-22
+`,
+			want: "2026-03-19",
+		},
+		{
+			name: "slash-separated range",
+			sources: `sources:
+  - session: aaa
     date: 2026-03-09/2026-03-10
 `,
+			want: "2026-03-09",
+		},
+		{
+			name: "earliest wins across ranges and single dates",
+			sources: `sources:
+  - session: aaa
+    date: 2026-03-19 to 2026-03-22
+  - session: bbb
+    date: 2026-02-04
+  - session: ccc
+    date: 2026-01-30/2026-02-02
+  - session: ddd
+    date: <YYYY-MM-DD>
+`,
+			want: "2026-01-30",
 		},
 	}
 

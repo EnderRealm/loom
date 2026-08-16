@@ -162,10 +162,32 @@ var evidencePath = regexp.MustCompile(`^\s*-\s*path:\s*(.*)$`)
 // `sources:` block, with or without the entry's leading dash.
 var sourceDate = regexp.MustCompile(`^\s*-?\s*date:\s*(.*)$`)
 
-// sourceDateLayout is the only accepted `sources[].date` shape. Values that
-// don't conform (placeholders, ranges) are dropped; the artifact then falls
-// back to its file mtime.
+// sourceDateLayout is the date layout for `sources[].date`.
 const sourceDateLayout = "2006-01-02"
+
+// parseSourceDate reads a `sources[].date` value, reporting false when it
+// carries no date at all (a `<YYYY-MM-DD>` placeholder); the artifact then
+// falls back to its file mtime.
+//
+// A leading date is read even when text follows it: the extractor emits a
+// range (`2026-03-19 to 2026-03-22`, `2026-03-09/2026-03-10`) for a session
+// spanning several days, and the start of the range is when the fact was
+// first noticed. The whole-value attempt cannot yield a different answer than
+// the prefix one — the layout consumes exactly 10 bytes and time.Parse
+// rejects trailing text, so a value parsing whole is 10 bytes and is its own
+// prefix — and is kept only to state the single-date case explicitly.
+func parseSourceDate(v string) (time.Time, bool) {
+	if d, err := time.Parse(sourceDateLayout, v); err == nil {
+		return d, true
+	}
+	if len(v) < len(sourceDateLayout) {
+		return time.Time{}, false
+	}
+	if d, err := time.Parse(sourceDateLayout, v[:len(sourceDateLayout)]); err == nil {
+		return d, true
+	}
+	return time.Time{}, false
+}
 
 func parseArtifact(body, path, scope, plural, status string) Artifact {
 	a := Artifact{Path: path, Scope: scope, Body: body, Status: status}
@@ -204,7 +226,7 @@ func parseArtifact(body, path, scope, plural, status string) Artifact {
 			}
 			if curKey == "sources" {
 				if m := sourceDate.FindStringSubmatch(line); m != nil {
-					if d, err := time.Parse(sourceDateLayout, strings.TrimSpace(m[1])); err == nil {
+					if d, ok := parseSourceDate(strings.TrimSpace(m[1])); ok {
 						if a.FirstNoticed.IsZero() || d.Before(a.FirstNoticed) {
 							a.FirstNoticed = d
 						}
