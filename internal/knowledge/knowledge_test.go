@@ -190,8 +190,8 @@ func TestLoadOrdersByFirstNoticed(t *testing.T) {
 		return "sources:\n  - session: aaa\n    date: " + date + "\n"
 	}
 
-	// mtime order would be no-date, old-date, new-date; first-noticed order is
-	// no-date (mtime fallback), new-date, old-date.
+	// Oldest-first by mtime would be new-date, old-date, no-date; oldest-first
+	// by first-noticed is old-date, new-date, no-date (mtime fallback).
 	write("truths/loom/no-date.md", "", time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
 	write("truths/loom/old-date.md", src("2026-01-01"), time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
 	write("truths/loom/new-date.md", src("2026-06-01"), time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC))
@@ -205,7 +205,7 @@ func TestLoadOrdersByFirstNoticed(t *testing.T) {
 	for _, a := range arts {
 		got = append(got, a.ID)
 	}
-	want := []string{"cand", "no-date", "new-date", "old-date"}
+	want := []string{"cand", "old-date", "new-date", "no-date"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("order = %v, want %v", got, want)
 	}

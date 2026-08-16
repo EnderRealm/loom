@@ -22,9 +22,17 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   extractor emits for a session spanning several days — is read as its
   start, since that is when the fact was first noticed. Without that the
   ten ranged artifacts in the live corpus took the mtime fallback, which
-  dated them to the newest timestamp in the store and sorted them into
-  the first ten rows of the screen. The sort key and the rendered value
-  come from one accessor so they cannot drift apart.
+  dated them to the newest timestamp in the store and — under the
+  newest-first ordering in place at the time — sorted them into the first
+  ten rows of the screen. The sort key and the rendered value come from
+  one accessor so they cannot drift apart.
+- The knowledge screen now lists artifacts oldest-first by that same
+  first-noticed basis. Newest-first dated from when AGE meant "most
+  recently extracted"; now that it measures how long ago a fact was
+  learned, the rows worth looking at are the stale ones, and those were
+  the ones that never appeared without scrolling. Candidates still
+  precede validated artifacts — that grouping is about actionability,
+  not age — and are themselves ordered oldest-first.
 
 ## [1.3.0] — 2026-08-16 — Automatic knowledge extraction
 

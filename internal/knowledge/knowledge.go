@@ -64,9 +64,9 @@ func Root() string {
 
 // Load walks the store and returns every artifact: candidates first
 // (status=candidate), then validated (status=validated). Within each
-// status group, results are sorted newest-first by AgeBasis (first-noticed
-// date, falling back to file mtime) so recently learned facts surface at the
-// top of the review list.
+// status group, results are sorted oldest-first by AgeBasis (first-noticed
+// date, falling back to file mtime) so the stalest claims — the ones most
+// likely to need re-verifying — surface at the top of the review list.
 func Load() ([]Artifact, error) {
 	root := Root()
 	var out []Artifact
@@ -96,7 +96,7 @@ func Load() ([]Artifact, error) {
 		if out[i].Status != out[j].Status {
 			return out[i].Status == "candidate"
 		}
-		return out[i].AgeBasis().After(out[j].AgeBasis())
+		return out[i].AgeBasis().Before(out[j].AgeBasis())
 	})
 	return out, nil
 }
