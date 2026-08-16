@@ -174,6 +174,7 @@ func printAgent(r agentReport) {
 				}
 			}
 		}
+		printStale(out)
 	}
 	if r.interval != "" {
 		fmt.Printf("  interval = %s\n", r.interval)
@@ -191,6 +192,29 @@ func printAgent(r agentReport) {
 	fmt.Printf("  plist: %s\n", plistPath)
 	fmt.Printf("  log:   %s\n", r.logPath)
 	fmt.Println()
+}
+
+// printStale flags an agent whose running process predates the binary
+// launchd executes for it. The updater installs in place, so an agent that
+// never restarted keeps serving the pre-update image indefinitely, which is
+// invisible in the state/pid fields above. Silent when the job has no process
+// or the program can't be stat'd: there is nothing to compare, and guessing
+// here would cry wolf on a loaded-but-not-running agent that the state and
+// pid fields already report.
+func printStale(printOut string) {
+	p, ok, err := launchd.ProcessFromPrint(printOut)
+	if err != nil || !ok || p.Program == "" {
+		return
+	}
+	mtime, found := fileMtime(p.Program)
+	if !found {
+		return
+	}
+	if p.Started.Before(mtime.Add(-launchd.StartTolerance)) {
+		fmt.Printf("  *** STALE: process started %s but binary was installed %s — restart this agent\n",
+			p.Started.Local().Format("2006-01-02 15:04:05 MST"),
+			mtime.Local().Format("2006-01-02 15:04:05 MST"))
+	}
 }
 
 // fileMtime returns the file's last-modified time. Used as a coarse

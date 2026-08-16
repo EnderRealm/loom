@@ -176,7 +176,7 @@ var reBootstrapAgents = func(bin string) error {
 			log.Printf("re-bootstrap %s: %v", wc.label, err)
 			continue
 		}
-		log.Printf("re-bootstrapped %s", wc.label)
+		VerifyRestarted(wc.label, bin)
 	}
 
 	// Last: re-bootstrap self. We CANNOT wait on `<bin> install updater` —
@@ -205,6 +205,93 @@ var installComponent = func(bin, component string) error {
 	return nil
 }
 
+// agentProcess reports the process launchd currently runs for an agent, and
+// kickstartAgent nudges a job that bootstrapped but never spawned. Package
+// vars so tests can drive both verify paths without launchctl or ps.
+var (
+	agentProcess   = launchd.ProcessFor
+	kickstartAgent = launchd.Kickstart
+)
+
+// Bounds for the post-install check. bootstrap is asynchronous, so the new
+// process is not there the instant `loom install` returns; kickstartAfter is
+// the point in the window where a still-processless agent gets its one
+// kickstart. Vars so tests don't sleep for the real window.
+var (
+	verifyTimeout  = 6 * time.Second
+	verifyInterval = 250 * time.Millisecond
+	kickstartAfter = 3 * time.Second
+)
+
+// VerifyRestarted holds label against the binary at bin after a
+// bootout+bootstrap and logs the outcome by name. The install's exit code
+// says the job was re-registered, not that a new process came up on the new
+// image; agents have been observed running the pre-update image for days
+// after a successful install. Exported because the updater's own job is
+// re-bootstrapped by the detached `loom updater reexec` helper in cmd, which
+// is the only process that outlives the teardown far enough to observe the
+// result; internal/updater cannot import cmd.
+func VerifyRestarted(label, bin string) {
+	var binMtime time.Time
+	fi, err := os.Stat(bin)
+	if err != nil {
+		log.Printf("stat %s: %v — cannot check whether %s is on the new image", bin, err, label)
+	} else {
+		binMtime = fi.ModTime()
+	}
+	if verr := verifyRestarted(label, binMtime, err == nil); verr != nil {
+		log.Printf("re-bootstrap %s: %v", label, verr)
+		return
+	}
+	// Never claim a verified restart that was not verified: without the
+	// binary's mtime all we established is that some process is running.
+	if err != nil {
+		log.Printf("re-bootstrapped %s (running, image not verified)", label)
+		return
+	}
+	log.Printf("re-bootstrapped %s", label)
+}
+
+// verifyRestarted waits for label to be running a process that did not start
+// before the freshly installed binary, i.e. that it is the new image and not
+// the one the update replaced. With haveMtime false there is nothing to
+// compare against, so it only waits for a process to exist. An agent that is
+// still processless partway through the window gets exactly one kickstart:
+// that is the observed "bootstrapped, enabled, and simply not running"
+// failure, and bootstrap has already re-registered the launch constraint by
+// this point, so kickstart is a nudge here rather than the (insufficient)
+// activation path above.
+func verifyRestarted(label string, binMtime time.Time, haveMtime bool) error {
+	deadline := time.Now().Add(verifyTimeout)
+	kickAt := time.Now().Add(kickstartAfter)
+	kicked := false
+	for {
+		var last error
+		p, ok, err := agentProcess(label)
+		switch {
+		case err != nil:
+			last = fmt.Errorf("cannot read process state: %v", err)
+		case !ok:
+			last = fmt.Errorf("no process after re-bootstrap")
+		case haveMtime && p.Started.Before(binMtime.Add(-launchd.StartTolerance)):
+			last = fmt.Errorf("pid %d started %s, before the installed binary (%s) — still the old image",
+				p.PID, p.Started.Format(time.RFC3339), binMtime.Format(time.RFC3339))
+		default:
+			return nil
+		}
+		if !kicked && !ok && time.Now().After(kickAt) {
+			kicked = true
+			if err := kickstartAgent(label); err != nil {
+				log.Printf("kickstart %s: %v", label, err)
+			}
+		}
+		if time.Now().After(deadline) {
+			return last
+		}
+		time.Sleep(verifyInterval)
+	}
+}
+
 // spawnSelfReexec launches the detached `<bin> updater reexec` helper that
 // re-bootstraps com.loom.updater after this process exits. Setsid detaches
 // it into a new session so it survives the updater job's bootout. We do not
@@ -212,6 +299,15 @@ var installComponent = func(bin, component string) error {
 var spawnSelfReexec = func(bin string) error {
 	cmd := exec.Command(bin, "updater", "reexec")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// The helper outlives this job, so its output is the only record of
+	// whether the updater came back up on the new binary. Losing the log must
+	// not cost the re-exec: a helper with no log still beats no helper.
+	if f, err := os.OpenFile(LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err != nil {
+		log.Printf("open %s for detached helper: %v — helper output discarded", LogPath(), err)
+	} else {
+		defer f.Close() // the fd is inherited by the child; ours is spare after Start
+		cmd.Stdout, cmd.Stderr = f, f
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("spawn self re-bootstrap: %w", err)
 	}

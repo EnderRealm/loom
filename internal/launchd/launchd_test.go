@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPlistsLintClean walks every component's plist shape through plutil-lint
@@ -125,6 +126,106 @@ func TestPlistDeterministic(t *testing.T) {
 		if !strings.Contains(a, "<key>"+want+"</key>") {
 			t.Errorf("missing env key %s", want)
 		}
+	}
+}
+
+// printSample is the shape of real `launchctl print` output: top-level
+// fields first, then the nested coalition block that repeats "state".
+const printSample = `gui/501/com.loom.receiver = {
+	active count = 1
+	path = /Users/steve/Library/LaunchAgents/com.loom.receiver.plist
+	type = LaunchAgent
+	state = running
+
+	program = /Users/steve/.local/bin/loom
+	arguments = {
+		/Users/steve/.local/bin/loom
+		receiver
+	}
+	pid = 1529
+	domain = gui/501
+	coalitions = {
+		resource = {
+			state = active
+		}
+	}
+}
+`
+
+func TestPrintField(t *testing.T) {
+	cases := []struct {
+		key, want string
+		found     bool
+	}{
+		{"state", "running", true}, // not the nested "active"
+		{"pid", "1529", true},
+		{"program", "/Users/steve/.local/bin/loom", true},
+		{"last exit code", "", false},
+	}
+	for _, c := range cases {
+		got, found := printField(printSample, c.key)
+		if found != c.found {
+			t.Errorf("printField(%q) found = %v, want %v", c.key, found, c.found)
+		}
+		if got != c.want {
+			t.Errorf("printField(%q) = %q, want %q", c.key, got, c.want)
+		}
+	}
+}
+
+func TestParseETime(t *testing.T) {
+	ok := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"05:03", 5*time.Minute + 3*time.Second},
+		{"1:02:03\n", time.Hour + 2*time.Minute + 3*time.Second},
+		{"12-21:29:42", 12*24*time.Hour + 21*time.Hour + 29*time.Minute + 42*time.Second},
+	}
+	for _, c := range ok {
+		got, err := parseETime(c.in)
+		if err != nil {
+			t.Errorf("parseETime(%q): %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseETime(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+	// Malformed input must error rather than return a zero duration, which
+	// would read as "just started".
+	for _, in := range []string{"", "42", "abc", "1:2:3:4", "12-", "12-01:02", "-01:02:03", "x:02"} {
+		if d, err := parseETime(in); err == nil {
+			t.Errorf("parseETime(%q) = %s, want error", in, d)
+		}
+	}
+}
+
+func TestProcessFromPrint(t *testing.T) {
+	orig := psETime
+	psETime = func(pid int) (string, error) {
+		if pid != 1529 {
+			t.Fatalf("ps called with pid %d, want 1529", pid)
+		}
+		return "01:00:00\n", nil
+	}
+	t.Cleanup(func() { psETime = orig })
+
+	p, ok, err := ProcessFromPrint(printSample)
+	if err != nil || !ok {
+		t.Fatalf("ProcessFromPrint = (%v, %v, %v)", p, ok, err)
+	}
+	if p.PID != 1529 || p.Program != "/Users/steve/.local/bin/loom" {
+		t.Fatalf("process = %+v", p)
+	}
+	if age := time.Since(p.Started); age < 59*time.Minute || age > 61*time.Minute {
+		t.Fatalf("start time %s implies age %s, want ~1h", p.Started, age)
+	}
+
+	// A loaded job with no process carries no pid line: not running, not an
+	// error, and never a start time to compare against.
+	if _, ok, err := ProcessFromPrint("gui/501/com.loom.receiver = {\n\tstate = waiting\n}\n"); ok || err != nil {
+		t.Fatalf("processless job = (%v, %v), want (false, nil)", ok, err)
 	}
 }
 

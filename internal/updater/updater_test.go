@@ -8,12 +8,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
+	"loom/internal/launchd"
 	"loom/internal/version"
 	"loom/transport/receiver"
 	"loom/transport/shipper"
@@ -123,6 +127,57 @@ func installEnv(t *testing.T, current string, s releaseSource, binContent []byte
 	return bin
 }
 
+// stubRestartCheck points the post-install verification at an in-memory
+// process table (a label absent from procs has no process) and shrinks the
+// poll window so tests don't sleep. Kickstarts are recorded, never run
+// against real launchd.
+func stubRestartCheck(t *testing.T, procs map[string]launchd.Process, kicked *[]string) {
+	t.Helper()
+	origProc, origKick := agentProcess, kickstartAgent
+	origTimeout, origInterval, origAfter := verifyTimeout, verifyInterval, kickstartAfter
+	agentProcess = func(label string) (launchd.Process, bool, error) {
+		p, ok := procs[label]
+		return p, ok, nil
+	}
+	kickstartAgent = func(label string) error {
+		if kicked != nil {
+			*kicked = append(*kicked, label)
+		}
+		return nil
+	}
+	verifyTimeout, verifyInterval, kickstartAfter = 60*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() {
+		agentProcess, kickstartAgent = origProc, origKick
+		verifyTimeout, verifyInterval, kickstartAfter = origTimeout, origInterval, origAfter
+	})
+}
+
+// captureLog redirects the standard logger so tests can assert that a failed
+// restart is actually surfaced.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	origOut, origFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
+	})
+	return &buf
+}
+
+// freshBin writes a stand-in installed binary so reBootstrapAgents has an
+// mtime to hold agents against.
+func freshBin(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "loom")
+	if err := os.WriteFile(bin, []byte("new binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
 func TestAssetName(t *testing.T) {
 	want := fmt.Sprintf("loom_1.2.3_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
 	if got := assetName("v1.2.3"); got != want {
@@ -210,8 +265,11 @@ func TestReBootstrapAgentsLoadedOnly(t *testing.T) {
 		installComponent = origInstall
 		spawnSelfReexec = origSpawn
 	})
+	stubRestartCheck(t, map[string]launchd.Process{
+		shipper.AgentLabel: {PID: 11, Started: time.Now()},
+	}, nil)
 
-	if err := reBootstrapAgents("/tmp/loom"); err != nil {
+	if err := reBootstrapAgents(freshBin(t)); err != nil {
 		t.Fatalf("reBootstrapAgents: %v", err)
 	}
 
@@ -255,8 +313,11 @@ func TestReBootstrapAgentsSkipsSelfWhenAbsent(t *testing.T) {
 		installComponent = origInstall
 		spawnSelfReexec = origSpawn
 	})
+	stubRestartCheck(t, map[string]launchd.Process{
+		receiver.AgentLabel: {PID: 12, Started: time.Now()},
+	}, nil)
 
-	if err := reBootstrapAgents("/tmp/loom"); err != nil {
+	if err := reBootstrapAgents(freshBin(t)); err != nil {
 		t.Fatalf("reBootstrapAgents: %v", err)
 	}
 	if !reflect.DeepEqual(installs, []string{"receiver"}) {
@@ -264,6 +325,128 @@ func TestReBootstrapAgentsSkipsSelfWhenAbsent(t *testing.T) {
 	}
 	if selfSpawned {
 		t.Fatal("self reexec spawned despite absent updater plist")
+	}
+}
+
+// TestReBootstrapAgentsVerifiesNewImage drives the three post-install
+// outcomes in one loop: an agent that comes up on the new binary, one that
+// never gets a process, and one still running the pre-update image. The
+// last two must be logged by name and must not stop the loop — a
+// half-restarted fleet is exactly the state this check exists to catch.
+func TestReBootstrapAgentsVerifiesNewImage(t *testing.T) {
+	loaded := map[string]bool{
+		shipper.AgentLabel:  true,
+		receiver.AgentLabel: true,
+		SummarizerLabel:     true,
+	}
+
+	var installs []string
+	origPlist := plistPresent
+	origInstall := installComponent
+	origSpawn := spawnSelfReexec
+	plistPresent = func(label string) bool { return loaded[label] }
+	installComponent = func(bin, component string) error {
+		installs = append(installs, component)
+		return nil
+	}
+	// The updater plist is absent here, so self must not be re-bootstrapped;
+	// stubbed regardless so a future edit to `loaded` can never launch a real
+	// detached helper against this host.
+	spawnSelfReexec = func(bin string) error {
+		t.Errorf("self reexec spawned despite absent updater plist")
+		return nil
+	}
+	t.Cleanup(func() {
+		plistPresent = origPlist
+		installComponent = origInstall
+		spawnSelfReexec = origSpawn
+	})
+
+	var kicked []string
+	stubRestartCheck(t, map[string]launchd.Process{
+		shipper.AgentLabel: {PID: 21, Started: time.Now()},
+		// receiver: absent from the table, i.e. bootstrapped but no process.
+		SummarizerLabel: {PID: 23, Started: time.Now().Add(-10 * 24 * time.Hour)},
+	}, &kicked)
+	logs := captureLog(t)
+
+	if err := reBootstrapAgents(freshBin(t)); err != nil {
+		t.Fatalf("reBootstrapAgents: %v", err)
+	}
+
+	if !reflect.DeepEqual(installs, []string{"shipper", "receiver", "summarizer"}) {
+		t.Fatalf("installs = %v, want every loaded worker (loop must continue past failures)", installs)
+	}
+	got := logs.String()
+	for _, want := range []string{
+		"re-bootstrapped " + shipper.AgentLabel,
+		"re-bootstrap " + receiver.AgentLabel + ": no process",
+		"re-bootstrap " + SummarizerLabel + ": pid 23 started",
+		"still the old image",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log missing %q\n--- log ---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "re-bootstrapped "+SummarizerLabel) {
+		t.Errorf("stale summarizer reported as re-bootstrapped\n--- log ---\n%s", got)
+	}
+	// Only the processless agent gets the one kickstart.
+	if !reflect.DeepEqual(kicked, []string{receiver.AgentLabel}) {
+		t.Errorf("kickstarts = %v, want exactly one for %s", kicked, receiver.AgentLabel)
+	}
+}
+
+// TestVerifyRestartedSelf covers the entry point the detached `loom updater
+// reexec` helper calls after re-installing com.loom.updater. A stale updater
+// is the worst outcome — the old image is the code that verifies nothing, so
+// every later tick would revert silently — and must be named in the log.
+func TestVerifyRestartedSelf(t *testing.T) {
+	stubRestartCheck(t, map[string]launchd.Process{
+		AgentLabel: {PID: 41, Started: time.Now().Add(-time.Hour)},
+	}, nil)
+	logs := captureLog(t)
+
+	VerifyRestarted(AgentLabel, freshBin(t))
+
+	got := logs.String()
+	for _, want := range []string{
+		"re-bootstrap " + AgentLabel + ": pid 41 started",
+		"still the old image",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log missing %q\n--- log ---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "re-bootstrapped "+AgentLabel) {
+		t.Errorf("stale updater reported as re-bootstrapped\n--- log ---\n%s", got)
+	}
+}
+
+// TestVerifyRestartedWithoutBinaryMtime pins the unverifiable case: with no
+// mtime to hold the process against, the image comparison cannot run, so a
+// running agent must not be logged as a verified restart.
+func TestVerifyRestartedWithoutBinaryMtime(t *testing.T) {
+	stubRestartCheck(t, map[string]launchd.Process{
+		// Started long before any plausible install: still the old image, but
+		// with no mtime there is nothing that proves it.
+		AgentLabel: {PID: 42, Started: time.Now().Add(-10 * 24 * time.Hour)},
+	}, nil)
+	logs := captureLog(t)
+
+	VerifyRestarted(AgentLabel, filepath.Join(t.TempDir(), "loom"))
+
+	got := logs.String()
+	for _, want := range []string{
+		"cannot check whether " + AgentLabel + " is on the new image",
+		"re-bootstrapped " + AgentLabel + " (running, image not verified)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log missing %q\n--- log ---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "still the old image") {
+		t.Errorf("image compared without a binary mtime\n--- log ---\n%s", got)
 	}
 }
 

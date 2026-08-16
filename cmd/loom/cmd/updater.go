@@ -56,7 +56,21 @@ var updaterReexecCmd = &cobra.Command{
 		// Let the spawning updater process exit so its launchd job is idle
 		// before we bootout+bootstrap it.
 		time.Sleep(2 * time.Second)
-		return installUpdater()
+		if err := installUpdater(); err != nil {
+			return err
+		}
+		// A stale updater is the worst case of all: it keeps running the
+		// pre-update image, which is the code that does not verify anything,
+		// so every later tick reverts silently. This helper survives the
+		// parent job's teardown, so it is the only process that can observe
+		// whether the updater itself came back on the new binary. Output is
+		// redirected to updater.log by the spawning process.
+		bin, err := loomBinary()
+		if err != nil {
+			return err
+		}
+		updater.VerifyRestarted(updater.AgentLabel, bin)
+		return nil
 	},
 }
 

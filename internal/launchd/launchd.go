@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -234,6 +235,129 @@ func Status(label string) (output string, loaded bool, err error) {
 		return "", false, nil
 	}
 	return string(out), true, nil
+}
+
+// StartTolerance is the slack allowed when comparing a process's start time
+// against the mtime of the binary launchd runs for it. Start times are
+// derived from second-granular ps elapsed time and the ps clock is not
+// perfectly aligned with the filesystem's, so an exact comparison would
+// flag a freshly restarted agent. Deliberately tight: a genuinely stale
+// daemon is minutes to days older, never seconds.
+const StartTolerance = 5 * time.Second
+
+// Process is the live process launchd runs for a label: its pid, the
+// absolute program path launchd executes, and when the process started.
+type Process struct {
+	PID     int
+	Program string
+	Started time.Time
+}
+
+// ProcessFor returns the process launchd currently runs for label. ok is
+// false when the job is not loaded or is loaded with no process at all.
+func ProcessFor(label string) (p Process, ok bool, err error) {
+	out, loaded, err := Status(label)
+	if err != nil || !loaded {
+		return Process{}, false, err
+	}
+	return ProcessFromPrint(out)
+}
+
+// ProcessFromPrint parses `launchctl print` output into a Process, resolving
+// the start time via ps (launchctl does not report it). ok is false when the
+// job carries no `pid =` line, which is how launchd renders a loaded job that
+// has no process; callers must read that as "unknown", never as stale.
+func ProcessFromPrint(out string) (p Process, ok bool, err error) {
+	pidStr, found := printField(out, "pid")
+	if !found {
+		return Process{}, false, nil
+	}
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return Process{}, false, fmt.Errorf("launchd: bad pid %q", pidStr)
+	}
+	started, err := processStart(pid)
+	if err != nil {
+		return Process{}, false, err
+	}
+	program, _ := printField(out, "program")
+	return Process{PID: pid, Program: program, Started: started}, true, nil
+}
+
+// printField returns the value of the first occurrence of key in `launchctl
+// print` output. launchd repeats several keys inside nested coalition blocks
+// (state = active for resource/jetsam), and only the first occurrence is the
+// job's own top-level field.
+func printField(out, key string) (string, bool) {
+	prefix := key + " = "
+	for line := range strings.SplitSeq(out, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
+			return strings.TrimSpace(v), true
+		}
+	}
+	return "", false
+}
+
+// processStart derives a pid's start time from elapsed time rather than
+// `ps -o lstart`, whose output is locale-formatted and so not parseable
+// without pinning the locale. Second-granular; see StartTolerance.
+func processStart(pid int) (time.Time, error) {
+	out, err := psETime(pid)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("ps -p %d: %w", pid, err)
+	}
+	elapsed, err := parseETime(out)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Now().Add(-elapsed), nil
+}
+
+// psETime reads a pid's elapsed running time. A package var so the parsing
+// above is testable without a live process.
+var psETime = func(pid int) (string, error) {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "etime=").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// parseETime converts `ps -o etime=` output to a duration. macOS formats it
+// as [[dd-]hh:]mm:ss. Anything else is an error rather than a zero duration,
+// which would read as "just started" and mask a stale process.
+func parseETime(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	rest := s
+	days := 0
+	if i := strings.Index(rest, "-"); i >= 0 {
+		d, err := strconv.Atoi(rest[:i])
+		if err != nil {
+			return 0, fmt.Errorf("launchd: bad etime %q", s)
+		}
+		days = d
+		rest = rest[i+1:]
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) < 2 || len(parts) > 3 || (days > 0 && len(parts) != 3) {
+		return 0, fmt.Errorf("launchd: bad etime %q", s)
+	}
+	nums := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("launchd: bad etime %q", s)
+		}
+		nums[i] = n
+	}
+	hours := 0
+	if len(nums) == 3 {
+		hours, nums = nums[0], nums[1:]
+	}
+	return time.Duration(days)*24*time.Hour +
+		time.Duration(hours)*time.Hour +
+		time.Duration(nums[0])*time.Minute +
+		time.Duration(nums[1])*time.Second, nil
 }
 
 func (s Spec) validate() error {

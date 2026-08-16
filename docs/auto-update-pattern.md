@@ -209,7 +209,8 @@ verify sha256(tarball) against its checksums.txt line
 extract the `loom` entry to a temp file beside the install target
 chmod 0755; os.Rename over the target            ◄── atomic; never a partial write
 for component in [other agents]: <bin> install <component>   ◄── bootout+bootstrap, waited
-<bin> updater reexec (detached, Setsid)          ◄── re-bootstraps the updater job last
+                                 verify pid start >= binary mtime  ◄── exit code is not proof
+<bin> updater reexec (detached, Setsid)          ◄── re-bootstraps + verifies the updater job last
 ```
 
 Why this variant over source-build:
@@ -273,6 +274,46 @@ never rewrites the machine's persisted role.
 
 Only agents whose plist is present are re-bootstrapped (the same
 "loaded" gating the kickstart path used).
+
+**A successful install is not proof of a restart.** The bootout+bootstrap
+path above (`loom/updater-re-bootstrap-92cf`) does run and always covered
+every agent — the worker list has held all of them since it landed, and
+`updater.log` shows all three loaded agents re-bootstrapped on the v1.2.2
+update. Its gap is narrower: it reads `<bin> install <component>`'s exit
+code as evidence that a new process came up. That exit code says the job
+was re-registered. A job can be bootstrapped, enabled, and simply not
+running, so agents observed serving the pre-update image for days had all
+been "successfully" re-bootstrapped. Each install is now followed by a
+check against the artifact itself:
+
+- **Start time vs binary mtime.** The job's live pid (`launchctl print`,
+  then `ps -o etime=` for its start time) must not predate the mtime of
+  the binary just installed — an earlier start *is* the old image. A few
+  seconds of slack absorbs the second-granular `etime` and the skew
+  between the two clocks; a genuinely stale daemon is minutes to days out.
+- **A bounded poll.** bootstrap is asynchronous, so the new process is not
+  there the instant install returns. The check polls for a few seconds and
+  reports the last failure it saw rather than failing on the first look.
+- **One kickstart.** A job still processless partway through that window
+  gets exactly one `launchctl kickstart`. bootstrap has re-registered the
+  LWCR by then, so here kickstart nudges a job that bootstrapped without
+  spawning, rather than being the (rejected) activation path above.
+
+Every outcome is logged by label, including the one where the binary
+can't be stat'd: with no mtime there is nothing to compare, so the log
+says the image was not verified rather than claiming a restart it never
+observed. The updater's own job is held to the same check by the detached
+helper — the only process that outlives the teardown far enough to see the
+result — whose stdout and stderr are appended to `updater.log`.
+
+**Out-of-band replacement is not the updater's to catch.** When something
+other than the updater writes the pinned binary — a local `go build`
+installed over `~/.local/bin/loom` — no install runs, nothing
+re-bootstraps, and the agents keep serving the replaced image while the
+updater correctly reports `up to date`. No check inside the updater covers
+a path it is never on. `loom status` runs the same start-time-vs-mtime
+comparison per agent and flags the stale ones; that is the coverage for
+this case.
 
 **Recovery.** The self-re-bootstrap is the one step that can leave the
 updater down: if the detached helper is killed after its `bootout` but
