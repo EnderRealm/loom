@@ -185,12 +185,16 @@ func (m knowledgeModel) promote() (knowledgeModel, tea.Cmd) {
 	if a.Status != "candidate" {
 		return m, statusCmd("only candidates can be promoted")
 	}
-	dest, err := promoteCandidate(*a)
+	dest, warn, err := promoteCandidate(*a)
 	if err != nil {
 		return m, statusCmd("promote failed: " + err.Error())
 	}
 	m.showDetail = false
-	return m, tea.Batch(statusCmd("promoted → "+shortenPath(dest)), loadKnowledgeCmd())
+	status := "promoted → " + shortenPath(dest)
+	if warn != "" {
+		status += " — not committed: " + warn
+	}
+	return m, tea.Batch(statusCmd(status), loadKnowledgeCmd())
 }
 
 func (m knowledgeModel) reject() (knowledgeModel, tea.Cmd) {
@@ -201,11 +205,16 @@ func (m knowledgeModel) reject() (knowledgeModel, tea.Cmd) {
 	if a.Status != "candidate" {
 		return m, statusCmd("only candidates can be rejected")
 	}
-	if _, err := rejectCandidate(*a); err != nil {
+	_, warn, err := rejectCandidate(*a)
+	if err != nil {
 		return m, statusCmd("reject failed: " + err.Error())
 	}
 	m.showDetail = false
-	return m, tea.Batch(statusCmd("rejected — archived to _rejected/"), loadKnowledgeCmd())
+	status := "rejected — archived to _rejected/"
+	if warn != "" {
+		status += " — not committed: " + warn
+	}
+	return m, tea.Batch(statusCmd(status), loadKnowledgeCmd())
 }
 
 func (m knowledgeModel) edit() (knowledgeModel, tea.Cmd) {

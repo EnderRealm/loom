@@ -34,6 +34,36 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   precede validated artifacts — that grouping is about actionability,
   not age — and are themselves ordered oldest-first.
 
+### Fixed
+
+- Promoting or rejecting a candidate now commits the move in the
+  knowledge store's git repo, with a `promote truth <scope>/<id>` /
+  `reject truth <scope>/<id>` subject. The gestures were a plain file
+  write plus a remove, so the store the durability and auditability
+  claims rest on recorded nothing: every review decision since the store
+  was created lived only as working-tree state, and anything reading the
+  repo's history — index regeneration, any later consumer — saw the
+  corpus stand still. The commit is path-scoped (`git add` over the two
+  paths, then `commit --only` with the same pathspec) because the live
+  store's tree is routinely dirty with untracked candidates and edits the
+  gesture did not make; a whole-tree commit would absorb them into the
+  record. A candidate that was never committed leaves git nothing to
+  record for its removal, so its path is dropped from the pathspec rather
+  than failing the commit on a pathspec that matches nothing. Signing is
+  pinned off and every git call is bounded at ten seconds, since a
+  passphrase prompt or an index lock inside the fullscreen TUI is
+  unrecoverable. The repo has to be the store itself, not one that
+  merely encloses it — `rev-parse` walks up, and a knowledge root sitting
+  inside a git-managed home directory would otherwise have its review
+  decisions committed to that unrelated history. A store that is not a
+  git repo of its own, or a git call that fails, degrades rather than
+  skipping silently: the files still move —
+  undoing them would throw away the human's review decision — and the
+  reason goes both to the status line and to `~/.loom/knowledge-git.log`.
+  The status bar, which these reasons are the first text long enough to
+  overflow, is now clamped to the window width at the render site rather
+  than left unbounded.
+
 ## [1.3.0] — 2026-08-16 — Automatic knowledge extraction
 
 ### Added

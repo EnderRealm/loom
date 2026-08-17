@@ -301,7 +301,10 @@ func (a App) View() string {
 	b.WriteString(sep)
 	b.WriteString("\n")
 	if a.status != "" {
-		b.WriteString(pad.Render(StyleWarning.Render(a.status)))
+		// Producers compose a status out of a path and a reason and none of them
+		// know the window; clamp here — pad takes a column on each side — so a
+		// long one cannot wrap the fullscreen layout.
+		b.WriteString(pad.Render(StyleWarning.Render(truncate(a.status, a.width-2))))
 	} else {
 		b.WriteString(pad.Render(StyleHelp.Render(a.helpLine())))
 	}

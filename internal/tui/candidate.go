@@ -37,58 +37,76 @@ func candidateKebab(id, scope string) string {
 
 // promoteCandidate moves a candidate from _candidates/<type>s/<scope>/ to its
 // validated home <type>s/<scope>/, cleaning candidate-only frontmatter (drops
-// extracted_at/extracted_by, flips status to validated, bumps verified_at).
-// Returns the destination path. It never overwrites an existing validated file.
-func promoteCandidate(a Artifact) (string, error) {
+// extracted_at/extracted_by, flips status to validated, bumps verified_at), and
+// commits the written destination and the removed source — those paths only, so
+// unrelated working-tree dirt stays out of the record. Returns the destination
+// path and, when the commit did not happen, the reason. It never overwrites an
+// existing validated file.
+func promoteCandidate(a Artifact) (string, string, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
-		return "", fmt.Errorf("unknown type %q", a.Type)
+		return "", "", fmt.Errorf("unknown type %q", a.Type)
 	}
 	if a.Status != "candidate" {
-		return "", fmt.Errorf("not a candidate")
+		return "", "", fmt.Errorf("not a candidate")
 	}
 	destDir := filepath.Join(KnowledgeRoot(), plural, a.Scope)
 	dest := filepath.Join(destDir, candidateKebab(a.ID, a.Scope)+".md")
 	if _, err := os.Stat(dest); err == nil {
-		return "", fmt.Errorf("%s already exists", shortenPath(dest))
+		return "", "", fmt.Errorf("%s already exists", shortenPath(dest))
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := os.WriteFile(dest, []byte(promoteFrontmatter(a.Body)), 0o644); err != nil {
-		return "", err
+		return "", "", err
 	}
 	// Write succeeded; drop the candidate. A leftover source would resurface
 	// as a duplicate candidate on the next refresh.
 	if err := os.Remove(a.Path); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return dest, nil
+	// The files have already moved, so a failed commit is reported rather than
+	// rolled back: undoing the move to keep history tidy would throw away the
+	// human's review decision, which is the expensive part of the gesture.
+	warn := recordKnowledgeCommit([]string{dest, a.Path}, gestureMessage("promote", a))
+	return dest, warn, nil
 }
 
 // rejectCandidate moves a candidate into the _rejected/ archive, preserving its
-// contents and timestamped filename for extractor tuning. Returns the
-// destination path.
-func rejectCandidate(a Artifact) (string, error) {
+// contents and timestamped filename for extractor tuning, and commits the
+// archived and removed paths — those paths only. Returns the destination path
+// and, when the commit did not happen, the reason.
+func rejectCandidate(a Artifact) (string, string, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
-		return "", fmt.Errorf("unknown type %q", a.Type)
+		return "", "", fmt.Errorf("unknown type %q", a.Type)
 	}
 	if a.Status != "candidate" {
-		return "", fmt.Errorf("not a candidate")
+		return "", "", fmt.Errorf("not a candidate")
 	}
 	destDir := filepath.Join(KnowledgeRoot(), "_candidates", "_rejected", plural, a.Scope)
 	dest := filepath.Join(destDir, filepath.Base(a.Path))
 	if _, err := os.Stat(dest); err == nil {
-		return "", fmt.Errorf("%s already exists", shortenPath(dest))
+		return "", "", fmt.Errorf("%s already exists", shortenPath(dest))
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := os.Rename(a.Path, dest); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return dest, nil
+	// As with promote: the file has moved, so a failed commit surfaces as a
+	// warning instead of undoing the archive.
+	warn := recordKnowledgeCommit([]string{a.Path, dest}, gestureMessage("reject", a))
+	return dest, warn, nil
+}
+
+// gestureMessage is the one-line commit subject for a promote or reject,
+// naming the artifact's type, scope and id so the history reads as the review
+// decisions it records.
+func gestureMessage(gesture string, a Artifact) string {
+	return gesture + " " + a.Type + " " + a.Scope + "/" + a.ID
 }
 
 // promoteFrontmatter rewrites a candidate's frontmatter for the validated tree:
