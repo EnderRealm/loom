@@ -36,33 +36,53 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Promoting or rejecting a candidate now commits the move in the
+- Promoting or rejecting a candidate now leaves a commit in the
   knowledge store's git repo, with a `promote truth <scope>/<id>` /
   `reject truth <scope>/<id>` subject. The gestures were a plain file
   write plus a remove, so the store the durability and auditability
   claims rest on recorded nothing: every review decision since the store
   was created lived only as working-tree state, and anything reading the
   repo's history — index regeneration, any later consumer — saw the
-  corpus stand still. The commit is path-scoped (`git add` over the two
-  paths, then `commit --only` with the same pathspec) because the live
-  store's tree is routinely dirty with untracked candidates and edits the
-  gesture did not make; a whole-tree commit would absorb them into the
-  record. A candidate that was never committed leaves git nothing to
-  record for its removal, so its path is dropped from the pathspec rather
-  than failing the commit on a pathspec that matches nothing. Signing is
+  corpus stand still. A promote commits the two paths it moved between,
+  the written destination and the removed candidate. A reject commits the
+  decision rather than the file: one entry appended to the store's
+  `log.md` in the convention that file already uses — `## [YYYY-MM-DD]
+  reject <id> | <scope> | <type> candidate <filename> archived` —
+  together with the candidate's removal, and with the archived file
+  deliberately out of the pathspec. Committing the archive tied the
+  record to that tree's storage policy, and the two want opposite
+  things: the record has to be durable, while the archive is a thousand
+  discarded claims that do not belong in corpus history. With
+  `_candidates/_rejected/` gitignored, every reject failed on an ignored
+  path and left no record at all; keeping the file out means the archive
+  can be tracked, gitignored, moved or pruned without touching the audit
+  trail. The filename is in the entry because a re-run of the extractor
+  emits siblings under one id, so id and scope alone do not say which
+  candidate was rejected. An absent `log.md` is reported rather than
+  created — that file is bootstrapped at store init, and a TUI pointed at
+  the wrong root must not scatter one. Both commits are path-scoped
+  (`git add` over those paths, then `commit --only` with the same
+  pathspec) because the live store's tree is routinely dirty with
+  untracked candidates and edits the gesture did not make; a whole-tree
+  commit would absorb them into the record. `log.md` is the one
+  exception, since the extractor appends to it without committing, so a
+  reject carries any pending extraction entries along with its own. A
+  candidate that was never committed leaves git nothing to record for
+  its removal, so its path is dropped from the pathspec rather than
+  failing the commit on a pathspec that matches nothing. Signing is
   pinned off and every git call is bounded at ten seconds, since a
   passphrase prompt or an index lock inside the fullscreen TUI is
   unrecoverable. The repo has to be the store itself, not one that
-  merely encloses it — `rev-parse` walks up, and a knowledge root sitting
-  inside a git-managed home directory would otherwise have its review
-  decisions committed to that unrelated history. A store that is not a
-  git repo of its own, or a git call that fails, degrades rather than
-  skipping silently: the files still move —
-  undoing them would throw away the human's review decision — and the
-  reason goes both to the status line and to `~/.loom/knowledge-git.log`.
-  The status bar, which these reasons are the first text long enough to
-  overflow, is now clamped to the window width at the render site rather
-  than left unbounded.
+  merely encloses it — `rev-parse` walks up, and a knowledge root
+  sitting inside a git-managed home directory would otherwise have its
+  review decisions committed to that unrelated history. A store that is
+  not a git repo of its own, a git call that fails, or a store with no
+  `log.md` to record the decision in, degrades rather than skipping
+  silently: the files still move — undoing them would throw away the
+  human's review decision — and the reason goes both to the status line
+  and to `~/.loom/knowledge-git.log`. The status bar, which these
+  reasons are the first text long enough to overflow, is now clamped to
+  the window width at the render site rather than left unbounded.
 
 ## [1.3.0] — 2026-08-16 — Automatic knowledge extraction
 

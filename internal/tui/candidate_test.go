@@ -35,6 +35,13 @@ extracted_by: claude:sonnet
 The shipper persists notification state at $LOOM_HOME/transport/notify.state.
 `
 
+// logFixture mirrors the log.md the store bootstraps at init — the file reject
+// records into, and which no tool creates.
+const logFixture = `# Ingest Log
+
+Append-only chronological record of extraction events and store changes. Format: one ` + "`## [YYYY-MM-DD]`" + ` entry per event with a one-line summary.
+`
+
 func seedCandidate(t *testing.T) (root string, art Artifact) {
 	t.Helper()
 	return seedCandidateIn(t, t.TempDir())
@@ -62,6 +69,9 @@ func seedCandidateIn(t *testing.T, root string) (string, Artifact) {
 	}
 	path := filepath.Join(dir, "loom-notify-state-default-path--20260426-100856.md")
 	if err := os.WriteFile(path, []byte(candidateFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "log.md"), []byte(logFixture), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	arts, err := LoadKnowledge()
@@ -388,12 +398,12 @@ func TestPromoteCandidateLeavesDirtUncommitted(t *testing.T) {
 	if err := os.WriteFile(untracked, []byte("untracked\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	modified := filepath.Join(root, "log.md")
+	modified := filepath.Join(root, "index.md")
 	if err := os.WriteFile(modified, []byte("seeded\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	testGit(t, root, "add", "--", modified)
-	testGit(t, root, "commit", "-m", "seed log")
+	testGit(t, root, "commit", "-m", "seed index")
 	if err := os.WriteFile(modified, []byte("seeded\nedited\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -403,13 +413,13 @@ func TestPromoteCandidateLeavesDirtUncommitted(t *testing.T) {
 	}
 
 	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
-	if strings.Contains(names, "log.md") || strings.Contains(names, "unrelated--") {
+	if strings.Contains(names, "index.md") || strings.Contains(names, "unrelated--") {
 		t.Errorf("commit absorbed pre-existing dirt:\n%s", names)
 	}
 	// -uall: with the candidate committed away, _candidates/ holds only the
 	// untracked file and porcelain would otherwise collapse it to the directory.
 	st := testGit(t, root, "status", "--porcelain", "-uall")
-	if !strings.Contains(st, "log.md") || !strings.Contains(st, "unrelated--") {
+	if !strings.Contains(st, "index.md") || !strings.Contains(st, "unrelated--") {
 		t.Errorf("pre-existing dirt no longer dirty after promote:\n%s", st)
 	}
 }
@@ -428,8 +438,287 @@ func TestRejectCandidateCommits(t *testing.T) {
 	if !strings.Contains(subject, art.ID) || !strings.Contains(subject, art.Scope) {
 		t.Errorf("commit subject %q does not name id %q and scope %q", subject, art.ID, art.Scope)
 	}
-	if st := testGit(t, root, "status", "--porcelain", "--", dest, art.Path); st != "" {
-		t.Errorf("touched paths still dirty after reject:\n%s", st)
+	// The record is the log.md entry plus the candidate's removal; the archive
+	// is not in the commit, so its storage policy stays a free choice.
+	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
+	if !strings.Contains(names, "M\tlog.md") {
+		t.Errorf("commit does not record the decision in log.md:\n%s", names)
+	}
+	if !strings.Contains(names, "D\t_candidates/truths/loom/loom-notify-state-default-path--20260426-100856.md") {
+		t.Errorf("commit does not delete the candidate:\n%s", names)
+	}
+	if strings.Contains(names, "_candidates/_rejected/") {
+		t.Errorf("commit names the archived file:\n%s", names)
+	}
+	entry := readLog(t, root)
+	if !strings.Contains(entry, "reject "+art.ID+" | "+art.Scope+" | truth candidate "+filepath.Base(dest)+" archived") {
+		t.Errorf("log.md entry does not name the rejected candidate:\n%s", entry)
+	}
+	if st := testGit(t, root, "status", "--porcelain", "--", art.Path, filepath.Join(root, "log.md")); st != "" {
+		t.Errorf("recorded paths still dirty after reject:\n%s", st)
+	}
+}
+
+// readLog returns the store's log.md.
+func readLog(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "log.md"))
+	if err != nil {
+		t.Fatalf("log.md: %v", err)
+	}
+	return string(b)
+}
+
+// TestRejectCandidateIgnoredArchiveCommits is the shape the archive's storage
+// policy used to break: with _candidates/_rejected/ gitignored, `git add` over
+// the archived file is a fatal "paths are ignored" that sank the whole record.
+func TestRejectCandidateIgnoredArchiveCommits(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("_candidates/_rejected/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, root, "add", "--", filepath.Join(root, ".gitignore"))
+	testGit(t, root, "commit", "-m", "ignore the archive")
+	head := testGit(t, root, "rev-parse", "HEAD")
+
+	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now == head {
+		t.Error("HEAD did not move: the reject left no committed record")
+	}
+	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
+	if !strings.Contains(names, "M\tlog.md") {
+		t.Errorf("commit does not record the decision in log.md:\n%s", names)
+	}
+	if strings.Contains(names, "_candidates/_rejected/") {
+		t.Errorf("commit names the ignored archive:\n%s", names)
+	}
+}
+
+func TestRejectUntrackedCandidateCommits(t *testing.T) {
+	root, art := seedGitUntrackedCandidate(t)
+
+	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	}
+	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
+	if !strings.Contains(names, "A\tlog.md") {
+		t.Errorf("commit does not record the decision in log.md:\n%s", names)
+	}
+	// The candidate was never tracked, so git has nothing to delete.
+	if strings.Contains(names, "D\t_candidates/") {
+		t.Errorf("commit deletes a candidate that was never tracked:\n%s", names)
+	}
+}
+
+func TestRejectCandidateLeavesDirtUncommitted(t *testing.T) {
+	root, art := seedGitCandidate(t)
+
+	// Pre-existing working-tree dirt of both kinds the live store carries.
+	untracked := filepath.Join(root, "_candidates", "truths", "loom", "unrelated--20260101-000000.md")
+	if err := os.WriteFile(untracked, []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modified := filepath.Join(root, "index.md")
+	if err := os.WriteFile(modified, []byte("seeded\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, root, "add", "--", modified)
+	testGit(t, root, "commit", "-m", "seed index")
+	if err := os.WriteFile(modified, []byte("seeded\nedited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// log.md is the exception, and the live store's normal state: the extractor
+	// appends entries and never commits them, so a reject's file-granular
+	// pathspec folds whatever is pending into its own commit.
+	pending := "\n## [2026-08-16] extract 92118425 | loom | 8 truth candidate(s)\n"
+	if err := appendRejectLog(filepath.Join(root, "log.md"), pending); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	}
+
+	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
+	if strings.Contains(names, "index.md") || strings.Contains(names, "unrelated--") {
+		t.Errorf("commit absorbed pre-existing dirt:\n%s", names)
+	}
+	st := testGit(t, root, "status", "--porcelain", "-uall")
+	if !strings.Contains(st, "index.md") || !strings.Contains(st, "unrelated--") {
+		t.Errorf("pre-existing dirt no longer dirty after reject:\n%s", st)
+	}
+	// The pending extractor entry rode along, and log.md is clean afterwards.
+	if !strings.Contains(testGit(t, root, "show", "HEAD", "--", "log.md"), "extract 92118425") {
+		t.Error("commit did not absorb the pending log.md entry")
+	}
+	if strings.Contains(st, "log.md") {
+		t.Errorf("log.md still dirty after reject:\n%s", st)
+	}
+}
+
+// TestRejectLogEntryFieldsAreAllowListed: log.md is rendered markdown and the
+// fields come from extractor-written frontmatter, so an unterminated HTML
+// comment would hide every entry below it and an injected " | " would misstate
+// the entry's own field boundaries.
+func TestRejectLogEntryFieldsAreAllowListed(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	art.ID = "loom-notify <!-- hidden | forged <script>x</script> [link](u)"
+
+	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	}
+
+	entry := rejectEntry(t, root)
+	if strings.ContainsAny(entry, "<>()") {
+		t.Errorf("entry retains markdown/HTML syntax:\n%q", entry)
+	}
+	// The only brackets left are the entry's own date.
+	if strings.Count(entry, "[") != 1 || strings.Count(entry, "]") != 1 {
+		t.Errorf("entry retains injected brackets:\n%q", entry)
+	}
+	if n := strings.Count(entry, " | "); n != 2 {
+		t.Errorf("entry has %d field separators, want 2:\n%q", n, entry)
+	}
+	if !strings.Contains(entry, "?") {
+		t.Errorf("substituted runes vanished instead of reading as odd:\n%q", entry)
+	}
+}
+
+// TestRejectLogEntryLongIDKeepsTail: the bound is per-field, so a model-length
+// id cannot truncate the scope, type and basename off the end of the entry.
+func TestRejectLogEntryLongIDKeepsTail(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	art.ID = strings.Repeat("a", 400)
+
+	dest, warn, err := rejectCandidate(art)
+	if err != nil || warn != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	}
+
+	entry := rejectEntry(t, root)
+	if !strings.Contains(entry, "| loom | truth candidate "+filepath.Base(dest)+" archived") {
+		t.Errorf("entry lost its tail to a long id:\n%q", entry)
+	}
+	if n := len([]rune(entry)); n > gestureMessageMax {
+		t.Errorf("entry is %d runes, want at most %d:\n%q", n, gestureMessageMax, entry)
+	}
+}
+
+// TestRejectLogEntryKeepsBasenameSuffix: a basename is "<id>--<timestamp>.md",
+// so it outgrows its bound exactly when the id is long — and the part a tail cut
+// would take is the timestamp, the only thing that tells apart the siblings a
+// re-run of the extractor emits under one id.
+func TestRejectLogEntryKeepsBasenameSuffix(t *testing.T) {
+	longID := strings.Repeat("a", 90)
+	first := Artifact{
+		ID:    longID,
+		Scope: "loom",
+		Type:  "truth",
+		Path:  filepath.Join("_candidates", "truths", "loom", longID+"--20260426-100856.md"),
+	}
+	second := first
+	second.Path = filepath.Join("_candidates", "truths", "loom", longID+"--20260426-113000.md")
+
+	one, two := rejectLogEntry(first), rejectLogEntry(second)
+	if !strings.Contains(one, "--20260426-100856.md archived") {
+		t.Errorf("entry dropped the basename's timestamp suffix:\n%q", one)
+	}
+	if one == two {
+		t.Errorf("siblings differing only in timestamp produced the same entry:\n%q", one)
+	}
+}
+
+// TestRejectLogEntryBoundsFitTheLine composes an entry with every field at its
+// bound: the fixed scaffolding plus the four bounds has to land inside
+// gestureMessageMax, or sanitizeRecord backstops the composed line by cutting
+// the tail — the failure the per-field bounds exist to prevent.
+func TestRejectLogEntryBoundsFitTheLine(t *testing.T) {
+	entry := strings.TrimSpace(rejectLogEntry(Artifact{
+		ID:    strings.Repeat("a", logFieldIDMax),
+		Scope: strings.Repeat("b", logFieldScopeMax),
+		Type:  strings.Repeat("c", logFieldTypeMax),
+		Path:  strings.Repeat("d", logFieldBaseMax),
+	}))
+	if n := len([]rune(entry)); n != gestureMessageMax {
+		t.Errorf("worst-case entry is %d runes, want exactly %d:\n%q", n, gestureMessageMax, entry)
+	}
+	if !strings.HasSuffix(entry, " archived") {
+		t.Errorf("worst-case entry was cut by the backstop:\n%q", entry)
+	}
+}
+
+// rejectEntry returns the single "## [" entry the reject appended to log.md.
+func rejectEntry(t *testing.T, root string) string {
+	t.Helper()
+	for _, line := range strings.Split(readLog(t, root), "\n") {
+		if strings.HasPrefix(line, "## [") {
+			return line
+		}
+	}
+	t.Fatal("log.md carries no entry")
+	return ""
+}
+
+// TestRejectLogEntryIsOneEntry pins the log.md record against forgery: the id
+// comes from extractor-written frontmatter, and a newline in it would append a
+// second entry to the store's own history.
+func TestRejectLogEntryIsOneEntry(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	art.ID = forgedID
+
+	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	}
+
+	logged := readLog(t, root)
+	// Counted by line start: the seeded header names the entry format inline.
+	entries := 0
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.HasPrefix(line, "## [") {
+			entries++
+		}
+	}
+	if entries != 1 {
+		t.Errorf("expected 1 log.md entry, got %d:\n%q", entries, logged)
+	}
+	if strings.Contains(logged, "\x07") {
+		t.Errorf("log.md entry retains a control character:\n%q", logged)
+	}
+	if strings.ContainsAny(logged, "\u202e\u2066") {
+		t.Errorf("log.md entry retains a bidi format character:\n%q", logged)
+	}
+}
+
+// TestRejectMissingLogDegrades: log.md is bootstrapped at store init, so a TUI
+// pointed at a root without one must report the missing record rather than
+// write a log.md into existence.
+func TestRejectMissingLogDegrades(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	testGit(t, root, "rm", "-q", "--", filepath.Join(root, "log.md"))
+	testGit(t, root, "commit", "-m", "drop log")
+
+	dest, warn, err := rejectCandidate(art)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if warn == "" {
+		t.Fatal("expected a degraded reject, got a clean record")
+	}
+	// The archive move still stands.
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("archived file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "log.md")); !os.IsNotExist(err) {
+		t.Errorf("reject bootstrapped a log.md: %v", err)
+	}
+	logged, err := os.ReadFile(filepath.Join(config.Home(), "knowledge-git.log"))
+	if err != nil {
+		t.Fatalf("knowledge-git.log: %v", err)
+	}
+	if !strings.Contains(string(logged), "log.md") || !strings.Contains(string(logged), art.ID) {
+		t.Errorf("log record does not carry the reason and the gesture:\n%q", string(logged))
 	}
 }
 

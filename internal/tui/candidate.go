@@ -74,9 +74,11 @@ func promoteCandidate(a Artifact) (string, string, error) {
 }
 
 // rejectCandidate moves a candidate into the _rejected/ archive, preserving its
-// contents and timestamped filename for extractor tuning, and commits the
-// archived and removed paths — those paths only. Returns the destination path
-// and, when the commit did not happen, the reason.
+// contents and timestamped filename for extractor tuning, and records the
+// decision as a committed log.md entry — the archive itself is deliberately not
+// in the pathspec, so whether it is tracked, gitignored, moved or pruned cannot
+// degrade the audit record. Returns the destination path and, when the record
+// did not land, the reason.
 func rejectCandidate(a Artifact) (string, string, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
@@ -96,10 +98,116 @@ func rejectCandidate(a Artifact) (string, string, error) {
 	if err := os.Rename(a.Path, dest); err != nil {
 		return "", "", err
 	}
-	// As with promote: the file has moved, so a failed commit surfaces as a
+	// As with promote: the file has moved, so a failed record surfaces as a
 	// warning instead of undoing the archive.
-	warn := recordKnowledgeCommit([]string{a.Path, dest}, gestureMessage("reject", a))
+	logPath := filepath.Join(KnowledgeRoot(), "log.md")
+	if err := appendRejectLog(logPath, rejectLogEntry(a)); err != nil {
+		return dest, recordKnowledgeFailure(gestureMessage("reject", a), err), nil
+	}
+	// The source stays in the pathspec — its removal is a real change to the
+	// candidates tree — and commitKnowledge drops it when it was never tracked.
+	// The pathspec is file-granular, so entries the extractor has already
+	// appended to log.md without committing (extract.py, appendRetrospectLog)
+	// are absorbed into this commit. Accepted: the decision record and the
+	// extractor share one append-only file, and keeping the decision out of the
+	// archive is what makes it durable.
+	warn := recordKnowledgeCommit([]string{logPath, a.Path}, gestureMessage("reject", a))
 	return dest, warn, nil
+}
+
+// rejectLogFormat is the store's log.md convention for a reject decision.
+const rejectLogFormat = "## [%s] reject %s | %s | %s candidate %s archived"
+
+// logEntryFixedRunes is the entry's scaffolding — the date plus the literal
+// text around the four fields — measured from the format itself, so editing the
+// format cannot silently invalidate the bounds below.
+var logEntryFixedRunes = len([]rune(fmt.Sprintf(rejectLogFormat, "2006-01-02", "", "", "", "")))
+
+// Per-field rune bounds for a reject log entry. Bounding each field before
+// composition is what keeps truncation per-field: a bound on the composed line
+// alone would cut the tail, and the tail is the scope, the type and the
+// basename. The basename's bound is derived rather than chosen, so the
+// worst-case entry — every field at its bound — still fits gestureMessageMax
+// however the other three or the format change.
+const (
+	logFieldIDMax    = 50
+	logFieldScopeMax = 20
+	logFieldTypeMax  = 12
+)
+
+var logFieldBaseMax = gestureMessageMax - logEntryFixedRunes - logFieldIDMax - logFieldScopeMax - logFieldTypeMax
+
+// logFieldDisallowed matches every rune outside the store's own name grammar
+// (SCHEMA.md § "Scope = project"; ticketIDPattern in
+// internal/extract/retrospect.go), which every legitimate id, scope, type and
+// candidate filename already satisfies.
+var logFieldDisallowed = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+// logFieldRunes allow-lists one interpolated field of a log.md entry. An
+// allow-list because log.md is rendered markdown — the store is also an Obsidian
+// vault — and a denylist of markdown and HTML constructs never closes: one
+// unterminated HTML comment from an extractor-written id hides every entry below
+// it, and an injected " | " misstates the entry's own field boundaries.
+// Disallowed runes become "?" rather than vanishing, so a rewritten field still
+// reads as an honest record of an odd value instead of a well-formed one.
+func logFieldRunes(s string) []rune {
+	return []rune(logFieldDisallowed.ReplaceAllString(s, "?"))
+}
+
+// logField bounds a field by runes, cutting the tail — the shape that suits a
+// value whose distinguishing part comes first.
+func logField(s string, max int) string {
+	field := logFieldRunes(s)
+	if len(field) <= max {
+		return string(field)
+	}
+	return string(field[:max-1]) + "…"
+}
+
+// logFieldTail bounds a field by runes, cutting the head. Used for the candidate
+// basename, which is "<id>--YYYYMMDD-HHMMSS.md": the id already has its own
+// field, so the timestamp suffix is the basename's whole marginal value, and a
+// tail cut would drop exactly the discriminator the basename is in the entry for.
+func logFieldTail(s string, max int) string {
+	field := logFieldRunes(s)
+	if len(field) <= max {
+		return string(field)
+	}
+	return "…" + string(field[len(field)-(max-1):])
+}
+
+// rejectLogEntry renders the reject decision in the store's log.md convention:
+// one "## [YYYY-MM-DD] <verb> <subject> | <scope> | <summary>" entry per event.
+// The basename is load-bearing — re-runs of the extractor emit siblings sharing
+// one id, so id and scope alone don't say which candidate was rejected. Fields
+// are sanitized and bounded before composition; sanitizeRecord then backstops
+// the composed line, as it does the commit subject.
+func rejectLogEntry(a Artifact) string {
+	entry := fmt.Sprintf(rejectLogFormat,
+		time.Now().Format("2006-01-02"),
+		logField(a.ID, logFieldIDMax),
+		logField(a.Scope, logFieldScopeMax),
+		logField(a.Type, logFieldTypeMax),
+		logFieldTail(filepath.Base(a.Path), logFieldBaseMax))
+	return "\n" + sanitizeRecord(entry) + "\n"
+}
+
+// appendRejectLog appends one entry to the store's log.md. Opened without
+// O_CREATE — log.md is bootstrapped at store init, and a TUI pointed at a wrong
+// root must not scatter one — so the perm argument is 0: it applies to nothing,
+// and a mode here would be the wrong one the day O_CREATE were added. Unlike the
+// extractor, which skips silently when the file is absent, the caller reports
+// the failure — here the entry is the record.
+func appendRejectLog(path, entry string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return fmt.Errorf("log.md: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(entry); err != nil {
+		return fmt.Errorf("log.md: %w", err)
+	}
+	return nil
 }
 
 // gestureMessage is the one-line commit subject for a promote or reject,

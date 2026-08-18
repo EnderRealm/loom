@@ -212,7 +212,9 @@ func (m knowledgeModel) reject() (knowledgeModel, tea.Cmd) {
 	m.showDetail = false
 	status := "rejected — archived to _rejected/"
 	if warn != "" {
-		status += " — not committed: " + warn
+		// Not "not committed": the reject's record can also fail to be written
+		// at all, when the store has no log.md to append the decision to.
+		status += " — record not saved: " + warn
 	}
 	return m, tea.Batch(statusCmd(status), loadKnowledgeCmd())
 }

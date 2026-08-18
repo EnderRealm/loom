@@ -144,9 +144,7 @@ func recordKnowledgeCommit(paths []string, message string) string {
 	if err == nil {
 		return ""
 	}
-	// Flattened but not bounded: the log is the debugging mechanism for this
-	// gesture, so it keeps every line git produced as one record.
-	appendKnowledgeGitLog(message + ": " + flattenRecord(err.Error()))
+	reason := recordKnowledgeFailure(message, err)
 	// Both no-repo shapes degrade the same way; the sentinel text is the whole
 	// status-line reason, since the enclosing path detail belongs in the log.
 	if errors.Is(err, errNoGitRepo) {
@@ -155,6 +153,21 @@ func recordKnowledgeCommit(paths []string, message string) string {
 	if errors.Is(err, errEnclosingRepo) {
 		return errEnclosingRepo.Error()
 	}
+	return reason
+}
+
+// recordKnowledgeFailure writes one gesture failure to knowledgeGitLogPath() in
+// full and returns its head for the status line, which is gone by the next
+// keystroke. Shared by the commit and by the log.md append reject records into,
+// so both failures reach the same two places. The message is sanitized here —
+// idempotent on text a caller already sanitized — so the invariant that stops an
+// extractor-written id from forging a log line sits at the boundary that writes
+// the record rather than in each caller.
+func recordKnowledgeFailure(message string, err error) string {
+	message = sanitizeRecord(message)
+	// Flattened but not bounded: the log is the debugging mechanism for this
+	// gesture, so it keeps every line the failure produced as one record.
+	appendKnowledgeGitLog(message + ": " + flattenRecord(err.Error()))
 	return shortGit(err.Error())
 }
 
@@ -229,7 +242,7 @@ func resolveDir(p string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
-// shortGit collapses a git failure to its first line, bounded, so it fits the
+// shortGit collapses a failure to its first line, bounded, so it fits the
 // one-line status bar. It is the display boundary only — callers log the whole
 // text before shortening it.
 func shortGit(out string) string {
