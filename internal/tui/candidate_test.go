@@ -439,7 +439,8 @@ func TestRejectCandidateCommits(t *testing.T) {
 		t.Errorf("commit subject %q does not name id %q and scope %q", subject, art.ID, art.Scope)
 	}
 	// The record is the log.md entry plus the candidate's removal; the archive
-	// is not in the commit, so its storage policy stays a free choice.
+	// rides along so the tuning corpus lives in history rather than as
+	// untracked working-tree state.
 	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
 	if !strings.Contains(names, "M\tlog.md") {
 		t.Errorf("commit does not record the decision in log.md:\n%s", names)
@@ -447,14 +448,14 @@ func TestRejectCandidateCommits(t *testing.T) {
 	if !strings.Contains(names, "D\t_candidates/truths/loom/loom-notify-state-default-path--20260426-100856.md") {
 		t.Errorf("commit does not delete the candidate:\n%s", names)
 	}
-	if strings.Contains(names, "_candidates/_rejected/") {
-		t.Errorf("commit names the archived file:\n%s", names)
+	if !strings.Contains(names, "A\t_candidates/_rejected/truths/loom/loom-notify-state-default-path--20260426-100856.md") {
+		t.Errorf("commit does not add the archived file:\n%s", names)
 	}
 	entry := readLog(t, root)
 	if !strings.Contains(entry, "reject "+art.ID+" | "+art.Scope+" | truth candidate "+filepath.Base(dest)+" archived") {
 		t.Errorf("log.md entry does not name the rejected candidate:\n%s", entry)
 	}
-	if st := testGit(t, root, "status", "--porcelain", "--", art.Path, filepath.Join(root, "log.md")); st != "" {
+	if st := testGit(t, root, "status", "--porcelain", "--", art.Path, dest, filepath.Join(root, "log.md")); st != "" {
 		t.Errorf("recorded paths still dirty after reject:\n%s", st)
 	}
 }
@@ -469,9 +470,11 @@ func readLog(t *testing.T, root string) string {
 	return string(b)
 }
 
-// TestRejectCandidateIgnoredArchiveCommits is the shape the archive's storage
-// policy used to break: with _candidates/_rejected/ gitignored, `git add` over
-// the archived file is a fatal "paths are ignored" that sank the whole record.
+// TestRejectCandidateIgnoredArchiveCommits holds the guarantee that lets the
+// archive be in the pathspec at all: with _candidates/_rejected/ gitignored,
+// `git add` over the archived file is a fatal "paths are ignored" that would
+// sink the whole record, so commitKnowledge drops the ignored path and the
+// log.md entry lands regardless.
 func TestRejectCandidateIgnoredArchiveCommits(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("_candidates/_rejected/\n"), 0o644); err != nil {
@@ -493,6 +496,64 @@ func TestRejectCandidateIgnoredArchiveCommits(t *testing.T) {
 	}
 	if strings.Contains(names, "_candidates/_rejected/") {
 		t.Errorf("commit names the ignored archive:\n%s", names)
+	}
+	// A dropped path is otherwise invisible — the commit that lands looks like
+	// any other — so knowledge-git.log names it.
+	logged, err := os.ReadFile(filepath.Join(config.Home(), "knowledge-git.log"))
+	if err != nil {
+		t.Fatalf("knowledge-git.log: %v", err)
+	}
+	if !strings.Contains(string(logged), "dropping ignored path") || !strings.Contains(string(logged), "_candidates/_rejected/") {
+		t.Errorf("log record does not name the dropped archive:\n%q", string(logged))
+	}
+}
+
+// TestRejectIgnoredTrackedCandidateCommitsRemoval pins the drop to the paths the
+// caller declared droppable. A store can ignore its candidates while still
+// carrying ones tracked from before the rule; the source's removal is the
+// record, so it stays in the pathspec however the ignore rules read, and a
+// dropped deletion would leave a phantom candidate in history forever.
+func TestRejectIgnoredTrackedCandidateCommitsRemoval(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	// A file pattern rather than "_candidates/": git add refuses an ignored
+	// *directory* named in a pathspec even when the file under it is tracked,
+	// so a directory rule fails the whole gesture loudly at the add and leaves
+	// no commit to inspect. The file pattern ignores the same candidates while
+	// letting the tracked deletion through, which is the branch under test.
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("_candidates/**/*.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, root, "add", "--", filepath.Join(root, ".gitignore"))
+	testGit(t, root, "commit", "-m", "ignore the candidate files")
+
+	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	}
+	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
+	if !strings.Contains(names, "D\t_candidates/truths/loom/loom-notify-state-default-path--20260426-100856.md") {
+		t.Errorf("commit does not delete the tracked candidate:\n%s", names)
+	}
+}
+
+// TestPromoteIgnoredDestinationDegrades is the other side of the drop: a
+// promote declares nothing droppable, because the promoted file is the record.
+// A store whose rules cover the validated tree has to fail loudly rather than
+// commit the candidate's removal alone and report a clean promote, which would
+// leave the promoted artifact nowhere in history.
+func TestPromoteIgnoredDestinationDegrades(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("truths/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, root, "add", "--", filepath.Join(root, ".gitignore"))
+	testGit(t, root, "commit", "-m", "ignore the validated tree")
+	head := testGit(t, root, "rev-parse", "HEAD")
+
+	if _, warn, err := promoteCandidate(art); err != nil || warn == "" {
+		t.Fatalf("promote of an ignored destination did not degrade: err=%v warn=%q", err, warn)
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
+		t.Errorf("HEAD moved despite an ignored destination: %s -> %s", head, now)
 	}
 }
 
@@ -719,6 +780,50 @@ func TestRejectMissingLogDegrades(t *testing.T) {
 	}
 	if !strings.Contains(string(logged), "log.md") || !strings.Contains(string(logged), art.ID) {
 		t.Errorf("log record does not carry the reason and the gesture:\n%q", string(logged))
+	}
+}
+
+// TestRejectCommitFailureKeepsArchive: the archive is in the pathspec now, so a
+// failed commit has to degrade like every other knowledge-store commit failure
+// — the file stays archived, log.md keeps the entry, and neither is rolled back
+// to buy a tidy history. A failing pre-commit hook fails the commit itself,
+// leaving the `git add` over the pathspec alone.
+func TestRejectCommitFailureKeepsArchive(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	head := testGit(t, root, "rev-parse", "HEAD")
+	hook := filepath.Join(root, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dest, warn, err := rejectCandidate(art)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if warn == "" {
+		t.Fatal("expected a degraded reject, got a clean record")
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("archived file missing after a failed commit: %v", err)
+	}
+	if _, err := os.Stat(art.Path); !os.IsNotExist(err) {
+		t.Errorf("archive move rolled back after a failed commit: %v", err)
+	}
+	if !strings.Contains(readLog(t, root), art.ID) {
+		t.Errorf("log.md does not record the reject after a failed commit:\n%s", readLog(t, root))
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
+		t.Errorf("HEAD moved despite a failed commit: %s -> %s", head, now)
+	}
+	logged, err := os.ReadFile(filepath.Join(config.Home(), "knowledge-git.log"))
+	if err != nil {
+		t.Fatalf("knowledge-git.log: %v", err)
+	}
+	// Naming the commit step pins which failure degraded the gesture — the
+	// commit, not the add; the archive's place in the pathspec is
+	// TestRejectCandidateCommits'.
+	if !strings.Contains(string(logged), art.ID) || !strings.Contains(string(logged), "git commit") {
+		t.Errorf("log record does not name the gesture and the failed commit:\n%q", string(logged))
 	}
 }
 

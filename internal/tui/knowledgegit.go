@@ -77,12 +77,18 @@ func gitCause(out string, err error) string {
 // knowledge store. The commit is path-scoped — `git add` over those paths, then
 // `commit --only` with the same pathspec — because the store's working tree is
 // routinely dirty with untracked candidates and edits this gesture did not
-// make, and a whole-tree commit would absorb them into the record. A root that
-// is not itself a git repo yields errNoGitRepo. Failures carry git's whole
-// output, because the useful part is rarely the first line — a rejected commit
-// leads with "On branch main" and names the cause below it — and the caller,
-// not this function, decides what a one-line status bar can show.
-func commitKnowledge(paths []string, message string) error {
+// make, and a whole-tree commit would absorb them into the record. droppable
+// names the paths whose record lives elsewhere, committed alongside the rest but
+// abandoned rather than allowed to sink the commit; every other path is the
+// record and fails loudly; a dropped path is named in knowledgeGitLogPath(),
+// since the commit that lands is otherwise indistinguishable from any other.
+// That record is written when the path leaves the pathspec, so it stands even
+// when the commit it was headed for then fails. A root that is not itself a git
+// repo yields errNoGitRepo. Failures carry git's whole output, because the useful part is
+// rarely the first line — a rejected commit leads with "On branch main" and
+// names the cause below it — and the caller, not this function, decides what a
+// one-line status bar can show.
+func commitKnowledge(paths, droppable []string, message string) error {
 	root := KnowledgeRoot()
 	top, err := runGit(root, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -103,12 +109,29 @@ func commitKnowledge(paths []string, message string) error {
 	if !sameDir(top, root) {
 		return fmt.Errorf("%w: enclosing repo at %s", errEnclosingRepo, top)
 	}
+	// A droppable path leaves the pathspec when git is ignoring it: its record
+	// is elsewhere — the reject archive's decision is the log.md entry — so the
+	// store's ignore rules are a storage policy there, while passing an ignored
+	// path to `git add` is a fatal "paths are ignored" that would sink the whole
+	// commit. This is not a general rule about ignored paths: a path the caller
+	// did not declare droppable is the record, and an ignored one has to fail
+	// loudly rather than yield a commit that omits it. check-ignore exits 0 only
+	// when the path is ignored — 1 when git would track it, 128 on an error it
+	// could not answer — so only a clean exit drops the path.
+	kept := append([]string{}, paths...)
+	for _, p := range droppable {
+		if _, err := runGit(root, "check-ignore", "-q", "--", p); err == nil {
+			appendKnowledgeGitLog(message + ": dropping ignored path " + shortenPath(p))
+			continue
+		}
+		kept = append(kept, p)
+	}
 	// A path the gesture removed matters to git only if it was tracked; the
 	// store carries uncommitted candidates, and passing one as a pathspec after
 	// its removal is a fatal "did not match any files" that would sink the
 	// whole commit.
 	var pathspec []string
-	for _, p := range paths {
+	for _, p := range kept {
 		if _, err := os.Stat(p); err != nil {
 			if _, err := runGit(root, "ls-files", "--error-unmatch", "--", p); err != nil {
 				continue
@@ -138,9 +161,9 @@ func commitKnowledge(paths []string, message string) error {
 // reason on failure. A failure is never silent: the failure is appended to
 // knowledgeGitLogPath() in full, and its head handed back for the status line,
 // which is gone by the next keystroke.
-func recordKnowledgeCommit(paths []string, message string) string {
+func recordKnowledgeCommit(paths, droppable []string, message string) string {
 	message = sanitizeRecord(message)
-	err := commitKnowledge(paths, message)
+	err := commitKnowledge(paths, droppable, message)
 	if err == nil {
 		return ""
 	}
@@ -160,9 +183,10 @@ func recordKnowledgeCommit(paths []string, message string) string {
 // full and returns its head for the status line, which is gone by the next
 // keystroke. Shared by the commit and by the log.md append reject records into,
 // so both failures reach the same two places. The message is sanitized here —
-// idempotent on text a caller already sanitized — so the invariant that stops an
-// extractor-written id from forging a log line sits at the boundary that writes
-// the record rather than in each caller.
+// idempotent on text a caller already sanitized — so the bound a record shares
+// with the commit subject is applied once, at the boundary both failures pass
+// through, rather than in each caller; the flattening half of the invariant
+// sits lower still, in appendKnowledgeGitLog.
 func recordKnowledgeFailure(message string, err error) string {
 	message = sanitizeRecord(message)
 	// Flattened but not bounded: the log is the debugging mechanism for this
@@ -203,6 +227,11 @@ func flattenRecord(s string) string {
 }
 
 // appendKnowledgeGitLog appends one timestamped line to the knowledge-git log.
+// The line is flattened here rather than in each caller, so no caller can write
+// a record that forges a second one; flattenRecord is idempotent, so the callers
+// that flatten their own variable part first are unaffected. Defence in depth
+// rather than a live hole: no extractor-written text reaches this unflattened
+// today, since CANDIDATE_ID_RE gates the candidate filename.
 func appendKnowledgeGitLog(line string) {
 	p := knowledgeGitLogPath()
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -213,7 +242,7 @@ func appendKnowledgeGitLog(line string) {
 		return
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), line)
+	fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), flattenRecord(line))
 }
 
 // sameDir reports whether two paths name the same directory. Both sides are

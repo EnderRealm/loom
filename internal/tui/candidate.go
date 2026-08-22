@@ -69,16 +69,22 @@ func promoteCandidate(a Artifact) (string, string, error) {
 	// The files have already moved, so a failed commit is reported rather than
 	// rolled back: undoing the move to keep history tidy would throw away the
 	// human's review decision, which is the expensive part of the gesture.
-	warn := recordKnowledgeCommit([]string{dest, a.Path}, gestureMessage("promote", a))
+	// Nothing here is droppable: the promoted file is the record, so a store
+	// whose ignore rules cover the validated tree fails the commit loudly
+	// rather than recording the candidate's removal alone.
+	warn := recordKnowledgeCommit([]string{dest, a.Path}, nil, gestureMessage("promote", a))
 	return dest, warn, nil
 }
 
 // rejectCandidate moves a candidate into the _rejected/ archive, preserving its
-// contents and timestamped filename for extractor tuning, and records the
-// decision as a committed log.md entry — the archive itself is deliberately not
-// in the pathspec, so whether it is tracked, gitignored, moved or pruned cannot
-// degrade the audit record. Returns the destination path and, when the record
-// did not land, the reason.
+// contents and timestamped filename for extractor tuning, and commits the
+// archive together with the log.md entry that records the decision — the
+// archive is the store's only corpus of what the extractor got wrong, so it
+// belongs in history rather than in untracked working-tree state. The record is
+// still the log.md entry alone and stays independent of the archive, which is
+// passed as droppable: a store that gitignores the archive gets its record
+// anyway. Returns the destination path and, when the record did not land, the
+// reason.
 func rejectCandidate(a Artifact) (string, string, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
@@ -106,12 +112,16 @@ func rejectCandidate(a Artifact) (string, string, error) {
 	}
 	// The source stays in the pathspec — its removal is a real change to the
 	// candidates tree — and commitKnowledge drops it when it was never tracked.
+	// The archive is passed as droppable: an ignored one leaves the pathspec
+	// instead of sinking the record, which is what keeps the decision
+	// independent of the archive's storage policy.
 	// The pathspec is file-granular, so log.md entries nobody has committed —
 	// appendRetrospectLog's, and extract.py's when a run wrote no candidates or
 	// its own commit failed — are absorbed into this commit. Accepted: the
 	// decision record and the extractor share one append-only file, and keeping
-	// the decision out of the archive is what makes it durable.
-	warn := recordKnowledgeCommit([]string{logPath, a.Path}, gestureMessage("reject", a))
+	// the decision in log.md rather than in the archived file is what makes it
+	// durable.
+	warn := recordKnowledgeCommit([]string{logPath, a.Path}, []string{dest}, gestureMessage("reject", a))
 	return dest, warn, nil
 }
 

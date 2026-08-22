@@ -8,6 +8,21 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A reject now commits the archived candidate alongside the `log.md`
+  entry and the candidate's removal, so the store's only corpus of what
+  the extractor got wrong lives in history instead of as untracked
+  working-tree state. 1.4.0 kept the archive out of the pathspec to hold
+  the record independent of that tree's storage policy; the independence
+  is structural now rather than positional — the archive is passed as a
+  path whose record lives elsewhere, so git ignoring it drops it from
+  the pathspec and the `log.md` entry still lands, and a store with
+  `_candidates/_rejected/` gitignored gets its record either way. The
+  drop reaches only paths declared that way: a promote's destination is
+  itself the record, so an ignored one still fails loudly instead of
+  yielding a commit of the candidate's removal alone. Each dropped path
+  is named in `~/.loom/knowledge-git.log`, since the commit that lands
+  otherwise reads like any other.
+
 - An extraction run that emits candidates now leaves one commit in the
   knowledge store's git repo, subject `extract <session> | <scope> | <n>
   <type> candidate(s)` — the same unit `log.md` already records, minus
