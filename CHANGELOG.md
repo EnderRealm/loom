@@ -4,7 +4,7 @@ All notable changes to Loom are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] — 2026-08-22 — Auditable knowledge review
 
 ### Changed
 
