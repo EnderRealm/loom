@@ -4,6 +4,38 @@ All notable changes to Loom are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- An extraction run that emits candidates now leaves one commit in the
+  knowledge store's git repo, subject `extract <session> | <scope> | <n>
+  <type> candidate(s)` — the same unit `log.md` already records, minus
+  its date scaffolding. The extractor is the store's highest-volume
+  writer and never touched git: it wrote candidate files, appended to
+  `log.md`, and stopped there, which is where the 550 uncommitted
+  candidates in the live store came from. Since it runs unattended on
+  the LaunchAgent, every sweep pushed the store further from its own
+  history. The commit covers the candidate files and the `log.md` append
+  together, one per run rather than one per file, so `git log` reads
+  back as a list of extraction events. A run that emits no candidates
+  leaves no commit; the zero-count `log.md` entry it may still have
+  appended rides along with the next run's, the same file-granular
+  absorption a reject already accepts. The commit is path-scoped to what
+  the run wrote, on the same rule the promote and reject gestures follow,
+  because the live tree is routinely dirty with candidates awaiting
+  review and edits the run did not make. A store that is not a git repo
+  of its own, one that merely sits inside another repo, or a git call
+  that fails, degrades rather than skipping silently: the reason is
+  printed on a foreground run and always appended to
+  `~/.loom/knowledge-git.log`, which is the record to rely on — a
+  scheduled sweep keeps the run's output only when the extraction itself
+  failed — and the extraction still succeeds, since a failed commit must
+  not cost an unattended sweep its candidates. Git calls are bounded at thirty
+  seconds, and signing and the store's hooks are both pinned off, since
+  an index lock, a passphrase prompt or a hook that blocks has nobody to
+  answer it on the LaunchAgent and would wedge every sweep that follows.
+
 ## [1.4.0] — 2026-08-22 — Auditable knowledge review
 
 ### Changed

@@ -204,6 +204,7 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
   extract-env                                  # server: extractor tunables baked into its plist
   extractor.log                                # server: extractor launchd capture
   knowledge/                                   # durable knowledge store (separate git repo)
+  knowledge-git.log                            # knowledge-store commits that could not be recorded
 ```
 
 State lives per-user per-machine. Override the root with `LOOM_HOME=/some/path`.

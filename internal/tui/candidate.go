@@ -106,11 +106,11 @@ func rejectCandidate(a Artifact) (string, string, error) {
 	}
 	// The source stays in the pathspec — its removal is a real change to the
 	// candidates tree — and commitKnowledge drops it when it was never tracked.
-	// The pathspec is file-granular, so entries the extractor has already
-	// appended to log.md without committing (extract.py, appendRetrospectLog)
-	// are absorbed into this commit. Accepted: the decision record and the
-	// extractor share one append-only file, and keeping the decision out of the
-	// archive is what makes it durable.
+	// The pathspec is file-granular, so log.md entries nobody has committed —
+	// appendRetrospectLog's, and extract.py's when a run wrote no candidates or
+	// its own commit failed — are absorbed into this commit. Accepted: the
+	// decision record and the extractor share one append-only file, and keeping
+	// the decision out of the archive is what makes it durable.
 	warn := recordKnowledgeCommit([]string{logPath, a.Path}, gestureMessage("reject", a))
 	return dest, warn, nil
 }

@@ -35,6 +35,7 @@ KNOWLEDGE_ROOT = Path(os.environ.get(
 
 # Import the pre-processor (sibling module)
 sys.path.insert(0, str(LOOM_ROOT / "extractors"))
+from knowledge_git import record_knowledge_commit, sanitize_record
 from preprocess import preprocess as preprocess_jsonl
 from resolve_project import describe as describe_project, resolve_project
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
@@ -585,19 +586,35 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
     return written
 
 
-def append_extract_log(extract_type: str, scope: str, session_id: str, count: int) -> None:
-    """Append one entry to ~/.loom/knowledge/log.md per extraction run.
+def append_extract_log(extract_type: str, scope: str, session_id: str, count: int) -> Path | None:
+    """Append one entry to ~/.loom/knowledge/log.md per extraction run, and hand
+    back the file it appended to so the run's commit names that same file rather
+    than deciding for itself where the entry went.
 
     Skips silently if log.md doesn't exist — the file is bootstrapped at store
-    init, not by the extractor.
+    init, not by the extractor — and returns None, so nothing is committed for
+    an entry that was never written.
     """
     log_path = KNOWLEDGE_ROOT / "log.md"
     if not log_path.exists():
-        return
+        return None
     today = date.today().isoformat()
-    short_session = session_id[:8] if session_id else "?"
     with open(log_path, "a") as f:
-        f.write(f"\n## [{today}] extract {short_session} | {scope} | {count} {extract_type} candidate(s)\n")
+        f.write(f"\n## [{today}] {run_label(extract_type, scope, session_id, count)}\n")
+    return log_path
+
+
+def short_session(session_id: str) -> str:
+    """The id truncation run_label interpolates, kept out of the f-string so the
+    fallback for a session id we could not derive stays legible."""
+    return session_id[:8] if session_id else "?"
+
+
+def run_label(extract_type: str, scope: str, session_id: str, count: int) -> str:
+    """One run's label, verbatim in both the log.md entry (after its date) and
+    the knowledge-store commit subject — they name the same unit, so an edit
+    here moves both rather than desyncing them."""
+    return f"extract {short_session(session_id)} | {scope} | {count} {extract_type} candidate(s)"
 
 
 def keywords(text: str) -> set[str]:
@@ -1011,8 +1028,25 @@ def main():
                                   args.provider, args.model, reasoning, session_id,
                                   ticket_ids)
         print(f"[extract] wrote {len(written)} candidate(s) → {tcfg['candidates']}/{args.scope}/", file=sys.stderr)
-        append_extract_log(args.extract_type, args.scope,
-                           session_id, len(written))
+        log_path = append_extract_log(args.extract_type, args.scope,
+                                      session_id, len(written))
+        # One commit per run, covering the candidate files and the log.md
+        # append together. Only when the run actually wrote candidates: a
+        # zero-count log.md entry rides along with the next run's commit, the
+        # same file-granular absorption internal/tui/candidate.go accepts.
+        if written:
+            commit_paths = list(written)
+            if log_path:
+                commit_paths.append(log_path)
+            # Sanitized here, not just inside the commit, so the line printed
+            # below is the subject git actually recorded.
+            message = sanitize_record(run_label(args.extract_type, args.scope,
+                                                session_id, len(written)))
+            reason = record_knowledge_commit(KNOWLEDGE_ROOT, commit_paths, message)
+            if reason:
+                print(f"[extract] knowledge store not committed: {reason}", file=sys.stderr)
+            else:
+                print(f"[extract] committed to knowledge store: {message}", file=sys.stderr)
 
     if not scoring_refs:
         print("\n[extract] no scoring refs to compare against — skipping scoring")
