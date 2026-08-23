@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"loom/internal/knowledge/store"
 )
 
 // frontmatterKey matches a top-level "key: value" line inside a `---` block.
@@ -50,29 +52,39 @@ func promoteCandidate(a Artifact) (string, string, error) {
 	if a.Status != "candidate" {
 		return "", "", fmt.Errorf("not a candidate")
 	}
-	destDir := filepath.Join(KnowledgeRoot(), plural, a.Scope)
-	dest := filepath.Join(destDir, candidateKebab(a.ID, a.Scope)+".md")
+	// Resolved once and handed to the store: KnowledgeRoot() twice — once to
+	// build the paths, once inside Apply — is two answers waiting to differ.
+	root := KnowledgeRoot()
+	dest := filepath.Join(root, plural, a.Scope, candidateKebab(a.ID, a.Scope)+".md")
 	if _, err := os.Stat(dest); err == nil {
 		return "", "", fmt.Errorf("%s already exists", shortenPath(dest))
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return "", "", err
-	}
-	if err := os.WriteFile(dest, []byte(promoteFrontmatter(a.Body)), 0o644); err != nil {
-		return "", "", err
-	}
-	// Write succeeded; drop the candidate. A leftover source would resurface
-	// as a duplicate candidate on the next refresh.
-	if err := os.Remove(a.Path); err != nil {
-		return "", "", err
-	}
-	// The files have already moved, so a failed commit is reported rather than
-	// rolled back: undoing the move to keep history tidy would throw away the
+	// The files move inside the closure, so a failed commit is reported rather
+	// than rolled back: undoing the move to keep history tidy would throw away the
 	// human's review decision, which is the expensive part of the gesture.
 	// Nothing here is droppable: the promoted file is the record, so a store
 	// whose ignore rules cover the validated tree fails the commit loudly
 	// rather than recording the candidate's removal alone.
-	warn := recordKnowledgeCommit([]string{dest, a.Path}, nil, gestureMessage("promote", a))
+	written := false
+	warn, err := store.ApplyIn(root, gestureMessage("promote", a), func(tx *store.Tx) error {
+		if err := tx.WriteFile(dest, []byte(promoteFrontmatter(a.Body))); err != nil {
+			return err
+		}
+		written = true
+		// Write succeeded; drop the candidate. A leftover source would resurface
+		// as a duplicate candidate on the next refresh.
+		return tx.Remove(a.Path)
+	})
+	if err != nil {
+		// Once the destination exists the promote has landed, and the store has
+		// already committed it: reporting "promote failed" would leave the
+		// candidate listed and the next attempt refused for a destination that is
+		// now there. Only a failure before the write leaves nothing behind.
+		if !written {
+			return "", "", err
+		}
+		return dest, store.ShortReason(err), nil
+	}
 	return dest, warn, nil
 }
 
@@ -93,35 +105,43 @@ func rejectCandidate(a Artifact) (string, string, error) {
 	if a.Status != "candidate" {
 		return "", "", fmt.Errorf("not a candidate")
 	}
-	destDir := filepath.Join(KnowledgeRoot(), "_candidates", "_rejected", plural, a.Scope)
-	dest := filepath.Join(destDir, filepath.Base(a.Path))
+	root := KnowledgeRoot()
+	dest := filepath.Join(root, "_candidates", "_rejected", plural, a.Scope, filepath.Base(a.Path))
 	if _, err := os.Stat(dest); err == nil {
 		return "", "", fmt.Errorf("%s already exists", shortenPath(dest))
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return "", "", err
-	}
-	if err := os.Rename(a.Path, dest); err != nil {
-		return "", "", err
-	}
-	// As with promote: the file has moved, so a failed record surfaces as a
-	// warning instead of undoing the archive.
-	logPath := filepath.Join(KnowledgeRoot(), "log.md")
-	if err := appendRejectLog(logPath, rejectLogEntry(a)); err != nil {
-		return dest, recordKnowledgeFailure(gestureMessage("reject", a), err), nil
-	}
 	// The source stays in the pathspec — its removal is a real change to the
-	// candidates tree — and commitKnowledge drops it when it was never tracked.
-	// The archive is passed as droppable: an ignored one leaves the pathspec
-	// instead of sinking the record, which is what keeps the decision
-	// independent of the archive's storage policy.
-	// The pathspec is file-granular, so log.md entries nobody has committed —
-	// appendRetrospectLog's, and extract.py's when a run wrote no candidates or
-	// its own commit failed — are absorbed into this commit. Accepted: the
+	// candidates tree — and the store drops it when it was never tracked. The
+	// archive is declared droppable: an ignored one leaves the pathspec instead
+	// of sinking the record, which is what keeps the decision independent of the
+	// archive's storage policy.
+	// The pathspec is file-granular, so a log.md entry nobody has committed is
+	// absorbed into this commit. Every writer of that file commits its own entry
+	// now, so what is left pending is an entry whose commit failed — the
+	// extractor's, appendRetrospectLog's — which this then carries. Accepted: the
 	// decision record and the extractor share one append-only file, and keeping
 	// the decision in log.md rather than in the archived file is what makes it
 	// durable.
-	warn := recordKnowledgeCommit([]string{logPath, a.Path}, []string{dest}, gestureMessage("reject", a))
+	logPath := filepath.Join(root, "log.md")
+	archived := false
+	warn, err := store.ApplyIn(root, gestureMessage("reject", a), func(tx *store.Tx) error {
+		if err := tx.Rename(a.Path, dest); err != nil {
+			return err
+		}
+		archived = true
+		tx.Droppable(dest)
+		return tx.Append(logPath, rejectLogEntry(a))
+	})
+	if err != nil {
+		// As with promote: once the file has moved, a failed record surfaces as
+		// a warning instead of undoing the archive. Only a failure before the
+		// move — the store has no log.md to append the decision to is the one
+		// after it — leaves the gesture itself unlanded.
+		if !archived {
+			return "", "", err
+		}
+		return dest, store.ShortReason(err), nil
+	}
 	return dest, warn, nil
 }
 
@@ -137,7 +157,7 @@ var logEntryFixedRunes = len([]rune(fmt.Sprintf(rejectLogFormat, "2006-01-02", "
 // composition is what keeps truncation per-field: a bound on the composed line
 // alone would cut the tail, and the tail is the scope, the type and the
 // basename. The basename's bound is derived rather than chosen, so the
-// worst-case entry — every field at its bound — still fits gestureMessageMax
+// worst-case entry — every field at its bound — still fits store.MessageMax
 // however the other three or the format change.
 const (
 	logFieldIDMax    = 50
@@ -145,7 +165,7 @@ const (
 	logFieldTypeMax  = 12
 )
 
-var logFieldBaseMax = gestureMessageMax - logEntryFixedRunes - logFieldIDMax - logFieldScopeMax - logFieldTypeMax
+var logFieldBaseMax = store.MessageMax - logEntryFixedRunes - logFieldIDMax - logFieldScopeMax - logFieldTypeMax
 
 // logFieldDisallowed matches every rune outside the store's own name grammar
 // (SCHEMA.md § "Scope = project"; ticketIDPattern in
@@ -190,8 +210,8 @@ func logFieldTail(s string, max int) string {
 // one "## [YYYY-MM-DD] <verb> <subject> | <scope> | <summary>" entry per event.
 // The basename is load-bearing — re-runs of the extractor emit siblings sharing
 // one id, so id and scope alone don't say which candidate was rejected. Fields
-// are sanitized and bounded before composition; sanitizeRecord then backstops
-// the composed line, as it does the commit subject.
+// are sanitized and bounded before composition; store.SanitizeRecord then
+// backstops the composed line, as it does the commit subject.
 func rejectLogEntry(a Artifact) string {
 	entry := fmt.Sprintf(rejectLogFormat,
 		time.Now().Format("2006-01-02"),
@@ -199,30 +219,12 @@ func rejectLogEntry(a Artifact) string {
 		logField(a.Scope, logFieldScopeMax),
 		logField(a.Type, logFieldTypeMax),
 		logFieldTail(filepath.Base(a.Path), logFieldBaseMax))
-	return "\n" + sanitizeRecord(entry) + "\n"
+	return "\n" + store.SanitizeRecord(entry) + "\n"
 }
 
-// appendRejectLog appends one entry to the store's log.md. Opened without
-// O_CREATE — log.md is bootstrapped at store init, and a TUI pointed at a wrong
-// root must not scatter one — so the perm argument is 0: it applies to nothing,
-// and a mode here would be the wrong one the day O_CREATE were added. Unlike the
-// extractor, which skips silently when the file is absent, the caller reports
-// the failure — here the entry is the record.
-func appendRejectLog(path, entry string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
-	if err != nil {
-		return fmt.Errorf("log.md: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(entry); err != nil {
-		return fmt.Errorf("log.md: %w", err)
-	}
-	return nil
-}
-
-// gestureMessage is the one-line commit subject for a promote or reject,
-// naming the artifact's type, scope and id so the history reads as the review
-// decisions it records.
+// gestureMessage is the one-line commit subject for a gesture — promote, reject
+// or edit — naming the artifact's type, scope and id so the history reads as the
+// review decisions it records.
 func gestureMessage(gesture string, a Artifact) string {
 	return gesture + " " + a.Type + " " + a.Scope + "/" + a.ID
 }

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"loom/internal/knowledge/store"
 	"loom/internal/parse/summary"
 	"loom/internal/summaries"
 )
@@ -212,28 +213,45 @@ func requireBackend() error {
 }
 
 // appendRetrospectLog records one entry per run in the knowledge store's
-// log.md. Mirrors extract.py's append_extract_log, including its skip when the
-// file is absent — log.md is bootstrapped at store init, not by the extractor —
-// except that the skip is logged, so an omission is auditable in extractor.log
-// rather than invisible.
+// log.md, and commits it. Mirrors extract.py's append_extract_log, including its
+// skip when the file is absent — log.md is bootstrapped at store init, not by
+// the extractor — except that the skip is logged, so an omission is auditable in
+// extractor.log rather than invisible.
+//
+// The write goes through the store's own entry point, which commits what it
+// wrote; nothing here knows about git. ApplyIn rather than Apply because this
+// run resolves the store through the extractor's tunables, which may name a
+// store the process environment does not, and the writes and the commit have to
+// be held against the same one. A failure never fails the run: the candidates
+// are the run's output and the entry is a record of it, so both a failed append
+// and a failed commit are reported to extractor.log and the run stands.
 func appendRetrospectLog(ticketID, scope string, candidates map[string]int) {
-	p := filepath.Join(knowledgeRoot(), "log.md")
+	root := knowledgeRoot()
+	p := filepath.Join(root, "log.md")
 	if _, err := os.Stat(p); err != nil {
 		log.Printf("retrospect %s: %s does not exist — entry not recorded", ticketID, p)
 		return
 	}
-	entry := fmt.Sprintf("\n## [%s] retrospect %s | %s | %d truth candidates, %d decision candidates\n",
-		time.Now().Format("2006-01-02"), ticketID, scope,
-		candidates[extractTypeTruth], candidates[extractTypeDecision])
+	// The label is the entry's own summary, and the commit subject is that same
+	// summary without the date scaffolding — the shape extract.py's run_label
+	// gives a sweep, so retrospect runs read back the same way in the history.
+	label := fmt.Sprintf("retrospect %s | %s | %d truth candidates, %d decision candidates",
+		ticketID, scope, candidates[extractTypeTruth], candidates[extractTypeDecision])
+	entry := fmt.Sprintf("\n## [%s] %s\n", time.Now().Format("2006-01-02"), label)
 
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0o600)
+	warn, err := store.ApplyIn(root, label, func(tx *store.Tx) error {
+		return tx.Append(p, entry)
+	})
 	if err != nil {
-		log.Printf("retrospect %s: open %s: %v", ticketID, p, err)
+		// Unprefixed: the failure may be the append's or the store's own — a root
+		// it could not open, a path it would not take — and each already names
+		// what it was, where an "append <path>" prefix would blame an append that
+		// never ran.
+		log.Printf("retrospect %s: %v", ticketID, err)
 		return
 	}
-	defer f.Close()
-	if _, err := f.WriteString(entry); err != nil {
-		log.Printf("retrospect %s: append %s: %v", ticketID, p, err)
+	if warn != "" {
+		log.Printf("retrospect %s: entry not committed: %s", ticketID, warn)
 	}
 }
 

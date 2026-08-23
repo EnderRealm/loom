@@ -55,6 +55,14 @@ func defaultSortCol() int {
 
 type projectsLoadedMsg []Project
 type knowledgeLoadedMsg []Artifact
+
+// knowledgeEditedMsg is an $EDITOR return: the reload the edit needs, carrying
+// the reason its commit did not land. One message rather than two so a degraded
+// commit reaches the status line without the reload waiting on it.
+type knowledgeEditedMsg struct {
+	artifacts []Artifact
+	warn      string
+}
 type activityLoadedMsg struct {
 	view    *summaries.ActivityView
 	tickets TicketActivity
@@ -136,6 +144,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case knowledgeLoadedMsg:
 		a.knowledge.setArtifacts([]Artifact(msg))
 		return a, nil
+
+	case knowledgeEditedMsg:
+		a.knowledge.setArtifacts(msg.artifacts)
+		if msg.warn == "" {
+			return a, nil
+		}
+		return a, statusCmd("edited — not committed: " + msg.warn)
 
 	case activityLoadedMsg:
 		a.activity.setData(msg.view, msg.tickets)

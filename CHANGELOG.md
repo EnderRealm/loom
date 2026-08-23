@@ -6,6 +6,70 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Every write to the knowledge store now goes through one entry point —
+  `internal/knowledge/store`'s `Apply` — which commits every path the
+  write touched as one record. Committing was a property of each caller
+  before: it had been bolted onto the two gestures anyone noticed
+  (promote, reject) and open-coded per call site in two languages, so
+  the TUI's `e` edit committed nothing and every future writer started
+  in the same state, with the store's rules — path-scoped commits, an
+  untouched dirty tree, the non-repo and enclosing-repo reasons, record
+  sanitization — duplicated between Go and Python and free to drift.
+  They now live in one Go package and nowhere else. The `e` edit leaves
+  a commit as a consequence of going through it rather than as a third
+  special case, and adding a writer needs no commit code at all:
+  `extractors/build-wiki.py` commits its generated `index.md` in one
+  line that mentions no git. A `retrospect` run's `log.md` entry goes
+  through the same entry point and is now committed too, where before it
+  was appended by hand and left for whatever writer next committed that
+  file to absorb.
+- The entry point confines a write to the store. Every op is performed
+  through an open handle on the store directory, so a path that leaves
+  the store is refused by the syscall rather than by a check on the
+  pathname — a directory component swapped for a symlink out of the
+  store cannot be slipped in between a check and the write it guards.
+  The store's own `.git` is refused too, by name and case-insensitively:
+  a plan that rewrote `.git/config` or dropped a hook would corrupt the
+  repository or leave code to run under the next `git` command a human
+  types in the store. So is any path reached through a symlink, which is
+  what makes that rule hold — an in-store `alias -> .git` reaches the
+  repository through a name with no `.git` in it, and a symlink whose
+  target stays inside the store is one the open handle would otherwise
+  follow. Every symlink rather than the ones aimed at `.git`: git
+  records a symlink as a symlink, so a write through one lands outside
+  the tree git tracks and the commit would record something git never
+  had. Refusal is per op, not a validation pass over the
+  whole plan, so a plan whose second change is out of store has already
+  applied and committed its first — the writes that landed are still
+  recorded, as they are for any other failure part-way through. The
+  rules matter most for `loom knowledge write`, whose plan arrives as
+  text from another language and which runs with the user's own reach:
+  an absolute path elsewhere, a traversal, or a relative
+  `LOOM_KNOWLEDGE_ROOT` resolved against an unexpected working directory
+  would otherwise scatter files across the filesystem and report nothing
+  worse than a commit warning. A root that cannot be opened — absent, or
+  not a directory — now fails the write instead of being created.
+- A unit of work whose paths turn out to hold no change now leaves no
+  commit instead of reporting a failed one. Opening `e`, quitting
+  `$EDITOR` without saving and finding "not committed: git commit: On
+  branch main" on the status bar — plus a failure record in
+  `knowledge-git.log` — was the shape this takes when a declared path is
+  a file nobody edited.
+- The Python extractor writes the store through the new `loom knowledge
+  write` subcommand, which applies one JSON plan read from stdin. A
+  subcommand rather than a documented convention each language
+  re-implements: one implementation, living in the repo that owns the
+  store. `extractors/knowledge_git.py` is replaced by
+  `extractors/knowledge_store.py`, a client that builds the plan and
+  contains no git. The cost is that the extractor now needs the loom
+  binary — `LOOM_BIN`, which `internal/extract` pins to the running
+  executable, else `loom` on `$PATH` — and a run that cannot find one
+  fails rather than falling back to writing uncommitted files, which is
+  the second writer this removes. A failed commit stays a warning, since
+  the writes landed. See `docs/knowledge-store-writes.md`.
+
 ### Fixed
 
 - A reject now commits the archived candidate alongside the `log.md`

@@ -26,18 +26,17 @@ from pathlib import Path
 LOOM_ROOT = Path(__file__).resolve().parent.parent
 SUMMARIZER_PATH = LOOM_ROOT / "extractors" / "summarizer.md"
 
-# Knowledge store lives outside the loom repo so it survives reinstalls and
-# accumulates across projects. Eval fixtures stay in-repo as test data.
-KNOWLEDGE_ROOT = Path(os.environ.get(
-    "LOOM_KNOWLEDGE_ROOT",
-    str(Path.home() / ".loom" / "knowledge"),
-)).expanduser()
-
 # Import the pre-processor (sibling module)
 sys.path.insert(0, str(LOOM_ROOT / "extractors"))
-from knowledge_git import record_knowledge_commit, sanitize_record
+from knowledge_store import (StoreWriteError, append_change, apply_changes,
+                             knowledge_root, write_change)
 from preprocess import preprocess as preprocess_jsonl
 from resolve_project import describe as describe_project, resolve_project
+
+# Knowledge store lives outside the loom repo so it survives reinstalls and
+# accumulates across projects. Eval fixtures stay in-repo as test data. Resolved
+# by the client, so this run's paths are under the store loom writes.
+KNOWLEDGE_ROOT = knowledge_root()
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
 EXAMPLE_DELIMITER = "\n\n===REFERENCE-EXAMPLE===\n\n"
@@ -544,16 +543,19 @@ def inject_source_tickets(raw: str, ticket_ids: list[str]) -> str:
 
 def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
                     provider: str, model: str, reasoning: str | None,
-                    session_id: str, ticket_ids: list[str]) -> list[Path]:
-    """Write each valid candidate to base_dir/scope/<id>--<timestamp>.md.
+                    session_id: str, ticket_ids: list[str]) -> list[dict]:
+    """Build the write for each valid candidate: base_dir/scope/<id>--<timestamp>.md.
 
     Adds `status: candidate`, `extracted_at`, `extracted_by` to frontmatter.
     Filename suffix is the wall-clock timestamp at run start, so a re-run on
     the same session produces a sibling rather than overwriting. Candidates
     whose id isn't a safe filename are skipped with a warning.
+
+    The changes are handed to the knowledge store rather than written here, so
+    the run's files and its log.md entry land and are committed as one record
+    (knowledge_store.apply_changes).
     """
     out_dir = base_dir / scope
-    out_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     timestamp_slug = now.strftime("%Y%m%d-%H%M%S")
     extracted_by = f"{provider}:{model}"
@@ -562,7 +564,7 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
     extracted_at = now.replace(microsecond=0).isoformat()
 
     resolved_out = out_dir.resolve()
-    written = []
+    changes = []
     for c in candidates:
         cid = c.get("id") or ""
         if not CANDIDATE_ID_RE.match(cid):
@@ -581,27 +583,23 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
             "extracted_at": extracted_at,
             "extracted_by": extracted_by,
         })
-        path.write_text(body)
-        written.append(path)
-    return written
+        changes.append(write_change(path, body))
+    return changes
 
 
-def append_extract_log(extract_type: str, scope: str, session_id: str, count: int) -> Path | None:
-    """Append one entry to ~/.loom/knowledge/log.md per extraction run, and hand
-    back the file it appended to so the run's commit names that same file rather
-    than deciding for itself where the entry went.
+def append_extract_log(extract_type: str, scope: str, session_id: str, count: int) -> dict | None:
+    """Build the log.md append for one extraction run — one entry per run, in the
+    store's `## [YYYY-MM-DD] <summary>` convention.
 
     Skips silently if log.md doesn't exist — the file is bootstrapped at store
-    init, not by the extractor — and returns None, so nothing is committed for
-    an entry that was never written.
+    init, not by the extractor — and returns None, so the run's record carries
+    no entry that was never written.
     """
     log_path = KNOWLEDGE_ROOT / "log.md"
     if not log_path.exists():
         return None
     today = date.today().isoformat()
-    with open(log_path, "a") as f:
-        f.write(f"\n## [{today}] {run_label(extract_type, scope, session_id, count)}\n")
-    return log_path
+    return append_change(log_path, f"\n## [{today}] {run_label(extract_type, scope, session_id, count)}\n")
 
 
 def short_session(session_id: str) -> str:
@@ -1024,28 +1022,34 @@ def main():
     # or running in benchmark mode (a measurement run, not production).
     if args.emit_candidates and not args.benchmark and valid:
         reasoning = args.reasoning if args.provider == "codex" else None
-        written = emit_candidates(valid, tcfg["candidates"], args.scope,
+        changes = emit_candidates(valid, tcfg["candidates"], args.scope,
                                   args.provider, args.model, reasoning, session_id,
                                   ticket_ids)
-        print(f"[extract] wrote {len(written)} candidate(s) → {tcfg['candidates']}/{args.scope}/", file=sys.stderr)
-        log_path = append_extract_log(args.extract_type, args.scope,
-                                      session_id, len(written))
-        # One commit per run, covering the candidate files and the log.md
-        # append together. Only when the run actually wrote candidates: a
-        # zero-count log.md entry rides along with the next run's commit, the
-        # same file-granular absorption internal/tui/candidate.go accepts.
-        if written:
-            commit_paths = list(written)
-            if log_path:
-                commit_paths.append(log_path)
-            # Sanitized here, not just inside the commit, so the line printed
-            # below is the subject git actually recorded.
-            message = sanitize_record(run_label(args.extract_type, args.scope,
-                                                session_id, len(written)))
-            reason = record_knowledge_commit(KNOWLEDGE_ROOT, commit_paths, message)
+        # One write per run, covering the candidate files and the log.md append
+        # together, committed as one record by the store rather than here. A run
+        # that produced no candidate to write records nothing at all — not even
+        # a zero-count log.md entry, which would be an entry no commit of this
+        # run's could carry.
+        if changes:
+            count = len(changes)
+            log_change = append_extract_log(args.extract_type, args.scope,
+                                            session_id, count)
+            if log_change:
+                changes.append(log_change)
+            message = run_label(args.extract_type, args.scope, session_id, count)
+            try:
+                reason = apply_changes(message, changes)
+            except StoreWriteError as exc:
+                # Fatal: the run produced candidates and the store did not get
+                # them, and writing them anywhere else is what the single entry
+                # point exists to prevent.
+                sys.exit(f"[extract] knowledge store write failed: {exc}")
+            print(f"[extract] wrote {count} candidate(s) → {tcfg['candidates']}/{args.scope}/", file=sys.stderr)
             if reason:
                 print(f"[extract] knowledge store not committed: {reason}", file=sys.stderr)
             else:
+                # loom flattens and bounds the subject it records, so a pathological
+                # scope or session id reads here as it was, not as it was recorded.
                 print(f"[extract] committed to knowledge store: {message}", file=sys.stderr)
 
     if not scoring_refs:

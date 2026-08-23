@@ -1,4 +1,4 @@
-package tui
+package store
 
 import (
 	"context"
@@ -14,9 +14,11 @@ import (
 	"loom/internal/config"
 )
 
-// gitTimeout bounds every git invocation. Promote and reject run inside the
-// fullscreen TUI, where a child that blocks — on an index lock, a credential or
-// a signing prompt — is unrecoverable for the user.
+// gitTimeout bounds every git invocation. Apply runs both inside the fullscreen
+// TUI and unattended on the LaunchAgent, and a child that blocks — on an index
+// lock, a credential or a signing prompt — is unrecoverable for the user in the
+// first case and wedges the sweep in the second. The TUI is the binding
+// constraint, so its bound is the one both callers get.
 const gitTimeout = 10 * time.Second
 
 // gitReasonMax bounds the git failure text that reaches the status line, so a
@@ -26,12 +28,12 @@ const gitTimeout = 10 * time.Second
 // written down: knowledge-git.log keeps git's whole output.
 const gitReasonMax = 60
 
-// gestureMessageMax bounds the commit subject, which is also the body of the
+// MessageMax bounds the commit subject, which is also the body of the
 // knowledge-git log record.
-const gestureMessageMax = 200
+const MessageMax = 200
 
 // errNoGitRepo marks a knowledge root that is not under version control, so the
-// gesture can say the store isn't a repo rather than relay a git failure.
+// caller can say the store isn't a repo rather than relay a git failure.
 var errNoGitRepo = errors.New("knowledge root is not a git repo")
 
 // errEnclosingRepo marks a knowledge root that is itself untracked but sits
@@ -47,12 +49,17 @@ func knowledgeGitLogPath() string {
 }
 
 // runGit runs one git command in the knowledge store, returning its combined
-// output. commit.gpgsign=false because a signing passphrase prompt would hang
-// the TUI with no way to answer it.
+// output. Signing and hooks are both pinned off for the same reason: a
+// signing passphrase prompt would hang the TUI with no way to answer it, and a
+// hook that blocks or rejects would wedge an unattended sweep with nobody there
+// to answer it. The store is a data store loom's bootstrap creates, not a
+// project checkout whose hooks anyone meant to run here.
+// core.hooksPath=/dev/null names a location git finds no hooks in — it is a file
+// rather than a directory, and git treats that as no hooks rather than an error.
 func runGit(root string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	full := append([]string{"-C", root, "-c", "commit.gpgsign=false"}, args...)
+	full := append([]string{"-C", root, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + os.DevNull}, args...)
 	out, err := exec.CommandContext(ctx, "git", full...).CombinedOutput()
 	// CommandContext reports a killed child as a generic signal, so the
 	// deadline that fired is visible only on the context — and a child killed
@@ -73,23 +80,24 @@ func gitCause(out string, err error) string {
 	return err.Error() + ": " + out
 }
 
-// commitKnowledge records the paths a gesture touched as one commit in the
-// knowledge store. The commit is path-scoped — `git add` over those paths, then
-// `commit --only` with the same pathspec — because the store's working tree is
-// routinely dirty with untracked candidates and edits this gesture did not
+// commitKnowledge records the paths one unit of work touched as one commit in
+// the knowledge store. The commit is path-scoped — `git add` over those paths,
+// then `commit --only` with the same pathspec — because the store's working tree
+// is routinely dirty with untracked candidates and edits this work did not
 // make, and a whole-tree commit would absorb them into the record. droppable
 // names the paths whose record lives elsewhere, committed alongside the rest but
 // abandoned rather than allowed to sink the commit; every other path is the
 // record and fails loudly; a dropped path is named in knowledgeGitLogPath(),
 // since the commit that lands is otherwise indistinguishable from any other.
 // That record is written when the path leaves the pathspec, so it stands even
-// when the commit it was headed for then fails. A root that is not itself a git
-// repo yields errNoGitRepo. Failures carry git's whole output, because the useful part is
+// when the commit it was headed for then fails. A pathspec that turns out to
+// hold no change is not an error and leaves no commit: a unit of work may name a
+// path it did not alter. A root that is not itself a git repo yields
+// errNoGitRepo. Failures carry git's whole output, because the useful part is
 // rarely the first line — a rejected commit leads with "On branch main" and
 // names the cause below it — and the caller, not this function, decides what a
 // one-line status bar can show.
-func commitKnowledge(paths, droppable []string, message string) error {
-	root := KnowledgeRoot()
+func commitKnowledge(root string, paths, droppable []string, message string) error {
 	top, err := runGit(root, "rev-parse", "--show-toplevel")
 	if err != nil {
 		// rev-parse fails both for a store that is not a repo and for a git we
@@ -126,7 +134,7 @@ func commitKnowledge(paths, droppable []string, message string) error {
 		}
 		kept = append(kept, p)
 	}
-	// A path the gesture removed matters to git only if it was tracked; the
+	// A path the work removed matters to git only if it was tracked; the
 	// store carries uncommitted candidates, and passing one as a pathspec after
 	// its removal is a fatal "did not match any files" that would sink the
 	// whole commit.
@@ -145,11 +153,22 @@ func commitKnowledge(paths, droppable []string, message string) error {
 	if out, err := runGit(root, append([]string{"add", "--"}, pathspec...)...); err != nil {
 		return fmt.Errorf("git add: %s", gitCause(out, err))
 	}
+	// A unit of work can name a path it did not change: Touch declares a file
+	// $EDITOR was handed and may have left alone, and an op that failed has
+	// already recorded its path. Committing an empty pathspec is git's "nothing to
+	// commit" — an exit status this would report as a failed record, and log, for
+	// a gesture where nothing was lost. diff --cached exits 0 when nothing is
+	// staged for these paths, which is the whole condition: anything else, up to
+	// and including a git that could not answer, goes on to the commit and lets it
+	// report its own failure.
+	if _, err := runGit(root, append([]string{"diff", "--cached", "--quiet", "--"}, pathspec...)...); err == nil {
+		return nil
+	}
 	if out, err := runGit(root, append([]string{"commit", "--only", "-m", message, "--"}, pathspec...)...); err != nil {
-		// A failed commit leaves the gesture staged, and the next commit a
+		// A failed commit leaves the work staged, and the next commit a
 		// human makes in the store would absorb it — the mirror of the
 		// absorption the pathspec scoping exists to prevent. Unstaging also
-		// drops any pre-gesture staging of these exact paths, which for a
+		// drops any pre-existing staging of these exact paths, which for a
 		// just-written destination and a just-removed candidate is no real loss.
 		runGit(root, append([]string{"reset", "-q", "--"}, pathspec...)...)
 		return fmt.Errorf("git commit: %s", gitCause(out, err))
@@ -157,17 +176,17 @@ func commitKnowledge(paths, droppable []string, message string) error {
 	return nil
 }
 
-// recordKnowledgeCommit commits a gesture and returns "" on success or a short
-// reason on failure. A failure is never silent: the failure is appended to
+// recordKnowledgeCommit commits one unit of work and returns "" on success or a
+// short reason on failure. A failure is never silent: the failure is appended to
 // knowledgeGitLogPath() in full, and its head handed back for the status line,
 // which is gone by the next keystroke.
-func recordKnowledgeCommit(paths, droppable []string, message string) string {
-	message = sanitizeRecord(message)
-	err := commitKnowledge(paths, droppable, message)
+func recordKnowledgeCommit(root string, paths, droppable []string, message string) string {
+	message = SanitizeRecord(message)
+	err := commitKnowledge(root, paths, droppable, message)
 	if err == nil {
 		return ""
 	}
-	reason := recordKnowledgeFailure(message, err)
+	reason := logFailure(message, err)
 	// Both no-repo shapes degrade the same way; the sentinel text is the whole
 	// status-line reason, since the enclosing path detail belongs in the log.
 	if errors.Is(err, errNoGitRepo) {
@@ -179,33 +198,33 @@ func recordKnowledgeCommit(paths, droppable []string, message string) string {
 	return reason
 }
 
-// recordKnowledgeFailure writes one gesture failure to knowledgeGitLogPath() in
-// full and returns its head for the status line, which is gone by the next
-// keystroke. Shared by the commit and by the log.md append reject records into,
-// so both failures reach the same two places. The message is sanitized here —
-// idempotent on text a caller already sanitized — so the bound a record shares
-// with the commit subject is applied once, at the boundary both failures pass
-// through, rather than in each caller; the flattening half of the invariant
-// sits lower still, in appendKnowledgeGitLog.
-func recordKnowledgeFailure(message string, err error) string {
-	message = sanitizeRecord(message)
+// logFailure writes one failure to knowledgeGitLogPath() in full and returns its
+// head for the status line, which is gone by the next keystroke. Shared by the
+// commit and by the write errors Apply reports, so both failures reach the same
+// two places. The message is sanitized here — idempotent on text a caller
+// already sanitized — so the bound a record shares with the commit subject is
+// applied once, at the boundary both failures pass through, rather than in each
+// caller; the flattening half of the invariant sits lower still, in
+// appendKnowledgeGitLog.
+func logFailure(message string, err error) string {
+	message = SanitizeRecord(message)
 	// Flattened but not bounded: the log is the debugging mechanism for this
-	// gesture, so it keeps every line the failure produced as one record.
+	// store, so it keeps every line the failure produced as one record.
 	appendKnowledgeGitLog(message + ": " + flattenRecord(err.Error()))
 	return shortGit(err.Error())
 }
 
-// sanitizeRecord flattens a gesture message into a single bounded record — the
-// commit subject, which is also the body of the knowledge-git log line. The
-// bound counts runes, not bytes: a non-ASCII id near the limit would otherwise
-// be cut mid-rune, writing invalid UTF-8 into the very record flattenRecord
-// exists to keep readable.
-func sanitizeRecord(message string) string {
+// SanitizeRecord flattens a message into a single bounded record — the commit
+// subject, which is also the body of the knowledge-git log line, and the shape
+// the store's own log.md entries are held to. The bound counts runes, not bytes:
+// a non-ASCII id near the limit would otherwise be cut mid-rune, writing invalid
+// UTF-8 into the very record flattenRecord exists to keep readable.
+func SanitizeRecord(message string) string {
 	flat := []rune(flattenRecord(message))
-	if len(flat) <= gestureMessageMax {
+	if len(flat) <= MessageMax {
 		return string(flat)
 	}
-	return string(flat[:gestureMessageMax-1]) + "…"
+	return string(flat[:MessageMax-1]) + "…"
 }
 
 // flattenRecord maps every rune that could break a one-line record onto a space:
@@ -246,8 +265,8 @@ func appendKnowledgeGitLog(line string) {
 }
 
 // sameDir reports whether two paths name the same directory. Both sides are
-// resolved first: git reports an absolute physical path while KnowledgeRoot()
-// hands back LOOM_KNOWLEDGE_ROOT verbatim, which may be relative, and on macOS
+// resolved first: git reports an absolute physical path while the root arrives
+// as the caller resolved it, which may be relative, and on macOS
 // a store under /var/folders comes back as /private/var/folders — the raw
 // strings would never compare equal either way.
 func sameDir(a, b string) bool {
@@ -277,4 +296,29 @@ func resolveDir(p string) (string, error) {
 func shortGit(out string) string {
 	first, _, _ := strings.Cut(out, "\n")
 	return truncate(first, gitReasonMax)
+}
+
+// shortenPath and truncate are the TUI's display helpers, duplicated here rather
+// than imported: the store is written by the CLI and the extractor too, and
+// importing internal/tui for two string functions would drag the whole
+// fullscreen model in behind them.
+func shortenPath(p string) string {
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" && strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+func truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"loom/internal/knowledge"
+	"loom/internal/knowledge/store"
 )
 
 // Artifact is the corpus artifact shape, owned by the knowledge package.
@@ -176,7 +177,8 @@ func (m knowledgeModel) update(msg tea.Msg) (knowledgeModel, tea.Cmd) {
 
 // promote and reject act on the selected candidate; both close the detail
 // sub-view and trigger a reload so the moved file leaves the list. edit shells
-// out to $EDITOR for any selected artifact and reloads on return.
+// out to $EDITOR for any selected artifact, records what it wrote, and reloads
+// on return.
 func (m knowledgeModel) promote() (knowledgeModel, tea.Cmd) {
 	a := m.selected()
 	if a == nil {
@@ -232,16 +234,40 @@ func (m knowledgeModel) edit() (knowledgeModel, tea.Cmd) {
 		return m, statusCmd("$VISUAL/$EDITOR not set")
 	}
 	cmd := exec.Command(editor, a.Path)
+	edited := *a
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return statusMsg("editor exited: " + err.Error())
 		}
+		warn := commitEdit(edited)
 		arts, e := LoadKnowledge()
 		if e != nil {
 			return errMsg(e)
 		}
-		return knowledgeLoadedMsg(arts)
+		return knowledgeEditedMsg{artifacts: arts, warn: warn}
 	})
+}
+
+// commitEdit records an artifact $EDITOR has just written. The file was written
+// outside the store's Tx, so the path is declared rather than written and the
+// commit is the store's either way — which is what keeps the edit from being a
+// gesture with commit code of its own. Returns "" or the reason the commit did
+// not land, which degrades like every other gesture: a status-line reason, the
+// whole failure in knowledge-git.log, and never a block on the reload. An editor
+// quit without saving leaves nothing to commit and is not a failure; the store
+// decides that, since a declared path that did not change is not an edit-only
+// case.
+func commitEdit(a Artifact) string {
+	warn, err := store.Apply(gestureMessage("edit", a), func(tx *store.Tx) error {
+		return tx.Touch(a.Path)
+	})
+	if err != nil {
+		// The store refused to record the path at all — it is not in the store,
+		// or not content. Nothing was committed, so this degrades onto the status
+		// line like a failed commit rather than reading as a clean edit.
+		return store.ShortReason(err)
+	}
+	return warn
 }
 
 func (m knowledgeModel) detailRows() int {

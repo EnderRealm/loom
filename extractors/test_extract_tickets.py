@@ -354,11 +354,12 @@ class EmitCandidatesTest(unittest.TestCase):
         )}
 
         with tempfile.TemporaryDirectory() as tmp:
-            written = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
+            # emit_candidates builds the writes; the store performs them.
+            changes = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
                                       "low", session, [TICKET, OTHER_TICKET])
 
-            self.assertEqual(len(written), 1)
-            parsed = parse_truth(written[0].read_text(), source=str(written[0]))
+            self.assertEqual(len(changes), 1)
+            parsed = parse_truth(changes[0]["body"], source=changes[0]["path"])
 
         self.assertTrue(parsed["valid"])
         self.assertEqual(parsed["source_sessions"], [session])
@@ -379,11 +380,11 @@ class EmitCandidatesTest(unittest.TestCase):
         )}
 
         with tempfile.TemporaryDirectory() as tmp:
-            written = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
+            changes = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
                                       "low", session, [TICKET])
 
-            self.assertEqual(len(written), 1)
-            parsed = parse_truth(written[0].read_text(), source=str(written[0]))
+            self.assertEqual(len(changes), 1)
+            parsed = parse_truth(changes[0]["body"], source=changes[0]["path"])
 
         self.assertIn(f"sources: []\nsources:\n  - session: {session}\n"
                       f"  - ticket: {TICKET}\n", parsed["raw"])

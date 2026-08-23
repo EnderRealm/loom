@@ -456,6 +456,14 @@ var runExtractor = func(ctx context.Context, script, input, scope, kind string) 
 	// extract.py defaults the store to ~/.loom/knowledge; pin it so candidates
 	// land in the same store the TUI reads under a non-default LOOM_HOME.
 	cmd.Env = append(os.Environ(), EnvKnowledgeRoot+"="+knowledgeRoot())
+	// extract.py writes the store through `loom knowledge write` rather than
+	// touching it directly. Pin that binary to the one running here: the
+	// LaunchAgent's PATH may carry a stale loom or none at all, and a sweep must
+	// write through the same build it was launched from. A binary we cannot name
+	// is left to the child's own PATH lookup, which reports its own failure.
+	if self, err := os.Executable(); err == nil {
+		cmd.Env = append(cmd.Env, EnvLoomBin+"="+self)
+	}
 	out, runErr := cmd.CombinedOutput()
 
 	data, err := os.ReadFile(jsonOut)

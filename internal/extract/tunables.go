@@ -23,6 +23,12 @@ const (
 	EnvModel         = "LOOM_EXTRACT_MODEL"
 )
 
+// EnvLoomBin names the binary extract.py writes the knowledge store through.
+// Not a tunable: it is resolved per run from the running executable, so it is
+// neither persisted nor baked into the plist, where it would pin a build that
+// the updater has since replaced.
+const EnvLoomBin = "LOOM_BIN"
+
 // tunableKeys is the persisted set, and the set baked into the plist.
 var tunableKeys = []string{EnvExtractorsDir, EnvKnowledgeRoot, EnvProvider, EnvModel}
 

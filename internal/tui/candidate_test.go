@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"loom/internal/config"
+	"loom/internal/knowledge/store"
 )
 
 const candidateFixture = `---
@@ -42,24 +43,19 @@ const logFixture = `# Ingest Log
 Append-only chronological record of extraction events and store changes. Format: one ` + "`## [YYYY-MM-DD]`" + ` entry per event with a one-line summary.
 `
 
-func seedCandidate(t *testing.T) (root string, art Artifact) {
-	t.Helper()
-	return seedCandidateIn(t, t.TempDir())
-}
-
-// seedCandidateIn seeds the fixture into the given knowledge root and points
-// the store at it. LOOM_HOME is redirected too, so a gesture that can't commit
+// seedCandidate seeds the fixture into a fresh knowledge root and points the
+// store at it. LOOM_HOME is redirected too, so a gesture that can't commit
 // writes knowledge-git.log into the test's own state root rather than the
 // developer's ~/.loom.
-func seedCandidateIn(t *testing.T, root string) (string, Artifact) {
+func seedCandidate(t *testing.T) (string, Artifact) {
 	t.Helper()
+	root := t.TempDir()
 	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
 	t.Setenv("LOOM_HOME", t.TempDir())
 	// Isolate every git these tests run — the code under test included — from
-	// the developer's config: a global core.hooksPath (husky, a dotfiles
-	// checkout) would disable the pre-commit hook a test depends on, and
-	// init.templateDir would seed repos we did not ask for. Repo-local config
-	// is then the only identity source.
+	// the developer's config: init.templateDir would seed repos we did not ask
+	// for, and a global identity would mask a fixture that configures none.
+	// Repo-local config is then the only identity source.
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 
@@ -204,16 +200,26 @@ func testGit(t *testing.T, root string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// requireRefFormatFiles skips on a git that predates --ref-format (2.45), whose
+// testGit would otherwise die inside the fixture and read as a failure of the
+// code under test.
+func requireRefFormatFiles(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("git", "-C", t.TempDir(), "init", "--ref-format=files").Run(); err != nil {
+		t.Skip("git does not support --ref-format")
+	}
+}
+
 // seedGitCandidate seeds the fixture into a knowledge root that is a git repo
 // with the candidate committed, so a gesture has a HEAD to build on. Identity
 // is configured repo-locally; the host's global git config is never written.
-func seedGitCandidate(t *testing.T) (root string, art Artifact) {
+func seedGitCandidate(t *testing.T, initArgs ...string) (root string, art Artifact) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
 	root, art = seedCandidate(t)
-	testGit(t, root, "init")
+	testGit(t, root, append([]string{"init"}, initArgs...)...)
 	testGit(t, root, "config", "user.email", "test@example.com")
 	testGit(t, root, "config", "user.name", "loom test")
 	testGit(t, root, "add", "-A")
@@ -299,131 +305,6 @@ func TestPromoteUntrackedCandidateCommits(t *testing.T) {
 // (a right-to-left override and a bidi isolate).
 const forgedID = "loom-notify-state\ninjected: forged\x07\u202e\u2066"
 
-func TestPromoteCommitSubjectIsOneLine(t *testing.T) {
-	root, art := seedGitCandidate(t)
-	art.ID = forgedID
-
-	if _, warn, err := promoteCandidate(art); err != nil || warn != "" {
-		t.Fatalf("promoteCandidate: err=%v warn=%s", err, warn)
-	}
-
-	body := testGit(t, root, "log", "-1", "--format=%B")
-	if strings.Contains(body, "\n") {
-		t.Errorf("commit message spans multiple lines:\n%q", body)
-	}
-	if strings.Contains(body, "\x07") {
-		t.Errorf("commit message retains a control character:\n%q", body)
-	}
-	if strings.ContainsAny(body, "\u202e\u2066") {
-		t.Errorf("commit message retains a bidi format character:\n%q", body)
-	}
-}
-
-func TestPromoteLogRecordIsOneLine(t *testing.T) {
-	// A non-repo store, so the gesture degrades and writes the log line.
-	_, art := seedCandidate(t)
-	art.ID = forgedID
-
-	if _, warn, err := promoteCandidate(art); err != nil || warn == "" {
-		t.Fatalf("promoteCandidate: err=%v warn=%q, want a degraded commit", err, warn)
-	}
-
-	logged, err := os.ReadFile(filepath.Join(config.Home(), "knowledge-git.log"))
-	if err != nil {
-		t.Fatalf("knowledge-git.log: %v", err)
-	}
-	if n := strings.Count(string(logged), "\n"); n != 1 {
-		t.Errorf("expected 1 log record, got %d:\n%q", n, string(logged))
-	}
-	if strings.Contains(string(logged), "\x07") {
-		t.Errorf("log record retains a control character:\n%q", string(logged))
-	}
-	if strings.ContainsAny(string(logged), "\u202e\u2066") {
-		t.Errorf("log record retains a bidi format character:\n%q", string(logged))
-	}
-}
-
-// TestPromoteLogRecordKeepsFullGitOutput pins the log to git's whole output: a
-// rejected commit leads with a line that says nothing, so a record cut to the
-// first line would drop the reason the log exists to preserve.
-func TestPromoteLogRecordKeepsFullGitOutput(t *testing.T) {
-	root, art := seedGitCandidate(t)
-	hook := filepath.Join(root, ".git", "hooks", "pre-commit")
-	script := "#!/bin/sh\necho 'checking things'\necho 'rejected: policy check failed'\nexit 1\n"
-	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	dest, warn, err := promoteCandidate(art)
-	if err != nil {
-		t.Fatalf("promoteCandidate: %v", err)
-	}
-	if warn == "" {
-		t.Fatal("expected a degraded commit, got a clean promote")
-	}
-	// The failed commit left nothing staged: an index still holding the
-	// gesture's paths would be absorbed by the next commit made in the store.
-	// Read via --cached, not status --porcelain, whose index and worktree
-	// columns differ by one leading space and are indistinguishable once the
-	// output is trimmed.
-	if staged := testGit(t, root, "diff", "--cached", "--name-only", "--", dest, art.Path); staged != "" {
-		t.Errorf("failed commit left the gesture staged:\n%s", staged)
-	}
-	// The gesture itself still landed in the working tree.
-	if st := testGit(t, root, "status", "--porcelain", "-uall", "--", dest, art.Path); st == "" {
-		t.Error("gesture paths are clean after a failed commit")
-	}
-	// The status line carries only the head of the failure.
-	if strings.Contains(warn, "policy check failed") {
-		t.Errorf("status reason is not bounded to the failure head: %q", warn)
-	}
-
-	logged, err := os.ReadFile(filepath.Join(config.Home(), "knowledge-git.log"))
-	if err != nil {
-		t.Fatalf("knowledge-git.log: %v", err)
-	}
-	if !strings.Contains(string(logged), "policy check failed") {
-		t.Errorf("log record dropped the cause below git's first line:\n%q", string(logged))
-	}
-	if n := strings.Count(string(logged), "\n"); n != 1 {
-		t.Errorf("expected 1 log record, got %d:\n%q", n, string(logged))
-	}
-}
-
-func TestPromoteCandidateLeavesDirtUncommitted(t *testing.T) {
-	root, art := seedGitCandidate(t)
-
-	// Pre-existing working-tree dirt of both kinds the live store carries.
-	untracked := filepath.Join(root, "_candidates", "truths", "loom", "unrelated--20260101-000000.md")
-	if err := os.WriteFile(untracked, []byte("untracked\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	modified := filepath.Join(root, "index.md")
-	if err := os.WriteFile(modified, []byte("seeded\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	testGit(t, root, "add", "--", modified)
-	testGit(t, root, "commit", "-m", "seed index")
-	if err := os.WriteFile(modified, []byte("seeded\nedited\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, warn, err := promoteCandidate(art); err != nil || warn != "" {
-		t.Fatalf("promoteCandidate: err=%v warn=%s", err, warn)
-	}
-
-	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
-	if strings.Contains(names, "index.md") || strings.Contains(names, "unrelated--") {
-		t.Errorf("commit absorbed pre-existing dirt:\n%s", names)
-	}
-	// -uall: with the candidate committed away, _candidates/ holds only the
-	// untracked file and porcelain would otherwise collapse it to the directory.
-	st := testGit(t, root, "status", "--porcelain", "-uall")
-	if !strings.Contains(st, "index.md") || !strings.Contains(st, "unrelated--") {
-		t.Errorf("pre-existing dirt no longer dirty after promote:\n%s", st)
-	}
-}
-
 func TestRejectCandidateCommits(t *testing.T) {
 	root, art := seedGitCandidate(t)
 
@@ -508,33 +389,6 @@ func TestRejectCandidateIgnoredArchiveCommits(t *testing.T) {
 	}
 }
 
-// TestRejectIgnoredTrackedCandidateCommitsRemoval pins the drop to the paths the
-// caller declared droppable. A store can ignore its candidates while still
-// carrying ones tracked from before the rule; the source's removal is the
-// record, so it stays in the pathspec however the ignore rules read, and a
-// dropped deletion would leave a phantom candidate in history forever.
-func TestRejectIgnoredTrackedCandidateCommitsRemoval(t *testing.T) {
-	root, art := seedGitCandidate(t)
-	// A file pattern rather than "_candidates/": git add refuses an ignored
-	// *directory* named in a pathspec even when the file under it is tracked,
-	// so a directory rule fails the whole gesture loudly at the add and leaves
-	// no commit to inspect. The file pattern ignores the same candidates while
-	// letting the tracked deletion through, which is the branch under test.
-	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("_candidates/**/*.md\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	testGit(t, root, "add", "--", filepath.Join(root, ".gitignore"))
-	testGit(t, root, "commit", "-m", "ignore the candidate files")
-
-	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
-		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
-	}
-	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
-	if !strings.Contains(names, "D\t_candidates/truths/loom/loom-notify-state-default-path--20260426-100856.md") {
-		t.Errorf("commit does not delete the tracked candidate:\n%s", names)
-	}
-}
-
 // TestPromoteIgnoredDestinationDegrades is the other side of the drop: a
 // promote declares nothing droppable, because the promoted file is the record.
 // A store whose rules cover the validated tree has to fail loudly rather than
@@ -594,7 +448,7 @@ func TestRejectCandidateLeavesDirtUncommitted(t *testing.T) {
 	// appends entries and never commits them, so a reject's file-granular
 	// pathspec folds whatever is pending into its own commit.
 	pending := "\n## [2026-08-16] extract 92118425 | loom | 8 truth candidate(s)\n"
-	if err := appendRejectLog(filepath.Join(root, "log.md"), pending); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "log.md"), []byte(logFixture+pending), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -662,8 +516,8 @@ func TestRejectLogEntryLongIDKeepsTail(t *testing.T) {
 	if !strings.Contains(entry, "| loom | truth candidate "+filepath.Base(dest)+" archived") {
 		t.Errorf("entry lost its tail to a long id:\n%q", entry)
 	}
-	if n := len([]rune(entry)); n > gestureMessageMax {
-		t.Errorf("entry is %d runes, want at most %d:\n%q", n, gestureMessageMax, entry)
+	if n := len([]rune(entry)); n > store.MessageMax {
+		t.Errorf("entry is %d runes, want at most %d:\n%q", n, store.MessageMax, entry)
 	}
 }
 
@@ -693,7 +547,7 @@ func TestRejectLogEntryKeepsBasenameSuffix(t *testing.T) {
 
 // TestRejectLogEntryBoundsFitTheLine composes an entry with every field at its
 // bound: the fixed scaffolding plus the four bounds has to land inside
-// gestureMessageMax, or sanitizeRecord backstops the composed line by cutting
+// store.MessageMax, or store.SanitizeRecord backstops the composed line by cutting
 // the tail — the failure the per-field bounds exist to prevent.
 func TestRejectLogEntryBoundsFitTheLine(t *testing.T) {
 	entry := strings.TrimSpace(rejectLogEntry(Artifact{
@@ -702,8 +556,8 @@ func TestRejectLogEntryBoundsFitTheLine(t *testing.T) {
 		Type:  strings.Repeat("c", logFieldTypeMax),
 		Path:  strings.Repeat("d", logFieldBaseMax),
 	}))
-	if n := len([]rune(entry)); n != gestureMessageMax {
-		t.Errorf("worst-case entry is %d runes, want exactly %d:\n%q", n, gestureMessageMax, entry)
+	if n := len([]rune(entry)); n != store.MessageMax {
+		t.Errorf("worst-case entry is %d runes, want exactly %d:\n%q", n, store.MessageMax, entry)
 	}
 	if !strings.HasSuffix(entry, " archived") {
 		t.Errorf("worst-case entry was cut by the backstop:\n%q", entry)
@@ -786,13 +640,17 @@ func TestRejectMissingLogDegrades(t *testing.T) {
 // TestRejectCommitFailureKeepsArchive: the archive is in the pathspec now, so a
 // failed commit has to degrade like every other knowledge-store commit failure
 // — the file stays archived, log.md keeps the entry, and neither is rolled back
-// to buy a tidy history. A failing pre-commit hook fails the commit itself,
-// leaving the `git add` over the pathspec alone.
+// to buy a tidy history. The commit is failed by a stale lock on the branch ref,
+// which git refuses at the commit while leaving the `git add` before it alone;
+// the store pins hooks off, so the pre-commit hook cannot force this. The lock
+// path is the loose-files ref backend's, so the fixture pins that backend rather
+// than inheriting the host's default.
 func TestRejectCommitFailureKeepsArchive(t *testing.T) {
-	root, art := seedGitCandidate(t)
+	requireRefFormatFiles(t)
+	root, art := seedGitCandidate(t, "--ref-format=files")
 	head := testGit(t, root, "rev-parse", "HEAD")
-	hook := filepath.Join(root, ".git", "hooks", "pre-commit")
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+	branch := testGit(t, root, "symbolic-ref", "--short", "HEAD")
+	if err := os.WriteFile(filepath.Join(root, ".git", "refs", "heads", branch+".lock"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -827,92 +685,96 @@ func TestRejectCommitFailureKeepsArchive(t *testing.T) {
 	}
 }
 
-func TestPromoteCandidateNonRepoDegrades(t *testing.T) {
-	// seedCandidate's root is a bare temp dir, not a git repo.
-	_, art := seedCandidate(t)
+// TestEditCommits: the edit is not a third gesture with commit code of its own.
+// $EDITOR writes the file, commitEdit declares the path it wrote, and the store
+// records it like any other unit of work.
+func TestEditCommits(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	if err := os.WriteFile(art.Path, []byte(candidateFixture+"\nEdited by hand.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	dest, warn, err := promoteCandidate(art)
-	if err != nil {
-		t.Fatalf("promoteCandidate: %v", err)
+	if warn := commitEdit(art); warn != "" {
+		t.Fatalf("edit in a git store did not commit: %s", warn)
 	}
-	// The gesture still lands; only the record is missing.
-	if _, err := os.Stat(dest); err != nil {
-		t.Errorf("promoted file missing: %v", err)
+
+	if subject := testGit(t, root, "log", "-1", "--format=%s"); subject != "edit truth loom/"+art.ID {
+		t.Errorf("commit subject = %q, want the edited artifact's type, scope and id", subject)
 	}
-	if _, err := os.Stat(art.Path); !os.IsNotExist(err) {
-		t.Errorf("source still present after promote: %v", err)
+	names := testGit(t, root, "show", "--name-status", "--format=", "HEAD")
+	if !strings.Contains(names, "M\t_candidates/truths/loom/loom-notify-state-default-path--20260426-100856.md") {
+		t.Errorf("commit does not record the edited file:\n%s", names)
 	}
-	if !strings.Contains(warn, "not a git repo") {
-		t.Errorf("warn = %q, want a not-a-git-repo reason", warn)
-	}
-	logged, err := os.ReadFile(filepath.Join(config.Home(), "knowledge-git.log"))
-	if err != nil {
-		t.Fatalf("knowledge-git.log: %v", err)
-	}
-	if !strings.Contains(string(logged), art.ID) {
-		t.Errorf("log line does not name the gesture: %q", string(logged))
+	if st := testGit(t, root, "status", "--porcelain", "--", art.Path); st != "" {
+		t.Errorf("edited path still dirty after the edit:\n%s", st)
 	}
 }
 
-// TestPromoteCandidateMissingGitDegrades points PATH at an empty directory, so
-// git cannot be run at all. The store is a perfectly good repo, and neither the
-// status line nor the log may attribute the failure to its layout.
-func TestPromoteCandidateMissingGitDegrades(t *testing.T) {
+// TestEditWithoutChangesLeavesNoCommit: quitting $EDITOR without saving is
+// likely the most common use of the gesture, and the declared path is then a
+// file that did not change. It must read as nothing to record rather than as a
+// failed one — no status-line reason, no record in knowledge-git.log.
+func TestEditWithoutChangesLeavesNoCommit(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	head := testGit(t, root, "rev-parse", "HEAD")
+
+	if warn := commitEdit(art); warn != "" {
+		t.Fatalf("an edit that changed nothing reported %q", warn)
+	}
+
+	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
+		t.Errorf("HEAD moved for an edit that changed nothing: %s -> %s", head, now)
+	}
+	if _, err := os.Stat(filepath.Join(config.Home(), "knowledge-git.log")); !os.IsNotExist(err) {
+		t.Errorf("an edit that changed nothing wrote a failure record: %v", err)
+	}
+}
+
+// TestPromoteWithAnUnremovableCandidateStillLands: the promoted file is written
+// and committed before the candidate is dropped, so a failure at the removal is
+// a gesture that landed with an incomplete record — not "promote failed", which
+// would leave the candidate listed and the next attempt refused for a
+// destination that is now there.
+func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root, art := seedGitCandidate(t)
+	// Removing a file needs write permission on its directory, not on the file.
+	dir := filepath.Dir(art.Path)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	// Restored before the temp directory's own cleanup, which runs after this.
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	dest, warn, err := promoteCandidate(art)
+
+	if err != nil {
+		t.Fatalf("promote reported a failure for a gesture that landed: %v", err)
+	}
+	if dest == "" {
+		t.Fatal("promote returned no destination for a file it wrote")
+	}
+	if warn == "" {
+		t.Error("promote reported a clean record despite the candidate surviving")
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("promoted file missing: %v", err)
+	}
+	if names := testGit(t, root, "show", "--name-status", "--format=", "HEAD"); !strings.Contains(names, "A\ttruths/loom/notify-state-default-path.md") {
+		t.Errorf("the write that landed was not committed:\n%s", names)
+	}
+}
+
+// TestEditOutsideTheStoreDegrades: the store can refuse the path itself, and an
+// edit that recorded nothing must reach the status line rather than read as a
+// clean one.
+func TestEditOutsideTheStoreDegrades(t *testing.T) {
 	_, art := seedGitCandidate(t)
-	t.Setenv("PATH", t.TempDir())
+	art.Path = filepath.Join(t.TempDir(), "elsewhere.md")
 
-	dest, warn, err := promoteCandidate(art)
-	if err != nil {
-		t.Fatalf("promoteCandidate: %v", err)
-	}
-	if _, err := os.Stat(dest); err != nil {
-		t.Errorf("promoted file missing: %v", err)
-	}
-	if strings.Contains(warn, errNoGitRepo.Error()) {
-		t.Errorf("warn blames the store's layout for a git that would not run: %q", warn)
-	}
-	if !strings.Contains(warn, "git") {
-		t.Errorf("warn = %q, want a reason naming git", warn)
-	}
-	logged, err := os.ReadFile(filepath.Join(config.Home(), "knowledge-git.log"))
-	if err != nil {
-		t.Fatalf("knowledge-git.log: %v", err)
-	}
-	if !strings.Contains(string(logged), exec.ErrNotFound.Error()) {
-		t.Errorf("log record does not record the missing binary:\n%q", string(logged))
-	}
-}
-
-func TestPromoteCandidateEnclosingRepoDegrades(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not on PATH")
-	}
-	// The store is a plain subdirectory of a repo — the shape a git-managed
-	// home directory produces. rev-parse walks up to the parent, which must
-	// not receive the gesture.
-	parent := t.TempDir()
-	testGit(t, parent, "init")
-	testGit(t, parent, "config", "user.email", "test@example.com")
-	testGit(t, parent, "config", "user.name", "loom test")
-	testGit(t, parent, "commit", "--allow-empty", "-m", "seed parent")
-	head := testGit(t, parent, "rev-parse", "HEAD")
-
-	_, art := seedCandidateIn(t, filepath.Join(parent, "knowledge"))
-
-	dest, warn, err := promoteCandidate(art)
-	if err != nil {
-		t.Fatalf("promoteCandidate: %v", err)
-	}
-	if _, err := os.Stat(dest); err != nil {
-		t.Errorf("promoted file missing: %v", err)
-	}
-	if !strings.Contains(warn, "inside another git repo") {
-		t.Errorf("warn = %q, want an enclosing-repo reason", warn)
-	}
-	if now := testGit(t, parent, "rev-parse", "HEAD"); now != head {
-		t.Errorf("enclosing repo HEAD moved: %s -> %s", head, now)
-	}
-	if log := testGit(t, parent, "log", "--format=%s"); strings.Contains(log, art.ID) {
-		t.Errorf("enclosing repo recorded the gesture:\n%s", log)
+	if warn := commitEdit(art); warn == "" {
+		t.Error("an edit the store refused reported a clean record")
 	}
 }

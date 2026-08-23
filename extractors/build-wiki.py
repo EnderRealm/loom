@@ -11,7 +11,6 @@ Usage:
 """
 
 import argparse
-import os
 import re
 import sys
 from collections import defaultdict
@@ -19,11 +18,14 @@ from pathlib import Path
 
 LOOM_ROOT = Path(__file__).resolve().parent.parent
 
-# Knowledge store lives outside the loom repo. Override with LOOM_KNOWLEDGE_ROOT.
-KNOWLEDGE_DIR = Path(os.environ.get(
-    "LOOM_KNOWLEDGE_ROOT",
-    str(Path.home() / ".loom" / "knowledge"),
-)).expanduser()
+sys.path.insert(0, str(LOOM_ROOT / "extractors"))
+from knowledge_store import (StoreWriteError, apply_changes, knowledge_root,
+                             write_change)
+
+# Knowledge store lives outside the loom repo. Override with
+# LOOM_KNOWLEDGE_ROOT; resolved by the client, so the index is written under the
+# store loom writes.
+KNOWLEDGE_DIR = knowledge_root()
 
 # Artifact type directories (training only — eval is not part of the wiki)
 ARTIFACT_TYPES = {
@@ -170,9 +172,19 @@ def main():
     if args.dry_run:
         print(index_md)
     else:
+        # Written through the store's own entry point, which commits what it
+        # wrote: a generated index that never reaches history reads as a corpus
+        # standing still. Nothing here knows about git — that is the point.
         out = KNOWLEDGE_DIR / "index.md"
-        out.write_text(index_md)
+        try:
+            reason = apply_changes("build-wiki index.md", [write_change(out, index_md)])
+        except StoreWriteError as exc:
+            # One line, as extract.py does: a missing binary is an environment
+            # the caller has to fix, not a traceback to read.
+            sys.exit(f"knowledge store write failed: {exc}")
         print(f"wrote {out} ({len(index_md)} chars)")
+        if reason:
+            print(f"knowledge store not committed: {reason}", file=sys.stderr)
 
 
 if __name__ == "__main__":

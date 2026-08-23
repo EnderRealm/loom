@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -145,6 +146,63 @@ func TestRetrospectAppendsOneLogEntryPerRun(t *testing.T) {
 	if got := strings.Count(string(data), "] retrospect "); got != 1 {
 		t.Fatalf("log.md has %d entries, want exactly one per run:\n%s", got, data)
 	}
+}
+
+// TestRetrospectCommitsItsLogEntry: the entry is written and committed by the
+// same code as every other write to the store — internal/knowledge/store — so
+// the run's record reaches the store's history rather than sitting in its
+// working tree. ApplyIn is what makes that possible here: the run resolves the
+// store through the extractor's tunables, and the commit has to be held against
+// that same root.
+func TestRetrospectCommitsItsLogEntry(t *testing.T) {
+	e := newRetroEnv(t, "loom")
+	logPath := writeKnowledgeLog(t)
+	root := initKnowledgeRepo(t)
+	e.addSessionWithCommits("s1", loomRemote, "["+retroTicket+"] Add the command")
+
+	if err := Retrospect(RetrospectOptions{TicketID: retroTicket}); err != nil {
+		t.Fatalf("Retrospect: %v", err)
+	}
+
+	want := fmt.Sprintf("retrospect %s | loom | 2 truth candidates, 2 decision candidates", retroTicket)
+	if subject := testGit(t, root, "log", "-1", "--format=%s"); subject != want {
+		t.Fatalf("commit subject = %q, want %q", subject, want)
+	}
+	if names := testGit(t, root, "show", "--name-only", "--format=", "HEAD"); !strings.Contains(names, "log.md") {
+		t.Fatalf("commit does not record the entry:\n%s", names)
+	}
+	if st := testGit(t, root, "status", "--porcelain", "--", logPath); st != "" {
+		t.Fatalf("log.md still dirty after the run:\n%s", st)
+	}
+}
+
+// initKnowledgeRepo makes the knowledge root a git repo with its bootstrapped
+// log.md committed, as the live store is. Global git config is isolated so the
+// fixture does not inherit the developer's identity, hooks or templates.
+func initKnowledgeRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	root := knowledgeRoot()
+	testGit(t, root, "init")
+	testGit(t, root, "config", "user.email", "test@example.com")
+	testGit(t, root, "config", "user.name", "loom test")
+	testGit(t, root, "add", "-A")
+	testGit(t, root, "commit", "-m", "seed store")
+	return root
+}
+
+func testGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	full := append([]string{"-C", root, "-c", "commit.gpgsign=false"}, args...)
+	out, err := exec.Command("git", full...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // One type failing must cost neither the other type nor the sessions after it,
