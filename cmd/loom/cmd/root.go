@@ -29,6 +29,9 @@ Knowledge:
   knowledge write              Apply one JSON write plan (stdin) to the knowledge
                                  store, committing what it touched
 
+Reports:
+  work-report [--since|--until]  /work-run compliance metrics from summaries.db, as JSON
+
 Lifecycle:
   install <component>          Install a launchd agent for the running loom binary
                                  server | receiver | summarizer | shipper
