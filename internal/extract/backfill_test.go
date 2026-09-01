@@ -131,7 +131,7 @@ func TestBackfillDryRunReportsEveryExclusion(t *testing.T) {
 	e.addSession("f1", forgeRemote)
 	e.addSession("ghost", "https://github.com/EnderRealm/ghostwheel.git")
 	e.addSession("bare", "")
-	e.addSessionAs(summary.AgentCodex, "rollout", loomRemote, "")
+	e.addSessionAs(summary.AgentCodex, "rollout", loomRemote, "", 0)
 
 	st, err := loadState()
 	if err != nil {
@@ -158,6 +158,44 @@ func TestBackfillDryRunReportsEveryExclusion(t *testing.T) {
 	}
 	if len(reloaded.Sessions) != 1 {
 		t.Fatalf("ledger = %v, want only the pre-seeded record", reloaded.Sessions)
+	}
+}
+
+// The threshold is a filter over the same selection, not a change to what is
+// eligible: at 0 the plan is what it was before the filter existed, and at 3
+// only the sessions below it move — the one at the threshold is selected, and a
+// session whose turn count is unknown is never a stub.
+func TestBackfillExcludesSessionsBelowTheTurnThreshold(t *testing.T) {
+	e := newEnv(t, "loom")
+	e.historical()
+	e.addSessionWithTurns("one-turn", loomRemote, 1)
+	e.addSessionWithTurns("at-threshold", loomRemote, 3)
+	e.addSessionWithTurns("long", loomRemote, 40)
+	e.addSession("unknown-turns", loomRemote)
+	e.clearTurnCount("unknown-turns")
+
+	backfill(context.Background(), Options{Backfill: true, DryRun: true})
+	if want := "backfill dry run: scanned 4/4 sessions, 4 to extract (loom=4)"; !strings.Contains(e.logs.String(), want) {
+		t.Fatalf("log missing %q; got:\n%s", want, e.logs.String())
+	}
+	if strings.Contains(e.logs.String(), reasonBelowTurns) {
+		t.Fatalf("--min-turns 0 excluded a session:\n%s", e.logs.String())
+	}
+	if strings.Contains(e.logs.String(), "min-turns=") {
+		t.Fatalf("a disabled threshold was reported as in force:\n%s", e.logs.String())
+	}
+
+	e.logs.Reset()
+	backfill(context.Background(), Options{Backfill: true, DryRun: true, MinTurns: 3})
+
+	logs := e.logs.String()
+	for _, want := range []string{
+		"backfill dry run: scanned 4/4 sessions, 3 to extract (loom=3) via git-remote=3 min-turns=3",
+		"backfill dry run: 1 excluded (below turn threshold=1)",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("log missing %q; got:\n%s", want, logs)
+		}
 	}
 }
 

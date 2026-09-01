@@ -25,7 +25,13 @@ func newExtractCmd() *cobra.Command {
 			opts.Scopes, _ = cmd.Flags().GetStringSlice("scope")
 			opts.Limit, _ = cmd.Flags().GetInt("limit")
 			opts.DryRun, _ = cmd.Flags().GetBool("dry-run")
+			opts.MinTurns, _ = cmd.Flags().GetInt("min-turns")
 
+			// A negative threshold reads as "disabled" to the selection, which
+			// is what 0 already says; rejecting it keeps the one spelling.
+			if opts.MinTurns < 0 {
+				return fmt.Errorf("--min-turns must not be negative (0 disables the threshold)")
+			}
 			// The selection treats any non-positive limit as unbounded, so a
 			// mistyped negative bound would run the whole backlog at real LLM
 			// cost. Zero is the flag's own default and keeps meaning unbounded.
@@ -55,6 +61,10 @@ func newExtractCmd() *cobra.Command {
 	f.StringSlice("scope", nil, "backfill only these knowledge scopes (repeatable, or comma-separated)")
 	f.Int("limit", 0, "backfill at most this many sessions (0 means unbounded)")
 	f.Bool("dry-run", false, "report what a backfill would extract without running it")
+	// Applies to a sweep as well as a backfill, so it is deliberately outside
+	// the backfill-only guard above. Its default is the persisted tunable, so
+	// the LaunchAgent's threshold is retunable without a rebuilt plist.
+	f.Int("min-turns", extract.DefaultMinTurns(), "skip sessions with fewer turns than this (0 disables the threshold)")
 
 	return cmd
 }

@@ -77,6 +77,7 @@ var statusCmd = &cobra.Command{
 			notes: []string{
 				scriptNote,
 				fmt.Sprintf("model     = %s:%s", es.Provider, es.Model),
+				fmt.Sprintf("min-turns = %d", es.MinTurns),
 				"knowledge = " + es.KnowledgeRoot,
 			},
 			role:     role,

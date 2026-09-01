@@ -62,6 +62,13 @@ const (
 	defaultModel    = "sonnet"
 )
 
+// defaultMinTurns is the turn count below which a session is a stub not worth a
+// round trip. Measured over 467 extracted sessions: 1- and 2-turn sessions
+// yield zero candidates 44% and 50% of the time against 13% at 3–4 turns and 7%
+// at 5+, and mean 2.7/1.9 candidates against 4.2/5.9 — a cliff between 2 and 3.
+// Tunable, since the corpus a host accumulates decides where its own cliff is.
+const defaultMinTurns = 3
+
 // extract.py's --extract-type values (its TYPE_CONFIG keys). Named because a
 // retrospect runs both and keys its per-type candidate counts off the same
 // values.
@@ -82,6 +89,11 @@ type Options struct {
 	Watch    bool
 	Interval time.Duration
 	Idle     time.Duration
+
+	// MinTurns excludes sessions the summarizer folded fewer turns for than
+	// this; a session at the threshold is selected. Zero or less disables the
+	// filter, which reproduces the selection that predates it.
+	MinTurns int
 
 	// Backfill covers the historical backlog the watermark excludes. It is
 	// operator-initiated — one pass, no watch loop, no maxPerSweep cap — and
@@ -200,7 +212,17 @@ func Run(opts Options) error {
 }
 
 type sweepResult struct {
-	extracted, skipped, failed, deferred int
+	extracted, skipped, failed, deferred, belowThreshold int
+}
+
+// belowMinTurns reports whether the threshold excludes this session. An unknown
+// turn count fails open: turn_count is nullable, and a row carrying no count is
+// a session of unknown size rather than a stub.
+func belowMinTurns(s summaries.SessionSource, minTurns int) bool {
+	if minTurns <= 0 || !s.TurnCountKnown {
+		return false
+	}
+	return s.TurnCount < minTurns
 }
 
 func sweep(ctx context.Context, opts Options) sweepResult {
@@ -244,6 +266,15 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 			markSkip(st, s, fmt.Sprintf("unsupported agent %q (preprocess.py reads claude-code jsonl only)", s.Agent))
 			continue
 		}
+		if belowMinTurns(s, opts.MinTurns) {
+			// Not marked, unlike the sweep's other skips: the ledger is
+			// permanent, so recording this would keep the session out after the
+			// threshold is lowered — the one decision a threshold must stay
+			// reversible on. Re-deciding it each tick is a map lookup and an
+			// int compare, and the count below keeps it visible.
+			r.belowThreshold++
+			continue
+		}
 		info, err := os.Stat(s.SourcePath)
 		if err != nil {
 			r.skipped++
@@ -278,8 +309,8 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 		r.extracted++
 	}
 
-	log.Printf("sweep sessions=%d extracted=%d skipped=%d failed=%d deferred=%d",
-		len(sessions), r.extracted, r.skipped, r.failed, r.deferred)
+	log.Printf("sweep sessions=%d extracted=%d skipped=%d failed=%d deferred=%d below-min-turns=%d",
+		len(sessions), r.extracted, r.skipped, r.failed, r.deferred, r.belowThreshold)
 	return r
 }
 

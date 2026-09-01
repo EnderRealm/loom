@@ -20,6 +20,7 @@ import (
 const (
 	reasonVisited      = "already visited"
 	reasonAgent        = "unsupported agent"
+	reasonBelowTurns   = "below turn threshold"
 	reasonUnreadable   = "artifact unreadable"
 	reasonActive       = "still being written"
 	reasonNoRemote     = "no git remote"
@@ -101,6 +102,11 @@ func backfill(ctx context.Context, opts Options) backfillResult {
 	// derivations are accounted for.
 	if len(plan.bySource) > 0 {
 		line += " via " + formatCounts(plan.bySource)
+	}
+	// Stated only when the threshold is in force: two dry runs at different
+	// thresholds otherwise leave indistinguishable lines in extractor.log.
+	if opts.MinTurns > 0 {
+		line += fmt.Sprintf(" min-turns=%d", opts.MinTurns)
 	}
 	log.Print(line)
 	if len(plan.excluded) > 0 {
@@ -193,6 +199,12 @@ func planBackfill(st *state, sessions []summaries.SessionSource, opts Options) b
 		if s.Agent != string(summary.AgentClaude) {
 			excluded[reasonAgent]++
 			logSkip(s, fmt.Sprintf("unsupported agent %q (preprocess.py reads claude-code jsonl only)", s.Agent))
+			continue
+		}
+		if belowMinTurns(s, opts.MinTurns) {
+			// Counted but not logged, as with reasonVisited: at the default
+			// threshold this is most of the DB.
+			excluded[reasonBelowTurns]++
 			continue
 		}
 		info, err := os.Stat(s.SourcePath)

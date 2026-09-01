@@ -6,6 +6,16 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Knowledge extraction skips stub sessions: `loom extract --min-turns N`
+  (tunable through `LOOM_EXTRACT_MIN_TURNS`, default 3, `0` disables)
+  excludes sessions the summarizer folded fewer than N turns for, on
+  both the sweep and the backfill. The exclusion is not recorded in
+  `extract.state`, so changing the threshold re-admits the sessions it
+  passed over, and the backfill dry run reports the excluded count as
+  its own bucket so a threshold can be chosen from data.
+
 ### Changed
 
 - Every write to the knowledge store now goes through one entry point —

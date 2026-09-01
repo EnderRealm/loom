@@ -2,8 +2,10 @@ package extract
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"loom/internal/config"
@@ -21,6 +23,7 @@ const (
 	EnvKnowledgeRoot = "LOOM_KNOWLEDGE_ROOT"
 	EnvProvider      = "LOOM_EXTRACT_PROVIDER"
 	EnvModel         = "LOOM_EXTRACT_MODEL"
+	EnvMinTurns      = "LOOM_EXTRACT_MIN_TURNS"
 )
 
 // EnvLoomBin names the binary extract.py writes the knowledge store through.
@@ -30,7 +33,7 @@ const (
 const EnvLoomBin = "LOOM_BIN"
 
 // tunableKeys is the persisted set, and the set baked into the plist.
-var tunableKeys = []string{EnvExtractorsDir, EnvKnowledgeRoot, EnvProvider, EnvModel}
+var tunableKeys = []string{EnvExtractorsDir, EnvKnowledgeRoot, EnvProvider, EnvModel, EnvMinTurns}
 
 // Settings is the extractor's effective configuration — what a sweep will
 // actually use, as opposed to whatever the invoking shell exports. Reported
@@ -40,6 +43,7 @@ type Settings struct {
 	KnowledgeRoot string
 	Provider      string
 	Model         string
+	MinTurns      int
 }
 
 // CurrentSettings resolves every tunable, defaults applied.
@@ -49,7 +53,25 @@ func CurrentSettings() Settings {
 		KnowledgeRoot: knowledgeRoot(),
 		Provider:      tunableOr(EnvProvider, defaultProvider),
 		Model:         tunableOr(EnvModel, defaultModel),
+		MinTurns:      DefaultMinTurns(),
 	}
+}
+
+// DefaultMinTurns resolves the --min-turns default, so the agent's threshold
+// can be retuned through its plist without a rebuild. A value that isn't a
+// turn count falls back to the built-in default: an unattended agent must keep
+// sweeping through a typo'd tunable rather than exit on it.
+func DefaultMinTurns() int {
+	v := tunable(EnvMinTurns)
+	if v == "" {
+		return defaultMinTurns
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		log.Printf("%s=%s is not a turn count; using %d", EnvMinTurns, logSafe(v), defaultMinTurns)
+		return defaultMinTurns
+	}
+	return n
 }
 
 // PersistTunables writes the resolved tunables under LOOM_HOME and returns

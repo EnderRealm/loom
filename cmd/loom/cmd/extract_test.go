@@ -40,6 +40,24 @@ func TestExtractRejectsNegativeLimit(t *testing.T) {
 	}
 }
 
+func TestExtractRejectsNegativeMinTurns(t *testing.T) {
+	err := runExtract(t, "--min-turns", "-1")
+	if err == nil {
+		t.Fatal("--min-turns -1 accepted; 0 is the one spelling of a disabled threshold")
+	}
+	if !strings.Contains(err.Error(), "--min-turns") {
+		t.Fatalf("error %v does not name the offending flag", err)
+	}
+}
+
+// The threshold applies to a sweep as well as a backfill, so it must not be
+// caught by the backfill-only guard below.
+func TestExtractAcceptsMinTurnsWithoutBackfill(t *testing.T) {
+	if err := runExtract(t, "--min-turns", "5"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
 // The guard is on the flag being passed, not on its value: --limit 0 and
 // --dry-run=false read as "unset" if judged by value, so a sweep would silently
 // accept them.

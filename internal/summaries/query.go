@@ -249,6 +249,11 @@ type SessionSource struct {
 	SourcePath string
 	GitRemote  string
 	CwdRaw     string // sidecar-captured raw cwd, the checkout the session ran in
+	// TurnCount is how many turns the summarizer folded, valid only when
+	// TurnCountKnown: the column is nullable, and a row that carries no count
+	// must not read as a zero-turn session.
+	TurnCount      int
+	TurnCountKnown bool
 }
 
 // LoadSessionSources returns every summarized session that still records its
@@ -270,7 +275,7 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 	defer db.Close()
 
 	rows, err := db.Query(`
-		SELECT agent, session_id, source_path, git_remote, cwd_raw
+		SELECT agent, session_id, source_path, git_remote, cwd_raw, turn_count
 		FROM sessions
 		WHERE source_path IS NOT NULL AND source_path != ''
 		  AND summarized_at >= ?
@@ -288,13 +293,16 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 			sourcePath sql.NullString
 			gitRemote  sql.NullString
 			cwdRaw     sql.NullString
+			turnCount  sql.NullInt64
 		)
-		if err := rows.Scan(&s.Agent, &s.SessionID, &sourcePath, &gitRemote, &cwdRaw); err != nil {
+		if err := rows.Scan(&s.Agent, &s.SessionID, &sourcePath, &gitRemote, &cwdRaw, &turnCount); err != nil {
 			return nil, err
 		}
 		s.SourcePath = sourcePath.String
 		s.GitRemote = gitRemote.String
 		s.CwdRaw = cwdRaw.String
+		s.TurnCount = int(turnCount.Int64)
+		s.TurnCountKnown = turnCount.Valid
 		out = append(out, s)
 	}
 	return out, rows.Err()

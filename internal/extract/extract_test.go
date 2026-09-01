@@ -3,6 +3,7 @@ package extract
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 	"unicode"
+
+	_ "modernc.org/sqlite"
 
 	"loom/internal/config"
 	"loom/internal/parse/summary"
@@ -84,24 +87,46 @@ func (e *env) setWatermark(at time.Time) {
 // summarizer does, and writes the artifact the trigger feeds to the extractor.
 func (e *env) addSession(sessionID, gitRemote string) string {
 	e.t.Helper()
-	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, "")
+	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, "", 0)
 }
 
 // addSessionIn records the checkout the session ran in as well, which is what
 // the marker derivation resolves against.
 func (e *env) addSessionIn(sessionID, gitRemote, cwdRaw string) string {
 	e.t.Helper()
-	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, cwdRaw)
+	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, cwdRaw, 0)
+}
+
+// addSessionWithTurns folds a session of that many turns, which is what the
+// --min-turns threshold reads: the store writes turn_count as len(sum.Turns).
+func (e *env) addSessionWithTurns(sessionID, gitRemote string, turns int) string {
+	e.t.Helper()
+	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, "", turns)
+}
+
+// clearTurnCount nulls a session's turn_count. No write path produces NULL —
+// the store writes a count for every session — but the column is nullable, so
+// the threshold still has to decide on a row that carries none.
+func (e *env) clearTurnCount(sessionID string) {
+	e.t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(config.Home(), "summaries.db"))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE sessions SET turn_count = NULL WHERE session_id = ?`, sessionID); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // addSessionWithCommits records the commit subjects the session landed too,
 // which is what a ticket id is resolved back to sessions through.
 func (e *env) addSessionWithCommits(sessionID, gitRemote string, subjects ...string) string {
 	e.t.Helper()
-	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, "", subjects...)
+	return e.addSessionAs(summary.AgentClaude, sessionID, gitRemote, "", 0, subjects...)
 }
 
-func (e *env) addSessionAs(agent summary.Agent, sessionID, gitRemote, cwdRaw string, subjects ...string) string {
+func (e *env) addSessionAs(agent summary.Agent, sessionID, gitRemote, cwdRaw string, turns int, subjects ...string) string {
 	e.t.Helper()
 	received := filepath.Join(config.Home(), "received", string(agent), "proj")
 	if err := os.MkdirAll(received, 0o755); err != nil {
@@ -122,6 +147,11 @@ func (e *env) addSessionAs(agent summary.Agent, sessionID, gitRemote, cwdRaw str
 	}
 	defer st.Close()
 	sum := &summary.SessionSummary{SessionID: sessionID, Agent: agent}
+	// turn_count is written as len(sum.Turns), so the threshold's input has to
+	// travel the same fold. Idx is the turns table's key, so it must be unique.
+	for i := 0; i < turns; i++ {
+		sum.Turns = append(sum.Turns, summary.Turn{Idx: i, TurnID: fmt.Sprintf("turn-%d", i)})
+	}
 	// Commits reach summaries.db the way the summarizer puts them there: derived
 	// from git's confirmation line in a bash result, one per call so each carries
 	// its own committed_at.
@@ -189,6 +219,38 @@ func TestSweepSkipsUnresolvableScopes(t *testing.T) {
 	}
 }
 
+// Most of the corpus is one- and two-turn stubs, and each costs a full round
+// trip to learn nothing from. The exclusion is deliberately not recorded, so
+// lowering the threshold later re-admits what a higher one passed over.
+func TestSweepSkipsSessionsBelowTheTurnThreshold(t *testing.T) {
+	e := newEnv(t, "loom")
+	stub := e.addSessionWithTurns("stub", loomRemote, 2)
+	keep := e.addSessionWithTurns("keep", loomRemote, 3)
+
+	sweep(context.Background(), Options{MinTurns: 3})
+
+	want := "loom " + keep
+	if len(e.runs) != 1 || e.runs[0] != want {
+		t.Fatalf("runs = %v, want exactly [%q] — 3 turns is at the threshold, 2 is below it", e.runs, want)
+	}
+	if !strings.Contains(e.logs.String(), "below-min-turns=1") {
+		t.Fatalf("sweep summary doesn't account for the threshold:\n%s", e.logs.String())
+	}
+	st, err := loadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if _, ok := st.Sessions[sessionKey("claude-code", "stub")]; ok {
+		t.Fatalf("ledger = %v, want no record for a session excluded by the threshold", st.Sessions)
+	}
+
+	// Which is what makes the threshold reversible: at 0 the stub is swept.
+	sweep(context.Background(), Options{})
+	if len(e.runs) != 2 || e.runs[1] != "loom "+stub {
+		t.Fatalf("runs = %v, want the stub extracted once the threshold is disabled", e.runs)
+	}
+}
+
 func TestSweepDefersActiveSessions(t *testing.T) {
 	e := newEnv(t, "loom")
 	e.addSession("live", "https://github.com/EnderRealm/loom.git")
@@ -207,7 +269,7 @@ func TestSweepDefersActiveSessions(t *testing.T) {
 
 func TestSweepSkipsUnsupportedAgents(t *testing.T) {
 	e := newEnv(t, "loom")
-	e.addSessionAs(summary.AgentCodex, "rollout-1", "https://github.com/EnderRealm/loom.git", "")
+	e.addSessionAs(summary.AgentCodex, "rollout-1", "https://github.com/EnderRealm/loom.git", "", 0)
 
 	sweep(context.Background(), Options{})
 
@@ -249,7 +311,7 @@ func TestSweepEscapesHostileIdentityInTheLog(t *testing.T) {
 			e.addSession(okID, remote)
 			e.addSession(failID, remote)
 			e.addSession(skipID, "")
-			e.addSessionAs(summary.Agent("codex-cli"+tc.injected), "rollout", remote, "")
+			e.addSessionAs(summary.Agent("codex-cli"+tc.injected), "rollout", remote, "", 0)
 
 			orig := runExtractor
 			runExtractor = func(ctx context.Context, script, input, scope, _ string) (extractRun, error) {
@@ -469,6 +531,36 @@ func TestPersistedTunablesSurviveAnEmptyEnvironment(t *testing.T) {
 	}
 	if m := CurrentSettings().Model; m != "opus" {
 		t.Fatalf("model = %q, want the persisted value", m)
+	}
+}
+
+// The agent's threshold is retuned through its plist, so an operator's typo
+// reaches DefaultMinTurns rather than a compiler. 0 is a real value — it
+// disables the filter — and must not be confused with an absent tunable.
+func TestDefaultMinTurnsResolvesTheTunable(t *testing.T) {
+	cases := []struct {
+		env  string
+		want int
+	}{
+		{env: "", want: 3},
+		{env: "0", want: 0},
+		{env: "5", want: 5},
+		{env: "abc", want: 3},
+		{env: "-1", want: 3},
+	}
+	for _, tc := range cases {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			// A persisted extract-env under the real LOOM_HOME would otherwise
+			// stand in for the unset case.
+			t.Setenv("LOOM_HOME", t.TempDir())
+			t.Setenv(EnvMinTurns, tc.env)
+			log.SetOutput(&bytes.Buffer{})
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			if got := DefaultMinTurns(); got != tc.want {
+				t.Fatalf("DefaultMinTurns() = %d with %s=%q, want %d", got, EnvMinTurns, tc.env, tc.want)
+			}
+		})
 	}
 }
 
