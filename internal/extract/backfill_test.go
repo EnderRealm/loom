@@ -423,7 +423,7 @@ func TestBackfillSkipsSessionsClaimedMidRun(t *testing.T) {
 		t.Fatalf("load state: %v", err)
 	}
 	orig := runExtractor
-	runExtractor = func(_ context.Context, script, input, scope, _ string) (extractRun, error) {
+	runExtractor = func(_ context.Context, _, script, input, scope, _ string) (extractRun, error) {
 		e.runs = append(e.runs, scope+" "+input)
 		// While the first extraction is in flight, the trigger claims
 		// everything the backfill has not reached yet.
@@ -527,7 +527,7 @@ func TestBackfillResumesAfterInterruption(t *testing.T) {
 	defer cancel()
 	var interrupted string
 	orig := runExtractor
-	runExtractor = func(_ context.Context, script, input, scope, _ string) (extractRun, error) {
+	runExtractor = func(_ context.Context, _, script, input, scope, _ string) (extractRun, error) {
 		e.runs = append(e.runs, scope+" "+input)
 		if len(e.runs) == 2 {
 			interrupted = scope + " " + input
@@ -607,7 +607,7 @@ func TestBackfillLogsEachOutcome(t *testing.T) {
 	fail := e.addSession("fail", loomRemote)
 
 	orig := runExtractor
-	runExtractor = func(ctx context.Context, script, input, scope, _ string) (extractRun, error) {
+	runExtractor = func(ctx context.Context, _, script, input, scope, _ string) (extractRun, error) {
 		e.runs = append(e.runs, scope+" "+input)
 		if strings.HasPrefix(filepath.Base(input), "fail") {
 			return extractRun{}, errExtractorFailed

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
@@ -31,6 +32,7 @@ sys.path.insert(0, str(LOOM_ROOT / "extractors"))
 from knowledge_store import (StoreWriteError, append_change, apply_changes,
                              knowledge_root, write_change)
 from preprocess import preprocess as preprocess_jsonl
+from redact import log_redaction, redact_with_report
 from resolve_project import describe as describe_project, resolve_project
 
 # Knowledge store lives outside the loom repo so it survives reinstalls and
@@ -40,6 +42,13 @@ KNOWLEDGE_ROOT = knowledge_root()
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
 EXAMPLE_DELIMITER = "\n\n===REFERENCE-EXAMPLE===\n\n"
+
+# The markers the prompts substitute their untrusted regions between — the
+# transcript, and the few-shot block. The prompt files hold the same literals;
+# fence_input neutralizes them in whatever is substituted. Case-insensitive:
+# the markers are the prompt's, but the text being fenced is the transcript's,
+# and `</SESSION-INPUT>` reads as a delimiter to a model.
+FENCE_RE = re.compile(r"</?(?:session-input|reference-example)>", re.IGNORECASE)
 
 # Per-type configuration: prompt, directories, sentinel.
 # `candidates` mirrors the validated tree's type-first layout
@@ -87,14 +96,25 @@ Key patterns to watch for in raw transcripts:
 Unlike summaries, raw transcripts do NOT have curated `### Discoveries` sections. You must find the signal in the conversation flow. Expect more noise — but also richer evidence and corrections that summaries sometimes miss."""
 
 
-def load_reference_truths_from(scope_dir: Path) -> list[dict]:
+def load_reference_truths_from(scope_dir: Path, label: str = "reference examples") -> list[dict]:
     if not scope_dir.exists():
         return []
     truths = []
+    counts = Counter()
+    chars = 0
     for path in sorted(scope_dir.glob("*.md")):
         if path.name.startswith("_"):
             continue
-        truths.append(parse_truth(path.read_text(), source=str(path)))
+        # Policy enforcement point: a reference example is itself
+        # transcript-derived, and the store predates this rule and is
+        # hand-editable, so it is redacted on load rather than at the one use we
+        # remember — the few-shot block goes to a provider.
+        # See docs/transcript-trust-and-redaction.md.
+        text, found, n = redact_with_report(path.read_text())
+        counts.update(found)
+        chars += n
+        truths.append(parse_truth(text, source=str(path)))
+    log_redaction(label, counts, chars)
     return truths
 
 
@@ -207,8 +227,27 @@ def _extract_session_id(input_path: Path) -> str:
     return ""
 
 
+def fence_input(text: str) -> str:
+    """Defang the prompt's delimiters inside the text substituted between them.
+
+    The prompts substitute a transcript between `<session-input>` markers and
+    the few-shot block between `<reference-example>` markers, and both are
+    ordinary text that can contain either marker — a closing one would put
+    whatever follows it outside the span the prompt declares untrusted. The
+    defanged form is visible rather than a lookalike character, so a reader sees
+    what the text actually said.
+
+    This covers the two spans of substituted text, not every substitution the
+    template makes: `{SESSION_ID}` is a loom-derived id and does not pass
+    through here. See docs/transcript-trust-and-redaction.md.
+    """
+    return FENCE_RE.sub(lambda m: "<\\" + m.group(0)[1:], text)
+
+
 def build_prompt(template: str, refs: list[dict], input_text: str, today: str, input_format: str = "summary", session_id: str = "") -> str:
-    ref_block = EXAMPLE_DELIMITER.join(r["raw"] for r in refs)
+    # Reference examples are transcript-derived too: fenced for the same reason
+    # they are redacted, so a marker in a promoted truth cannot close the span.
+    ref_block = fence_input(EXAMPLE_DELIMITER.join(r["raw"] for r in refs))
     guidance = INPUT_GUIDANCE_RAW if input_format == "raw" else INPUT_GUIDANCE_SUMMARY
     session_value = session_id or "<session uuid from input frontmatter>"
     return (
@@ -216,7 +255,7 @@ def build_prompt(template: str, refs: list[dict], input_text: str, today: str, i
         .replace("{INPUT_GUIDANCE}", guidance)
         .replace("{REFERENCE_EXAMPLES}", ref_block)
         .replace("{SESSION_ID}", session_value)
-        .replace("{INPUT}", input_text)
+        .replace("{INPUT}", fence_input(input_text))
         .replace("{TODAY}", today)
     )
 
@@ -565,6 +604,8 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
 
     resolved_out = out_dir.resolve()
     changes = []
+    counts = Counter()
+    chars = 0
     for c in candidates:
         cid = c.get("id") or ""
         if not CANDIDATE_ID_RE.match(cid):
@@ -583,7 +624,14 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
             "extracted_at": extracted_at,
             "extracted_by": extracted_by,
         })
+        # Policy enforcement point on the output side: a secret that reached the
+        # model some other way — a hand-edited store, a model echo — still never
+        # lands in the store. See docs/transcript-trust-and-redaction.md.
+        body, found, n = redact_with_report(body)
+        counts.update(found)
+        chars += n
         changes.append(write_change(path, body))
+    log_redaction("candidates", counts, chars)
     return changes
 
 
@@ -880,7 +928,7 @@ def main():
     # default: score against training set (same as examples — legacy mode).
     if args.benchmark:
         eval_dir = eval_root / args.scope
-        all_eval_refs = load_reference_truths_from(eval_dir)
+        all_eval_refs = load_reference_truths_from(eval_dir, label="eval refs")
         if not all_eval_refs:
             sys.exit(f"no eval truths in {eval_dir} — cannot benchmark without eval set")
 
@@ -926,7 +974,11 @@ def main():
         input_text = preprocess_jsonl(str(input_path))
         print(f"[extract] preprocessed: {len(input_text):,} chars", file=sys.stderr)
     else:
-        input_text = input_path.read_text()
+        # Policy enforcement point: summary input bypasses preprocess(), so the
+        # redaction it would have applied happens here instead. See
+        # docs/transcript-trust-and-redaction.md.
+        input_text, counts, chars = redact_with_report(input_path.read_text())
+        log_redaction("summary input", counts, chars)
 
     # Two-stage pipeline: summarize the preprocessed transcript before extraction.
     # Only applies to raw input. Summary input is already compressed.
@@ -937,7 +989,7 @@ def main():
         sum_model = args.summarize_model or args.model
         sum_reasoning = args.summarize_reasoning or args.reasoning
         sum_template = SUMMARIZER_PATH.read_text()
-        sum_prompt = sum_template.replace("{INPUT}", input_text)
+        sum_prompt = sum_template.replace("{INPUT}", fence_input(input_text))
         print(f"[extract] summarizing with {sum_provider}:{sum_model} (reasoning={sum_reasoning})...", file=sys.stderr)
         sum_start = time.time()
         summary_text = call_llm(sum_prompt, sum_provider, sum_model, sum_reasoning)

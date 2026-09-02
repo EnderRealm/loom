@@ -8,6 +8,30 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A stated trust and redaction policy for transcript-derived artifacts,
+  in `docs/transcript-trust-and-redaction.md`, with the redaction half
+  implemented at the extraction path's choke points.
+  `extractors/redact.py` holds an ordered table of credential shapes
+  (PEM blocks, provider keys, github/slack/AWS/Google tokens, JWTs,
+  bearer credentials, URL passwords, and secret-named assignments); each
+  match becomes `[REDACTED:<kind>]`. It is applied in
+  `preprocess.preprocess()` (every raw-jsonl consumer), in `extract.py`'s
+  summary-input branch (which bypasses the pre-processor), on the
+  few-shot reference examples read back out of the knowledge store, and
+  on each candidate body before it is written — and on each tool result
+  before `--max-result-chars` truncates it, since a key cut mid-token can
+  fall below its pattern's minimum length. A marker is the same size
+  whether it replaced one character or forty thousand, so each stage also
+  prints a per-kind span and character count, and the sweep re-logs those
+  lines from the child's stderr on a successful run — they were
+  previously discarded with the rest of the child's output — so an
+  over-broad pattern shows up in `extractor.log` rather than only in what
+  a candidate is missing. The extractor prompts now substitute the
+  transcript inside `<session-input>` markers and the few-shot examples
+  inside `<reference-example>` markers, both neutralized in the
+  substituted text by `fence_input()` so neither can close its span
+  early, and state the stance the doc records: agent- and tool-authored
+  text is data to summarize or extract from, never instructions.
 - Knowledge extraction skips stub sessions: `loom extract --min-turns N`
   (tunable through `LOOM_EXTRACT_MIN_TURNS`, default 3, `0` disables)
   excludes sessions the summarizer folded fewer than N turns for, on

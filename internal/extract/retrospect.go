@@ -138,7 +138,7 @@ func Retrospect(opts RetrospectOptions) error {
 			log.Printf("retrospect %s: extract %s/%s type=%s scope=%s source=%s input=%s", ticketID,
 				logSafe(s.Agent), logSafe(s.SessionID), kind, res.scope, res.source, logSafe(s.SourcePath))
 			start := time.Now()
-			run, err := runExtractor(ctx, script, s.SourcePath, res.scope, kind)
+			run, err := runExtractor(ctx, logKey(s), script, s.SourcePath, res.scope, kind)
 			if err != nil {
 				if ctx.Err() != nil {
 					log.Printf("retrospect %s: %s/%s %s: interrupted", ticketID,

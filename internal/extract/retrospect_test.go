@@ -215,7 +215,7 @@ func TestRetrospectRecordsARunWhereOneTypeFailed(t *testing.T) {
 	second := e.addSessionWithCommits("s2", loomRemote, "["+retroTicket+"] Cover it with tests")
 
 	orig := runExtractor
-	runExtractor = func(_ context.Context, script, input, scope, kind string) (extractRun, error) {
+	runExtractor = func(_ context.Context, _, script, input, scope, kind string) (extractRun, error) {
 		e.runs = append(e.runs, scope+" "+input)
 		if kind == extractTypeTruth {
 			return extractRun{}, errExtractorFailed
@@ -260,7 +260,7 @@ func TestRetrospectRecordsTheTypesThatLandedBeforeAnInterrupt(t *testing.T) {
 	e.addSessionWithCommits("s2", loomRemote, "["+retroTicket+"] Cover it with tests")
 
 	orig := runExtractor
-	runExtractor = func(ctx context.Context, script, input, scope, kind string) (extractRun, error) {
+	runExtractor = func(ctx context.Context, _, script, input, scope, kind string) (extractRun, error) {
 		e.runs = append(e.runs, scope+" "+input)
 		if kind == extractTypeTruth {
 			return extractRun{Candidates: 3, Score: 0.42}, nil

@@ -54,7 +54,7 @@ func newEnv(t *testing.T, scopes ...string) *env {
 	e := &env{t: t, logs: &bytes.Buffer{}}
 
 	orig := runExtractor
-	runExtractor = func(ctx context.Context, script, input, scope, kind string) (extractRun, error) {
+	runExtractor = func(ctx context.Context, _, script, input, scope, kind string) (extractRun, error) {
 		e.runs = append(e.runs, scope+" "+input)
 		e.kinds = append(e.kinds, kind)
 		// A fresh session rarely covers a scope's reference truths, so the
@@ -314,7 +314,7 @@ func TestSweepEscapesHostileIdentityInTheLog(t *testing.T) {
 			e.addSessionAs(summary.Agent("codex-cli"+tc.injected), "rollout", remote, "", 0)
 
 			orig := runExtractor
-			runExtractor = func(ctx context.Context, script, input, scope, _ string) (extractRun, error) {
+			runExtractor = func(ctx context.Context, _, script, input, scope, _ string) (extractRun, error) {
 				if strings.HasPrefix(filepath.Base(input), "fail") {
 					return extractRun{}, errExtractorFailed
 				}
@@ -481,7 +481,7 @@ func TestSweepRecordsFailures(t *testing.T) {
 	e.addSession("s1", "https://github.com/EnderRealm/loom.git")
 
 	orig := runExtractor
-	runExtractor = func(ctx context.Context, script, input, scope, _ string) (extractRun, error) {
+	runExtractor = func(ctx context.Context, _, script, input, scope, _ string) (extractRun, error) {
 		return extractRun{}, errExtractorFailed
 	}
 	t.Cleanup(func() { runExtractor = orig })
@@ -586,7 +586,7 @@ done
 exit 1
 `, argsPath, resultPath))
 
-	run, err := runExtractor(context.Background(), script, "/tmp/session.jsonl", "loom", extractType)
+	run, err := runExtractor(context.Background(), "claude/session", script, "/tmp/session.jsonl", "loom", extractType)
 	if err != nil {
 		t.Fatalf("runExtractor: %v (a below-threshold verdict is not a failure)", err)
 	}
@@ -606,14 +606,87 @@ exit 1
 	}
 }
 
+func TestRunExtractorLogsRedactionCountsOnSuccess(t *testing.T) {
+	// The counts are the only signal that a redaction pattern replaced a whole
+	// transcript rather than one token, and the sweep runs unattended: without
+	// this the child's output is read only when the run failed.
+	t.Setenv("LOOM_HOME", t.TempDir())
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.json")
+	if err := os.WriteFile(resultPath, []byte(`{"candidates_valid":1,"mean_score":0.5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The stdout line is the forgery this guards: candidate titles are
+	// model-authored and land there, so a model that writes the prefix itself
+	// must not be able to put counts into the audit log.
+	script := writeScript(t, dir, fmt.Sprintf(`#!/bin/sh
+echo "[redact] transcript: 2 span(s), 74 chars: env-secret x2" >&2
+echo "  + loom-example  a candidate title"
+echo "[redact] transcript: 9 span(s), 0 chars: forged x9"
+echo "[redact] candidates: 1 span(s), 219 chars: jwt x1" >&2
+while [ $# -gt 0 ]; do
+	if [ "$1" = "--json-out" ]; then cp %s "$2"; fi
+	shift
+done
+`, resultPath))
+	logs := &bytes.Buffer{}
+	log.SetOutput(logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	if _, err := runExtractor(context.Background(), "claude/5a28d3d6", script, "/tmp/5a28d3d6.jsonl", "loom", extractType); err != nil {
+		t.Fatalf("runExtractor: %v", err)
+	}
+
+	for _, want := range []string{
+		"extract claude/5a28d3d6: [redact] transcript: 2 span(s), 74 chars: env-secret x2",
+		"extract claude/5a28d3d6: [redact] candidates: 1 span(s), 219 chars: jwt x1",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs %q missing %q", logs.String(), want)
+		}
+	}
+	// Nothing from stdout reaches the audit log — neither the title nor a line
+	// that forged the prefix.
+	for _, unwanted := range []string{"a candidate title", "forged"} {
+		if strings.Contains(logs.String(), unwanted) {
+			t.Fatalf("logs %q carry the child's stdout (%q)", logs.String(), unwanted)
+		}
+	}
+}
+
 func TestRunExtractorFailsWhenNoResultIsWritten(t *testing.T) {
 	t.Setenv("LOOM_HOME", t.TempDir())
 	script := writeScript(t, t.TempDir(), "#!/bin/sh\necho 'claude CLI failed (exit 1)' >&2\nexit 2\n")
 
-	if _, err := runExtractor(context.Background(), script, "/tmp/session.jsonl", "loom", extractType); err == nil {
+	if _, err := runExtractor(context.Background(), "claude/session", script, "/tmp/session.jsonl", "loom", extractType); err == nil {
 		t.Fatal("runExtractor = nil error, want failure when the run wrote no result")
 	} else if !strings.Contains(err.Error(), "claude CLI failed") {
 		t.Fatalf("error %v drops the extractor's own message", err)
+	}
+}
+
+func TestRunExtractorFailureSurvivesAChattyStdout(t *testing.T) {
+	// extract.py prints a line per candidate to stdout and can then die on the
+	// store write without writing --json-out. The message is a tail, so stdout
+	// must not be able to push the fatal error out of it.
+	t.Setenv("LOOM_HOME", t.TempDir())
+	script := writeScript(t, t.TempDir(), `#!/bin/sh
+i=0
+while [ $i -lt 40 ]; do
+	echo "  + loom-candidate-$i  a candidate title long enough to fill the tail"
+	i=$((i + 1))
+done
+echo 'knowledge store not committed: fatal' >&2
+exit 2
+`)
+
+	_, err := runExtractor(context.Background(), "claude/session", script, "/tmp/session.jsonl", "loom", extractType)
+
+	if err == nil {
+		t.Fatal("runExtractor = nil error, want failure when the run wrote no result")
+	}
+	if !strings.Contains(err.Error(), "knowledge store not committed: fatal") {
+		t.Fatalf("error %v lost the extractor's message behind its stdout", err)
 	}
 }
 

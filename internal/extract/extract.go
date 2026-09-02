@@ -12,6 +12,7 @@
 package extract
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -322,7 +323,7 @@ func extractOne(ctx context.Context, st *state, script string, s summaries.Sessi
 	log.Printf("extract %s/%s scope=%s source=%s input=%s", logSafe(s.Agent), logSafe(s.SessionID),
 		res.scope, res.source, logSafe(s.SourcePath))
 	start := time.Now()
-	run, err := runExtractor(ctx, script, s.SourcePath, res.scope, extractType)
+	run, err := runExtractor(ctx, logKey(s), script, s.SourcePath, res.scope, extractType)
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Printf("extract %s/%s: interrupted", logSafe(s.Agent), logSafe(s.SessionID))
@@ -351,6 +352,13 @@ func extractOne(ctx context.Context, st *state, script string, s summaries.Sessi
 func markSkip(st *state, s summaries.SessionSource, reason string) {
 	logSkip(s, reason)
 	st.mark(s.Agent, s.SessionID, record{Outcome: outcomeSkipped, Reason: reason})
+}
+
+// logKey is the `<agent>/<session>` identity the extractor's forwarded output is
+// logged under, matching how the sweep's own lines about a session spell it.
+// Distinct from state.go's sessionKey, which is the ledger's.
+func logKey(s summaries.SessionSource) string {
+	return logSafe(s.Agent) + "/" + logSafe(s.SessionID)
 }
 
 // logSkip escapes the reason as well as the identity: the "artifact
@@ -386,21 +394,21 @@ func logSafe(s string) string {
 // (VALUE_ECHO_LIMIT).
 const scopeEchoLimit = 40
 
-// boundEcho cuts a value to scopeEchoLimit and reports whether it cut.
-// Characters rather than bytes: resolve_project.py slices its own echo by
-// character, so both echo the same 40 characters of the same name, and a byte
-// cut would also split a multi-byte rune into \xNN escape noise.
-func boundEcho(s string) (string, bool) {
-	if utf8.RuneCountInString(s) <= scopeEchoLimit {
+// boundEcho cuts a value to limit and reports whether it cut. Characters rather
+// than bytes: resolve_project.py slices its own echo by character, so both echo
+// the same 40 characters of the same name, and a byte cut would also split a
+// multi-byte rune into \xNN escape noise.
+func boundEcho(s string, limit int) (string, bool) {
+	if utf8.RuneCountInString(s) <= limit {
 		return s, false
 	}
-	return string([]rune(s)[:scopeEchoLimit]), true
+	return string([]rune(s)[:limit]), true
 }
 
 // echoScope renders a rejected name for a log line: bounded, and quoted so a
 // control character in it can't forge a line of its own.
 func echoScope(scope string) string {
-	if bounded, cut := boundEcho(scope); cut {
+	if bounded, cut := boundEcho(scope, scopeEchoLimit); cut {
 		return strconv.Quote(bounded) + "…"
 	}
 	return strconv.Quote(scope)
@@ -412,7 +420,7 @@ func echoScope(scope string) string {
 // bound — but the line also states the ordinary case, so it keeps logSafe's
 // quote-only-what-needs-it rule rather than quoting every remote URL.
 func echoRemote(s string) string {
-	if bounded, cut := boundEcho(s); cut {
+	if bounded, cut := boundEcho(s, scopeEchoLimit); cut {
 		return logSafe(bounded) + "…"
 	}
 	return logSafe(s)
@@ -449,9 +457,10 @@ type extractRun struct {
 	Score      float64 `json:"mean_score"`
 }
 
-// runExtractor invokes extract.py against one session artifact. A package var
-// so tests substitute a stub — the real path costs several LLM calls per
-// session.
+// runExtractor invokes extract.py against one session artifact. `key` is the
+// caller's `<agent>/<session>` log key, so the lines this forwards read as the
+// caller's own do. A package var so tests substitute a stub — the real path
+// costs several LLM calls per session.
 //
 // Success is the presence of the --json-out result, not the exit status:
 // extract.py exits non-zero when its coverage score is below --threshold,
@@ -459,7 +468,7 @@ type extractRun struct {
 // case, and it emits candidates and appends to log.md before that exit. A
 // CLI or provider error dies earlier and leaves no result file, which is the
 // failure worth recording.
-var runExtractor = func(ctx context.Context, script, input, scope, kind string) (extractRun, error) {
+var runExtractor = func(ctx context.Context, key, script, input, scope, kind string) (extractRun, error) {
 	// extract.py derives its raw-output and intermediate-summary paths from
 	// --json-out, so the whole run's scratch lives in one throwaway dir.
 	dir, err := os.MkdirTemp("", "loom-extract-")
@@ -495,20 +504,57 @@ var runExtractor = func(ctx context.Context, script, input, scope, kind string) 
 	if self, err := os.Executable(); err == nil {
 		cmd.Env = append(cmd.Env, EnvLoomBin+"="+self)
 	}
-	out, runErr := cmd.CombinedOutput()
+	// Separate rather than CombinedOutput: the child's stdout carries
+	// model-authored candidate titles, and the [redact] lines read below are an
+	// audit record. Merged, a model could write its own counts into it.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
 
 	data, err := os.ReadFile(jsonOut)
 	if err != nil {
 		if runErr == nil {
 			runErr = err
 		}
-		return extractRun{}, fmt.Errorf("%s: %w: %s", filepath.Base(script), runErr, tail(string(out), 800))
+		// stderr last: tail keeps the end of what it is given, and the
+		// extractor's fatal message is on stderr. Ordered the other way, a
+		// chatty stdout — one line per candidate — evicts it from the tail.
+		both := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
+		return extractRun{}, fmt.Errorf("%s: %w: %s", filepath.Base(script), runErr, tail(both, 800))
 	}
+	logRedactions(key, stderr.String())
 	var run extractRun
 	if err := json.Unmarshal(data, &run); err != nil {
 		return extractRun{}, fmt.Errorf("%s: parse result: %w", filepath.Base(script), err)
 	}
 	return run, nil
+}
+
+// redactEchoLimit bounds one echoed [redact] line. The extractor writes these,
+// but the audit record still must not be able to carry a paragraph into
+// extractor.log. A real line names at most one count per pattern kind and fits
+// well inside this.
+const redactEchoLimit = 200
+
+// logRedactions surfaces extract.py's [redact] counts on a run that succeeded.
+// The child's output is otherwise read only in the failure branch, so the one
+// signal that distinguishes a pattern that replaced forty thousand characters
+// from one that replaced forty would be discarded on exactly the runs that
+// happen unattended. Only the child's stderr is scanned: its stdout is
+// model-authored. See docs/transcript-trust-and-redaction.md.
+func logRedactions(key, stderr string) {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, "[redact] ") {
+			continue
+		}
+		if bounded, cut := boundEcho(line, redactEchoLimit); cut {
+			log.Printf("extract %s: %s…", key, logSafe(bounded))
+			continue
+		}
+		log.Printf("extract %s: %s", key, logSafe(line))
+	}
 }
 
 // tail returns the last n bytes of s, so a failure log carries the
