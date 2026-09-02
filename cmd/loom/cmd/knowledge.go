@@ -61,12 +61,13 @@ func newKnowledgeWriteCmd() *cobra.Command {
 		Use:   "write",
 		Short: "Apply one JSON write plan, read from stdin, to the knowledge store",
 		Long: "Reads one JSON plan on stdin and applies it to ~/.loom/knowledge, committing " +
-			"every path it touched as one record:\n\n" +
+			"every path it touched as one record and pushing that commit:\n\n" +
 			`  {"message": "extract abc | loom | 2 truth candidate(s)",` + "\n" +
 			`   "changes": [{"op": "write", "path": "...", "body": "..."}]}` + "\n\n" +
 			"Ops: write (path, body), append (path, text), remove (path), rename (from, to, " +
-			"droppable), touch (path). Prints {\"warn\": \"<reason or empty>\"} on stdout: a " +
-			"commit that did not land is a warning, since the writes did.",
+			"droppable), touch (path). Prints {\"warn\": \"<reason or empty>\", \"push_warn\": " +
+			"\"<reason or empty>\"} on stdout: a commit that did not land is a warning, since " +
+			"the writes did, and so is a commit that landed but was not pushed.",
 		Args: cobra.NoArgs,
 		// The caller is a program, not a person: a refused plan is one line on
 		// stderr — printed once, by Execute — rather than cobra's error plus a
@@ -92,8 +93,12 @@ func newKnowledgeWriteCmd() *cobra.Command {
 				return applyChanges(tx, plan.Changes)
 			})
 			// Printed whatever happened, so a caller that also has to report a
-			// failed write learns from one place whether the record landed.
-			out, err := json.Marshal(map[string]string{"warn": warn})
+			// failed write learns from one place whether the record landed and
+			// whether it was published.
+			out, err := json.Marshal(map[string]string{
+				"warn":      warn.NotCommitted,
+				"push_warn": warn.NotPushed,
+			})
 			if err != nil {
 				return err
 			}

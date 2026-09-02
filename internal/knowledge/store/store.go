@@ -295,12 +295,15 @@ func (t *Tx) pathspec() (paths, droppable []string) {
 // nothing to commit, and so does a recorded path that turns out to hold no
 // change: declaring a path is not the same as altering it.
 //
-// warn is "" when the commit landed and the short reason otherwise — the whole
-// failure is already in ~/.loom/knowledge-git.log. err is fn's error verbatim,
-// likewise logged in full first, so a caller can decide what its own failure
-// means without also owning the record of it; or the store's own, when the root
-// could not be opened and fn therefore never ran.
-func Apply(message string, fn func(*Tx) error) (string, error) {
+// warn is the zero Warn when the record landed and was published, and carries
+// the short reason otherwise — NotCommitted when nothing records the work,
+// NotPushed when the commit is local only, which the next unit of work's push
+// heals when the failure was transient — a diverged remote needs a human pull.
+// The whole failure is already in ~/.loom/knowledge-git.log. err is fn's
+// error verbatim, likewise logged in full first, so a caller can decide what its
+// own failure means without also owning the record of it; or the store's own,
+// when the root could not be opened and fn therefore never ran.
+func Apply(message string, fn func(*Tx) error) (Warn, error) {
 	return ApplyIn(knowledge.Root(), message, fn)
 }
 
@@ -310,7 +313,7 @@ func Apply(message string, fn func(*Tx) error) (string, error) {
 // environment does not. The root travels with the unit of work rather than being
 // re-resolved per rule, so the containment check, the writes and the commit are
 // all held against the same store.
-func ApplyIn(root, message string, fn func(*Tx) error) (string, error) {
+func ApplyIn(root, message string, fn func(*Tx) error) (Warn, error) {
 	message = SanitizeRecord(message)
 	dir, err := os.OpenRoot(root)
 	if err != nil {
@@ -321,7 +324,7 @@ func ApplyIn(root, message string, fn func(*Tx) error) (string, error) {
 		// reason Append never creates the file it appends to.
 		err = fmt.Errorf("knowledge store %s: %w", shortenPath(root), err)
 		logFailure(message, err)
-		return "", err
+		return Warn{}, err
 	}
 	defer dir.Close()
 	tx := &Tx{root: root, rootAbs: abs(root), dir: dir}
@@ -331,7 +334,7 @@ func ApplyIn(root, message string, fn func(*Tx) error) (string, error) {
 	}
 	paths, droppable := tx.pathspec()
 	if len(paths)+len(droppable) == 0 {
-		return "", err
+		return Warn{}, err
 	}
 	return recordKnowledgeCommit(root, paths, droppable, message), err
 }

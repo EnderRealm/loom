@@ -250,8 +250,11 @@ func appendRetrospectLog(ticketID, scope string, candidates map[string]int) {
 		log.Printf("retrospect %s: %v", ticketID, err)
 		return
 	}
-	if warn != "" {
-		log.Printf("retrospect %s: entry not committed: %s", ticketID, warn)
+	if warn.NotCommitted != "" {
+		log.Printf("retrospect %s: entry not committed: %s", ticketID, warn.NotCommitted)
+	}
+	if warn.NotPushed != "" {
+		log.Printf("retrospect %s: entry not pushed: %s", ticketID, warn.NotPushed)
 	}
 }
 

@@ -193,8 +193,11 @@ func (m knowledgeModel) promote() (knowledgeModel, tea.Cmd) {
 	}
 	m.showDetail = false
 	status := "promoted → " + shortenPath(dest)
-	if warn != "" {
-		status += " — not committed: " + warn
+	if warn.NotCommitted != "" {
+		status += " — not committed: " + warn.NotCommitted
+	}
+	if warn.NotPushed != "" {
+		status += " — not pushed: " + warn.NotPushed
 	}
 	return m, tea.Batch(statusCmd(status), loadKnowledgeCmd())
 }
@@ -213,10 +216,16 @@ func (m knowledgeModel) reject() (knowledgeModel, tea.Cmd) {
 	}
 	m.showDetail = false
 	status := "rejected — archived to _rejected/"
-	if warn != "" {
+	if warn.NotCommitted != "" {
 		// Not "not committed": the reject's record can also fail to be written
 		// at all, when the store has no log.md to append the decision to.
-		status += " — record not saved: " + warn
+		status += " — record not saved: " + warn.NotCommitted
+	}
+	if warn.NotPushed != "" {
+		// The record exists in the store's history and only the publication is
+		// missing, which the next gesture's push carries unless the remote has
+		// diverged.
+		status += " — not pushed: " + warn.NotPushed
 	}
 	return m, tea.Batch(statusCmd(status), loadKnowledgeCmd())
 }
@@ -251,13 +260,13 @@ func (m knowledgeModel) edit() (knowledgeModel, tea.Cmd) {
 // commitEdit records an artifact $EDITOR has just written. The file was written
 // outside the store's Tx, so the path is declared rather than written and the
 // commit is the store's either way — which is what keeps the edit from being a
-// gesture with commit code of its own. Returns "" or the reason the commit did
-// not land, which degrades like every other gesture: a status-line reason, the
-// whole failure in knowledge-git.log, and never a block on the reload. An editor
-// quit without saving leaves nothing to commit and is not a failure; the store
-// decides that, since a declared path that did not change is not an edit-only
-// case.
-func commitEdit(a Artifact) string {
+// gesture with commit code of its own. Returns the zero Warn or the reason the
+// commit did not land or was not published, which degrades like every other
+// gesture: a status-line reason, the whole failure in knowledge-git.log, and
+// never a block on the reload. An editor quit without saving leaves nothing to
+// commit and is not a failure; the store decides that, since a declared path
+// that did not change is not an edit-only case.
+func commitEdit(a Artifact) store.Warn {
 	warn, err := store.Apply(gestureMessage("edit", a), func(tx *store.Tx) error {
 		return tx.Touch(a.Path)
 	})
@@ -265,7 +274,7 @@ func commitEdit(a Artifact) string {
 		// The store refused to record the path at all — it is not in the store,
 		// or not content. Nothing was committed, so this degrades onto the status
 		// line like a failed commit rather than reading as a clean edit.
-		return store.ShortReason(err)
+		return store.Warn{NotCommitted: store.ShortReason(err)}
 	}
 	return warn
 }

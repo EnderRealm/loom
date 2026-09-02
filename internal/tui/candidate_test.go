@@ -234,8 +234,8 @@ func TestPromoteCandidateCommits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promoteCandidate: %v", err)
 	}
-	if warn != "" {
-		t.Fatalf("promote in a git store did not commit: %s", warn)
+	if warn.NotCommitted != "" {
+		t.Fatalf("promote in a git store did not commit: %s", warn.NotCommitted)
 	}
 
 	subject := testGit(t, root, "log", "-1", "--format=%s")
@@ -280,8 +280,8 @@ func TestPromoteUntrackedCandidateCommits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promoteCandidate: %v", err)
 	}
-	if warn != "" {
-		t.Fatalf("promote of an untracked candidate did not commit: %s", warn)
+	if warn.NotCommitted != "" {
+		t.Fatalf("promote of an untracked candidate did not commit: %s", warn.NotCommitted)
 	}
 
 	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
@@ -312,8 +312,8 @@ func TestRejectCandidateCommits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
-	if warn != "" {
-		t.Fatalf("reject in a git store did not commit: %s", warn)
+	if warn.NotCommitted != "" {
+		t.Fatalf("reject in a git store did not commit: %s", warn.NotCommitted)
 	}
 	subject := testGit(t, root, "log", "-1", "--format=%s")
 	if !strings.Contains(subject, art.ID) || !strings.Contains(subject, art.Scope) {
@@ -365,8 +365,8 @@ func TestRejectCandidateIgnoredArchiveCommits(t *testing.T) {
 	testGit(t, root, "commit", "-m", "ignore the archive")
 	head := testGit(t, root, "rev-parse", "HEAD")
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
-		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now == head {
 		t.Error("HEAD did not move: the reject left no committed record")
@@ -403,8 +403,8 @@ func TestPromoteIgnoredDestinationDegrades(t *testing.T) {
 	testGit(t, root, "commit", "-m", "ignore the validated tree")
 	head := testGit(t, root, "rev-parse", "HEAD")
 
-	if _, warn, err := promoteCandidate(art); err != nil || warn == "" {
-		t.Fatalf("promote of an ignored destination did not degrade: err=%v warn=%q", err, warn)
+	if _, warn, err := promoteCandidate(art); err != nil || warn.NotCommitted == "" {
+		t.Fatalf("promote of an ignored destination did not degrade: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
 		t.Errorf("HEAD moved despite an ignored destination: %s -> %s", head, now)
@@ -414,8 +414,8 @@ func TestPromoteIgnoredDestinationDegrades(t *testing.T) {
 func TestRejectUntrackedCandidateCommits(t *testing.T) {
 	root, art := seedGitUntrackedCandidate(t)
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
-		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
 	if !strings.Contains(names, "A\tlog.md") {
@@ -452,8 +452,8 @@ func TestRejectCandidateLeavesDirtUncommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
-		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 
 	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
@@ -481,8 +481,8 @@ func TestRejectLogEntryFieldsAreAllowListed(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	art.ID = "loom-notify <!-- hidden | forged <script>x</script> [link](u)"
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
-		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 
 	entry := rejectEntry(t, root)
@@ -508,8 +508,8 @@ func TestRejectLogEntryLongIDKeepsTail(t *testing.T) {
 	art.ID = strings.Repeat("a", 400)
 
 	dest, warn, err := rejectCandidate(art)
-	if err != nil || warn != "" {
-		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 
 	entry := rejectEntry(t, root)
@@ -583,8 +583,8 @@ func TestRejectLogEntryIsOneEntry(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	art.ID = forgedID
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn != "" {
-		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn)
+	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 
 	logged := readLog(t, root)
@@ -618,7 +618,7 @@ func TestRejectMissingLogDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
-	if warn == "" {
+	if warn.NotCommitted == "" {
 		t.Fatal("expected a degraded reject, got a clean record")
 	}
 	// The archive move still stands.
@@ -658,7 +658,7 @@ func TestRejectCommitFailureKeepsArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
-	if warn == "" {
+	if warn.NotCommitted == "" {
 		t.Fatal("expected a degraded reject, got a clean record")
 	}
 	if _, err := os.Stat(dest); err != nil {
@@ -694,8 +694,8 @@ func TestEditCommits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if warn := commitEdit(art); warn != "" {
-		t.Fatalf("edit in a git store did not commit: %s", warn)
+	if warn := commitEdit(art); warn.NotCommitted != "" {
+		t.Fatalf("edit in a git store did not commit: %s", warn.NotCommitted)
 	}
 
 	if subject := testGit(t, root, "log", "-1", "--format=%s"); subject != "edit truth loom/"+art.ID {
@@ -718,8 +718,8 @@ func TestEditWithoutChangesLeavesNoCommit(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	head := testGit(t, root, "rev-parse", "HEAD")
 
-	if warn := commitEdit(art); warn != "" {
-		t.Fatalf("an edit that changed nothing reported %q", warn)
+	if warn := commitEdit(art); warn.NotCommitted != "" {
+		t.Fatalf("an edit that changed nothing reported %q", warn.NotCommitted)
 	}
 
 	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
@@ -734,7 +734,10 @@ func TestEditWithoutChangesLeavesNoCommit(t *testing.T) {
 // and committed before the candidate is dropped, so a failure at the removal is
 // a gesture that landed with an incomplete record — not "promote failed", which
 // would leave the candidate listed and the next attempt refused for a
-// destination that is now there.
+// destination that is now there. The store still commits and pushes what the
+// write left behind, so its own outcome — here an unpublished commit, the seeded
+// store having no upstream — has to survive the removal's reason rather than be
+// replaced by it.
 func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
@@ -756,8 +759,11 @@ func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
 	if dest == "" {
 		t.Fatal("promote returned no destination for a file it wrote")
 	}
-	if warn == "" {
+	if warn.NotCommitted == "" {
 		t.Error("promote reported a clean record despite the candidate surviving")
+	}
+	if warn.NotPushed == "" {
+		t.Error("promote dropped the store's own outcome: the commit that landed is unpushed")
 	}
 	if _, err := os.Stat(dest); err != nil {
 		t.Errorf("promoted file missing: %v", err)
@@ -774,7 +780,7 @@ func TestEditOutsideTheStoreDegrades(t *testing.T) {
 	_, art := seedGitCandidate(t)
 	art.Path = filepath.Join(t.TempDir(), "elsewhere.md")
 
-	if warn := commitEdit(art); warn == "" {
+	if warn := commitEdit(art); warn.NotCommitted == "" {
 		t.Error("an edit the store refused reported a clean record")
 	}
 }

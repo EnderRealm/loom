@@ -16,6 +16,8 @@ either side of the boundary this module exists to cross. Identity, signing and
 hooks are all pinned per-repo so the fixtures don't depend on the host's global
 config.
 """
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -221,6 +223,21 @@ class StoreClientTest(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertEqual(len(self.log_lines()), 1)
         self.assertIn("extract abc | loom | 1 truth candidate(s)", self.log_lines()[0])
+
+    def test_an_unpushed_commit_is_reported_but_not_returned(self):
+        """A commit the store could not publish — the fixture has no upstream —
+        is the caller's to hear about but not to act on: the record landed, and
+        the next unit of work's push carries it."""
+        self.bootstrap()
+        _, change = self.candidate_change("one.md")
+        captured = io.StringIO()
+
+        with contextlib.redirect_stderr(captured):
+            reason = apply_changes("extract abc | loom | 1 truth candidate(s)", [change])
+
+        self.assertEqual(reason, "")
+        self.assertIn("knowledge store not pushed: no upstream to push to", captured.getvalue())
+        self.assertEqual(self.subjects()[0], "extract abc | loom | 1 truth candidate(s)")
 
     def test_store_inside_another_repo_gets_its_own_reason(self):
         """A store that merely sits inside a repo — a git-managed home directory,

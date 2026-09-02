@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"loom/internal/config"
+	"loom/internal/knowledge/store"
 	"loom/internal/summaries"
 )
 
@@ -57,11 +58,12 @@ type projectsLoadedMsg []Project
 type knowledgeLoadedMsg []Artifact
 
 // knowledgeEditedMsg is an $EDITOR return: the reload the edit needs, carrying
-// the reason its commit did not land. One message rather than two so a degraded
-// commit reaches the status line without the reload waiting on it.
+// the reason its commit did not land or was not published. One message rather
+// than two so a degraded commit reaches the status line without the reload
+// waiting on it.
 type knowledgeEditedMsg struct {
 	artifacts []Artifact
-	warn      string
+	warn      store.Warn
 }
 type activityLoadedMsg struct {
 	view    *summaries.ActivityView
@@ -147,10 +149,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case knowledgeEditedMsg:
 		a.knowledge.setArtifacts(msg.artifacts)
-		if msg.warn == "" {
-			return a, nil
+		if msg.warn.NotCommitted != "" {
+			return a, statusCmd("edited — not committed: " + msg.warn.NotCommitted)
 		}
-		return a, statusCmd("edited — not committed: " + msg.warn)
+		if msg.warn.NotPushed != "" {
+			return a, statusCmd("edited — not pushed: " + msg.warn.NotPushed)
+		}
+		return a, nil
 
 	case activityLoadedMsg:
 		a.activity.setData(msg.view, msg.tickets)

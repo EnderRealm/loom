@@ -42,6 +42,39 @@ var errNoGitRepo = errors.New("knowledge root is not a git repo")
 // falsify "not a git repo" by running git status in the store.
 var errEnclosingRepo = errors.New("knowledge root is inside another git repo")
 
+// errNoUpstream marks a branch whose tracking configuration names nowhere to
+// push: no remote at all, or no branch.<name>.remote / branch.<name>.merge for
+// this branch. One sentinel for both, because the store's answer is the same —
+// the commit stands and nothing publishes it — and the configuration detail
+// belongs in the log rather than on the status line. Configuration that names a
+// remote which does not exist is not this: it is a push that runs and fails,
+// reported with git's own reason.
+var errNoUpstream = errors.New("no upstream to push to")
+
+// errDetachedHead marks a store whose HEAD names no branch, so there is no
+// branch whose tracking configuration the push could resolve. It degrades like
+// errNoUpstream rather than pushing a ref the user never asked us to move.
+var errDetachedHead = errors.New("detached HEAD, no branch to push")
+
+// Warn carries the two ways a unit of work can be short of a published record.
+// They are separate fields because they degrade differently: NotCommitted means
+// no commit records the work at all, while NotPushed means the record landed
+// locally and is merely unpublished, which the next gesture's push heals when
+// the failure was transient — a push is cumulative, so the next one carries this
+// commit too, but a remote that has diverged rejects every later push the same
+// way until a human pulls. Collapsing both onto one string would read a
+// recoverable state as data loss. recordKnowledgeCommit sets at most one of
+// them — a commit that did not land is never pushed — but the field pair is not
+// exclusive, because a caller that composes its own record reason sets
+// NotCommitted beside a NotPushed the store already returned: the TUI's promote
+// and reject do exactly that when the gesture's closure failed after the commit
+// landed. Read the two independently rather than as an either/or, or a status
+// line drops the unpublished half.
+type Warn struct {
+	NotCommitted string // short reason no commit records the work
+	NotPushed    string // short reason a commit that did land is still local
+}
+
 // knowledgeGitLogPath returns the canonical log file for knowledge-store
 // commits that could not be recorded.
 func knowledgeGitLogPath() string {
@@ -60,7 +93,33 @@ func runGit(root string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
 	full := append([]string{"-C", root, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + os.DevNull}, args...)
-	out, err := exec.CommandContext(ctx, "git", full...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "git", full...)
+	// GIT_TERMINAL_PROMPT=0 turns a credential prompt into an immediate failure
+	// rather than a child waiting on a terminal the fullscreen TUI has taken
+	// over: the push is the one call that asks for credentials, and the user
+	// could neither see nor answer the question. gitTimeout stays the backstop
+	// for a network that hangs after authentication.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// GIT_TERMINAL_PROMPT closes the credential helper's prompt but not ssh's:
+	// ssh reads a key passphrase from /dev/tty directly rather than from this
+	// child's stdin, so it would draw over the fullscreen TUI's alt-screen and
+	// compete for its keystrokes — and CommandContext kills only the git child,
+	// leaving an ssh that holds the terminal past gitTimeout. BatchMode=yes
+	// fails instead of asking; agent- and key-based auth are untouched. The
+	// option is appended to a caller's own command rather than replacing it —
+	// a GIT_SSH_COMMAND carrying an identity or a jump host is why one is set,
+	// and dropping it would turn a working remote into an auth failure. ssh
+	// keeps the first value it is given for an option, so a caller that spelled
+	// out BatchMode=no keeps it: that is an explicit choice to be prompted, and
+	// the appended option covers the case the guard is for, a command set for
+	// its identity that never mentions BatchMode. A core.sshCommand in gitconfig
+	// is overridden either way, since the env var wins over that setting.
+	ssh := os.Getenv("GIT_SSH_COMMAND")
+	if ssh == "" {
+		ssh = "ssh"
+	}
+	cmd.Env = append(cmd.Env, "GIT_SSH_COMMAND="+ssh+" -o BatchMode=yes")
+	out, err := cmd.CombinedOutput()
 	// CommandContext reports a killed child as a generic signal, so the
 	// deadline that fired is visible only on the context — and a child killed
 	// mid-prompt has printed nothing to attribute the failure to.
@@ -92,12 +151,13 @@ func gitCause(out string, err error) string {
 // That record is written when the path leaves the pathspec, so it stands even
 // when the commit it was headed for then fails. A pathspec that turns out to
 // hold no change is not an error and leaves no commit: a unit of work may name a
-// path it did not alter. A root that is not itself a git repo yields
+// path it did not alter, which is what committed reports — the caller pushes
+// only what a commit produced. A root that is not itself a git repo yields
 // errNoGitRepo. Failures carry git's whole output, because the useful part is
 // rarely the first line — a rejected commit leads with "On branch main" and
 // names the cause below it — and the caller, not this function, decides what a
 // one-line status bar can show.
-func commitKnowledge(root string, paths, droppable []string, message string) error {
+func commitKnowledge(root string, paths, droppable []string, message string) (committed bool, err error) {
 	top, err := runGit(root, "rev-parse", "--show-toplevel")
 	if err != nil {
 		// rev-parse fails both for a store that is not a repo and for a git we
@@ -106,16 +166,16 @@ func commitKnowledge(root string, paths, droppable []string, message string) err
 		// layout for anything else would send the user to fix a healthy repo.
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
-			return fmt.Errorf("git rev-parse: %s", gitCause(top, err))
+			return false, fmt.Errorf("git rev-parse: %s", gitCause(top, err))
 		}
-		return fmt.Errorf("%w: %s", errNoGitRepo, gitCause(top, err))
+		return false, fmt.Errorf("%w: %s", errNoGitRepo, gitCause(top, err))
 	}
 	// rev-parse walks up the tree, so a store that is merely *inside* a repo —
 	// a git-managed home directory, a dotfiles checkout — resolves to that
 	// ancestor and the commit would land in history the user never pointed us
 	// at. The toplevel has to be the store itself.
 	if !sameDir(top, root) {
-		return fmt.Errorf("%w: enclosing repo at %s", errEnclosingRepo, top)
+		return false, fmt.Errorf("%w: enclosing repo at %s", errEnclosingRepo, top)
 	}
 	// A droppable path leaves the pathspec when git is ignoring it: its record
 	// is elsewhere — the reject archive's decision is the log.md entry — so the
@@ -148,10 +208,10 @@ func commitKnowledge(root string, paths, droppable []string, message string) err
 		pathspec = append(pathspec, p)
 	}
 	if len(pathspec) == 0 {
-		return errors.New("no tracked paths to commit")
+		return false, errors.New("no tracked paths to commit")
 	}
 	if out, err := runGit(root, append([]string{"add", "--"}, pathspec...)...); err != nil {
-		return fmt.Errorf("git add: %s", gitCause(out, err))
+		return false, fmt.Errorf("git add: %s", gitCause(out, err))
 	}
 	// A unit of work can name a path it did not change: Touch declares a file
 	// $EDITOR was handed and may have left alone, and an op that failed has
@@ -162,7 +222,7 @@ func commitKnowledge(root string, paths, droppable []string, message string) err
 	// and including a git that could not answer, goes on to the commit and lets it
 	// report its own failure.
 	if _, err := runGit(root, append([]string{"diff", "--cached", "--quiet", "--"}, pathspec...)...); err == nil {
-		return nil
+		return false, nil
 	}
 	if out, err := runGit(root, append([]string{"commit", "--only", "-m", message, "--"}, pathspec...)...); err != nil {
 		// A failed commit leaves the work staged, and the next commit a
@@ -171,31 +231,115 @@ func commitKnowledge(root string, paths, droppable []string, message string) err
 		// drops any pre-existing staging of these exact paths, which for a
 		// just-written destination and a just-removed candidate is no real loss.
 		runGit(root, append([]string{"reset", "-q", "--"}, pathspec...)...)
-		return fmt.Errorf("git commit: %s", gitCause(out, err))
+		return false, fmt.Errorf("git commit: %s", gitCause(out, err))
+	}
+	return true, nil
+}
+
+// pushKnowledge publishes the store's branch to its upstream. The store's
+// commits are the only copy of a human's promote and reject decisions —
+// candidates are recoverable by re-extraction, the decisions are not — so the
+// window between a commit and its publication is the store's real exposure, and
+// it is closed by the gesture that opened it rather than by a timer. No retry
+// machinery: a push carries every commit before it, so the next gesture's push
+// is this one's retry — for a transient failure. A non-fast-forward rejection is
+// the exception, and the likeliest one for a store shared across machines: every
+// later push is rejected identically until a human pulls or rebases, which is
+// theirs to do rather than ours to do behind them. A store with nothing to push
+// to degrades with a stated reason rather than an error, the way a store that is
+// not a repo does.
+func pushKnowledge(root string) error {
+	// A detached HEAD and absent tracking configuration are both answered by git
+	// exiting non-zero. Only an exit status means git ran and answered: a git
+	// that could not be run, or one killed by gitTimeout, must not be reported as
+	// the store's configuration, which would send the user to fix a healthy repo.
+	branch, err := runGit(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return fmt.Errorf("push: git symbolic-ref: %s", gitCause(branch, err))
+		}
+		return fmt.Errorf("%w: %s", errDetachedHead, gitCause(branch, err))
+	}
+	// branch.<name>.remote and branch.<name>.merge are what @{upstream} is
+	// composed from, and reading them directly yields the two halves the push
+	// needs named outright. Reading them beats splitting @{upstream}'s
+	// "origin/main", which is ambiguous when a remote or a branch name holds a
+	// slash. Either being absent is the store having nowhere to push; a remote
+	// that is configured but does not exist is not, and reaches the push below to
+	// fail there with git's own reason. git config also exits non-zero for a
+	// malformed config file or an invalid key, so its output travels in the error
+	// and the log names the real cause under the sentinel's sentence.
+	remote, err := runGit(root, "config", "--get", "branch."+branch+".remote")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return fmt.Errorf("push: git config: %s", gitCause(remote, err))
+		}
+		return fmt.Errorf("%w: no branch.%s.remote: %s", errNoUpstream, branch, gitCause(remote, err))
+	}
+	merge, err := runGit(root, "config", "--get", "branch."+branch+".merge")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return fmt.Errorf("push: git config: %s", gitCause(merge, err))
+		}
+		return fmt.Errorf("%w: no branch.%s.merge: %s", errNoUpstream, branch, gitCause(merge, err))
+	}
+	// Remote and refspec named outright, because a plain `git push` resolves
+	// through host configuration the store inherits — push.default,
+	// remote.pushDefault, branch.<name>.pushRemote, remote.<name>.push — which
+	// could send this commit to a ref nobody pointed the store at, or under
+	// push.default=nothing fail every time, leaving a warn no later gesture can
+	// heal. Naming both takes all four out of the resolution, the way runGit pins
+	// commit.gpgsign and core.hooksPath; push.followTags is the one that survives
+	// an explicit refspec, so it is pinned here on the same terms — a tag this
+	// gesture never touched is not part of the record. What lands is exactly this
+	// branch's commit on its upstream ref, and nothing else.
+	if out, err := runGit(root, "-c", "push.followTags=false", "push", remote, "HEAD:"+merge); err != nil {
+		return fmt.Errorf("git push: %s", gitCause(out, err))
 	}
 	return nil
 }
 
-// recordKnowledgeCommit commits one unit of work and returns "" on success or a
-// short reason on failure. A failure is never silent: the failure is appended to
-// knowledgeGitLogPath() in full, and its head handed back for the status line,
-// which is gone by the next keystroke.
-func recordKnowledgeCommit(root string, paths, droppable []string, message string) string {
+// recordKnowledgeCommit commits one unit of work, publishes it, and returns the
+// zero Warn on success or the short reason the record fell short. Neither
+// failure is ever silent: it is appended to knowledgeGitLogPath() in full, and
+// its head handed back for the status line, which is gone by the next
+// keystroke. The push sits here rather than inside commitKnowledge so that a
+// push that fails cannot reach that function's unstaging recovery: the commit
+// landed, and the local record is correct and complete.
+func recordKnowledgeCommit(root string, paths, droppable []string, message string) Warn {
 	message = SanitizeRecord(message)
-	err := commitKnowledge(root, paths, droppable, message)
-	if err == nil {
-		return ""
+	committed, err := commitKnowledge(root, paths, droppable, message)
+	if err != nil {
+		reason := logFailure(message, err)
+		// Both no-repo shapes degrade the same way; the sentinel text is the whole
+		// status-line reason, since the enclosing path detail belongs in the log.
+		if errors.Is(err, errNoGitRepo) {
+			return Warn{NotCommitted: errNoGitRepo.Error()}
+		}
+		if errors.Is(err, errEnclosingRepo) {
+			return Warn{NotCommitted: errEnclosingRepo.Error()}
+		}
+		return Warn{NotCommitted: reason}
 	}
-	reason := logFailure(message, err)
-	// Both no-repo shapes degrade the same way; the sentinel text is the whole
-	// status-line reason, since the enclosing path detail belongs in the log.
-	if errors.Is(err, errNoGitRepo) {
-		return errNoGitRepo.Error()
+	// A pathspec that held no change left no commit, and a store with nothing to
+	// publish owes the network nothing.
+	if !committed {
+		return Warn{}
 	}
-	if errors.Is(err, errEnclosingRepo) {
-		return errEnclosingRepo.Error()
+	if err := pushKnowledge(root); err != nil {
+		reason := logFailure(message, err)
+		if errors.Is(err, errDetachedHead) {
+			return Warn{NotPushed: errDetachedHead.Error()}
+		}
+		if errors.Is(err, errNoUpstream) {
+			return Warn{NotPushed: errNoUpstream.Error()}
+		}
+		return Warn{NotPushed: reason}
 	}
-	return reason
+	return Warn{}
 }
 
 // logFailure writes one failure to knowledgeGitLogPath() in full and returns its
@@ -290,12 +434,21 @@ func resolveDir(p string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
-// shortGit collapses a failure to its first line, bounded, so it fits the
-// one-line status bar. It is the display boundary only — callers log the whole
-// text before shortening it.
+// shortGit collapses a failure to its first line, flattened and bounded, so it
+// fits the one-line status bar. Flattening is not cosmetic here: git relays a
+// remote's side-band and a hook's output verbatim, so a push or commit failure
+// carries text the store never trusted, and an ANSI or OSC sequence pasted into
+// the status line would spoof the display or drive the terminal. The cut comes
+// first, since flattenRecord maps a newline onto a space and would otherwise
+// hide where git's first line ended. It is the display boundary only — callers
+// log the whole text before shortening it, and appendKnowledgeGitLog flattens
+// that copy on the same terms. The bound counts runes, not bytes, for the reason
+// SanitizeRecord does: a push relays a remote's own text, which is likelier to
+// be non-ASCII than a local git error, and a byte cut near the limit would write
+// a broken rune into the very line the flattening exists to keep readable.
 func shortGit(out string) string {
 	first, _, _ := strings.Cut(out, "\n")
-	return truncate(first, gitReasonMax)
+	return truncate(flattenRecord(first), gitReasonMax)
 }
 
 // shortenPath and truncate are the TUI's display helpers, duplicated here rather
@@ -310,15 +463,19 @@ func shortenPath(p string) string {
 	return p
 }
 
+// truncate bounds a display string to n runes rather than n bytes, the way
+// SanitizeRecord does: its one caller carries git's output, which for a push is
+// a remote's own text, and a byte cut lands mid-rune on anything non-ASCII.
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
 	if n <= 1 {
-		return s[:n]
+		return string(r[:n])
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }

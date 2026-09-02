@@ -1,8 +1,9 @@
 # Writing the knowledge store
 
 Every write to `~/.loom/knowledge` goes through one entry point, and that entry
-point commits what it wrote. Committing is a property of the entry point, not of
-the caller: a new writer carries no git code and cannot forget one.
+point commits what it wrote and pushes the commit. Committing is a property of
+the entry point, not of the caller: a new writer carries no git code and cannot
+forget one.
 
 The store is its own git repo, and its history is the audit trail of what the
 extractor produced and what a human then decided about it. A writer that leaves
@@ -22,11 +23,20 @@ warn, err := store.Apply("promote truth loom/loom-notify-state", func(tx *store.
 })
 ```
 
-`Apply` runs the closure, then commits every path the closure touched as one
-record with `message` as its subject.
+`Apply` runs the closure, commits every path the closure touched as one record
+with `message` as its subject, and pushes that commit to the branch's upstream.
 
-- `warn` is `""` when the commit landed, else a short reason for a one-line
-  status bar. The whole failure is in `~/.loom/knowledge-git.log`.
+- `warn` is the zero `store.Warn` when the record landed and was published. Its
+  two fields are separate states, not one: `NotCommitted` means nothing records
+  the work, `NotPushed` that the commit landed and is local only — which the
+  next unit of work's push heals when the failure was transient, since a push
+  carries every commit before it.
+  Both are short reasons for a one-line status bar; the whole failure is in
+  `~/.loom/knowledge-git.log`. `Apply` sets at most one of them, but the pair is
+  not exclusive: a caller that composes its own record reason — the TUI's
+  promote and reject, when the gesture's closure failed after the commit
+  landed — sets `NotCommitted` beside the `NotPushed` the store returned. Check
+  the two independently rather than as an either/or.
 - `err` is the closure's error verbatim, likewise logged in full first — or the
   store's own when the root could not be opened, in which case the closure never
   ran.
@@ -34,6 +44,20 @@ record with `message` as its subject.
   before the failure are on disk either way. Nothing touched means no commit,
   and neither does a pathspec that turns out to hold no change — a declared path
   that did not change (`$EDITOR` quit without saving) is not a failed record.
+
+The push is the gesture's, immediately after its commit, because the store's
+history is the only copy of a human's promote and reject decisions — candidates
+are recoverable by re-extraction, decisions are not — so the window between a
+commit and its publication is the store's real exposure. A failed push never
+rolls the commit back: the local record is correct and complete, and the next
+unit of work's push is this one's retry, so there is no retry machinery. That
+holds for a transient failure. A push rejected as non-fast-forward — the
+likeliest steady-state failure for a store shared across machines — is rejected
+identically on every later gesture, and the store stays unpublished until a human
+pulls or rebases; nothing here pulls on their behalf. A store with no remote, no
+upstream for the branch, or a detached HEAD degrades with a stated reason rather
+than an error, the way a store that is not a repo does, and every git call is
+bounded so a hung network cannot lock the TUI.
 
 `Apply` writes the store at `knowledge.Root()`. `ApplyIn(root, message, fn)` is
 the same against a named root, for the caller that resolves the store some other
@@ -115,7 +139,10 @@ if reason:
 ```
 
 A failed **commit** comes back as `reason` and is not fatal — the writes landed.
-A failed **write** raises `StoreWriteError` and is fatal to the run.
+A failed **write** raises `StoreWriteError` and is fatal to the run. A commit
+that landed but was not **pushed** is printed to stderr by `apply_changes`
+itself rather than returned: the record exists and the next write's push carries
+it, so it is not the caller's decision to make.
 
 The binary is `LOOM_BIN` if set, else `loom` on `$PATH`. `internal/extract` pins
 `LOOM_BIN` to the running executable when it spawns `extract.py`, so a sweep
@@ -153,8 +180,10 @@ store comes back refused.
   That refusal is per change:
   a plan whose second change is refused has already applied and committed its
   first, and exits non-zero with the reason.
-- On success: `{"warn": "<reason or empty>"}` on stdout, exit 0. A failed commit
-  is a warning, not a failure, since the writes landed.
+- On success: `{"warn": "<reason or empty>", "push_warn": "<reason or empty>"}`
+  on stdout, exit 0. A failed commit is a warning, not a failure, since the
+  writes landed; a commit that landed but was not pushed is `push_warn`, since
+  the record exists and the next write publishes it.
 - A failed write exits non-zero with the reason on stderr, and still prints the
   warn line for the changes that landed before it.
 

@@ -42,6 +42,27 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The knowledge store's entry point now pushes the commit it just made,
+  so a promote or a reject leaves the store's branch in sync with its
+  upstream. Nothing ever pushed the store before: it was published only
+  when a human happened to run `/work` in it, and since the gestures
+  started committing, the unpushed window grew by a commit per gesture
+  with no bound. Candidates are recoverable — `loom extract --backfill`
+  produces them again — but a promote or reject decision is human
+  judgment recorded nowhere else, so that window held the only
+  irreplaceable part of the store. The push fires on the gesture rather
+  than on a timer, and carries no retry machinery: a push is cumulative,
+  so the next gesture's push is the failed one's retry — for a
+  transient failure. A push a diverged remote rejects is rejected the
+  same way on every later gesture, and the store stays unpublished until
+  a human pulls; nothing pulls or rebases on their behalf. A failed push
+  never rolls the commit back — the local record is correct and complete
+  — and it is reported apart from a failed commit, `not pushed:` rather
+  than `not committed:`, since the two are a recoverable state and a
+  missing record. A store with no remote, no upstream, or a detached
+  HEAD says so and carries on, and `loom knowledge write` reports the
+  same outcome as a second `push_warn` field alongside `warn`. The whole
+  failure, as ever, is in `knowledge-git.log`.
 - Every write to the knowledge store now goes through one entry point —
   `internal/knowledge/store`'s `Apply` — which commits every path the
   write touched as one record. Committing was a property of each caller

@@ -14,7 +14,7 @@ Loom captures agent session transcripts, ships them to a central receiver, folds
 
 **Agents supported:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/**/rollout-<ts>-<uuid>.jsonl`).
 
-`extractors/` is a Python project (truth/decision extraction from session summaries) that operates over the durable knowledge store at `~/.loom/knowledge/` — its own git repo, see that store's `SCHEMA.md`. The TUI reads that store and the `loom extract` agent invokes `extract.py` against new sessions. Every write to the store — from the TUI's promote/reject/edit gestures and from the Python extractor alike — goes through one Go entry point that commits what it wrote; see [`docs/knowledge-store-writes.md`](./docs/knowledge-store-writes.md). What the extraction path strips out of transcript text, where that text is allowed to flow, and what a consumer may trust it for are in [`docs/transcript-trust-and-redaction.md`](./docs/transcript-trust-and-redaction.md).
+`extractors/` is a Python project (truth/decision extraction from session summaries) that operates over the durable knowledge store at `~/.loom/knowledge/` — its own git repo, see that store's `SCHEMA.md`. The TUI reads that store and the `loom extract` agent invokes `extract.py` against new sessions. Every write to the store — from the TUI's promote/reject/edit gestures and from the Python extractor alike — goes through one Go entry point that commits what it wrote and pushes the commit; see [`docs/knowledge-store-writes.md`](./docs/knowledge-store-writes.md). What the extraction path strips out of transcript text, where that text is allowed to flow, and what a consumer may trust it for are in [`docs/transcript-trust-and-redaction.md`](./docs/transcript-trust-and-redaction.md).
 
 ## Prerequisites
 
@@ -224,7 +224,7 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
   extract-env                                  # server: extractor tunables baked into its plist
   extractor.log                                # server: extractor launchd capture
   knowledge/                                   # durable knowledge store (separate git repo)
-  knowledge-git.log                            # knowledge-store commits that could not be recorded
+  knowledge-git.log                            # knowledge-store commits that could not be recorded or pushed
 ```
 
 State lives per-user per-machine. Override the root with `LOOM_HOME=/some/path`.

@@ -19,12 +19,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 # WRITE_TIMEOUT bounds the child, which runs several git invocations under its
 # own per-command bound. Generous by comparison: what this guards is a loom that
-# never returns at all, not a slow git.
-WRITE_TIMEOUT = 60
+# never returns at all, not a slow git. The push is the one of those invocations
+# that realistically runs to its full 10s bound, since it talks to a remote.
+WRITE_TIMEOUT = 90
 
 
 class StoreWriteError(Exception):
@@ -65,7 +67,13 @@ def apply_changes(message: str, changes: list[dict]) -> str:
     """Apply one unit of work and return the reason its commit did not land, or
     "" when it did. A failed commit is a warning, not a failure: the writes are
     on disk, and the whole failure is in ~/.loom/knowledge-git.log. A failed
-    write raises."""
+    write raises.
+
+    A commit that landed but was not pushed is reported on stderr here rather
+    than returned: the record exists and the next unit of work's push carries it
+    when the failure was transient, so it is not the caller's decision to make —
+    but it must not be silent. A remote that has diverged rejects every later
+    push the same way, and stays unpublished until a human pulls."""
     binary = _loom_bin()
     plan = json.dumps({"message": message, "changes": changes})
     try:
@@ -84,7 +92,10 @@ def apply_changes(message: str, changes: list[dict]) -> str:
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
         raise StoreWriteError(f"{binary} knowledge write: exit status {proc.returncode}: {detail}")
-    return _warn(proc.stdout)
+    warn, not_pushed = _outcomes(proc.stdout)
+    if not_pushed:
+        print(f"knowledge store not pushed: {not_pushed}", file=sys.stderr)
+    return warn
 
 
 def _loom_bin() -> str:
@@ -100,10 +111,12 @@ def _loom_bin() -> str:
     raise StoreWriteError("no loom binary: LOOM_BIN is unset and loom is not on PATH")
 
 
-def _warn(stdout: str) -> str:
-    """The commit's outcome, as the subcommand reports it. A response we cannot
-    read is reported as its own reason rather than raised: the writes landed, and
-    the caller's contract is that only a failed write is fatal."""
+def _outcomes(stdout: str) -> tuple[str, str]:
+    """The commit's outcome and the push's, as the subcommand reports them, read
+    from one parse so the unreadable case is handled once. A response we cannot
+    read is reported as the commit's reason rather than raised — the writes
+    landed, and the caller's contract is that only a failed write is fatal — and
+    never as the push's, which would name a step we have no answer about."""
     try:
         parsed = json.loads(stdout.strip() or "{}")
     except json.JSONDecodeError:
@@ -112,5 +125,5 @@ def _warn(stdout: str) -> str:
     # has no .get, and an AttributeError here would escape as neither a
     # StoreWriteError nor a reason.
     if not isinstance(parsed, dict):
-        return f"unreadable response from loom knowledge write: {stdout.strip()[:80]}"
-    return str(parsed.get("warn", ""))
+        return f"unreadable response from loom knowledge write: {stdout.strip()[:80]}", ""
+    return str(parsed.get("warn", "")), str(parsed.get("push_warn", ""))

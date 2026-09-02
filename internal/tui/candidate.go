@@ -42,22 +42,22 @@ func candidateKebab(id, scope string) string {
 // extracted_at/extracted_by, flips status to validated, bumps verified_at), and
 // commits the written destination and the removed source — those paths only, so
 // unrelated working-tree dirt stays out of the record. Returns the destination
-// path and, when the commit did not happen, the reason. It never overwrites an
-// existing validated file.
-func promoteCandidate(a Artifact) (string, string, error) {
+// path and, when the commit did not happen or was not published, the reason. It
+// never overwrites an existing validated file.
+func promoteCandidate(a Artifact) (string, store.Warn, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
-		return "", "", fmt.Errorf("unknown type %q", a.Type)
+		return "", store.Warn{}, fmt.Errorf("unknown type %q", a.Type)
 	}
 	if a.Status != "candidate" {
-		return "", "", fmt.Errorf("not a candidate")
+		return "", store.Warn{}, fmt.Errorf("not a candidate")
 	}
 	// Resolved once and handed to the store: KnowledgeRoot() twice — once to
 	// build the paths, once inside Apply — is two answers waiting to differ.
 	root := KnowledgeRoot()
 	dest := filepath.Join(root, plural, a.Scope, candidateKebab(a.ID, a.Scope)+".md")
 	if _, err := os.Stat(dest); err == nil {
-		return "", "", fmt.Errorf("%s already exists", shortenPath(dest))
+		return "", store.Warn{}, fmt.Errorf("%s already exists", shortenPath(dest))
 	}
 	// The files move inside the closure, so a failed commit is reported rather
 	// than rolled back: undoing the move to keep history tidy would throw away the
@@ -81,9 +81,14 @@ func promoteCandidate(a Artifact) (string, string, error) {
 		// candidate listed and the next attempt refused for a destination that is
 		// now there. Only a failure before the write leaves nothing behind.
 		if !written {
-			return "", "", err
+			return "", store.Warn{}, err
 		}
-		return dest, store.ShortReason(err), nil
+		// The store still committed and pushed what the write left behind, so its
+		// own outcome is kept and only the record's reason is overridden: a commit
+		// that landed unpublished has to reach the status line too.
+		w := warn
+		w.NotCommitted = store.ShortReason(err)
+		return dest, w, nil
 	}
 	return dest, warn, nil
 }
@@ -95,20 +100,20 @@ func promoteCandidate(a Artifact) (string, string, error) {
 // belongs in history rather than in untracked working-tree state. The record is
 // still the log.md entry alone and stays independent of the archive, which is
 // passed as droppable: a store that gitignores the archive gets its record
-// anyway. Returns the destination path and, when the record did not land, the
-// reason.
-func rejectCandidate(a Artifact) (string, string, error) {
+// anyway. Returns the destination path and, when the record did not land or was
+// not published, the reason.
+func rejectCandidate(a Artifact) (string, store.Warn, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
-		return "", "", fmt.Errorf("unknown type %q", a.Type)
+		return "", store.Warn{}, fmt.Errorf("unknown type %q", a.Type)
 	}
 	if a.Status != "candidate" {
-		return "", "", fmt.Errorf("not a candidate")
+		return "", store.Warn{}, fmt.Errorf("not a candidate")
 	}
 	root := KnowledgeRoot()
 	dest := filepath.Join(root, "_candidates", "_rejected", plural, a.Scope, filepath.Base(a.Path))
 	if _, err := os.Stat(dest); err == nil {
-		return "", "", fmt.Errorf("%s already exists", shortenPath(dest))
+		return "", store.Warn{}, fmt.Errorf("%s already exists", shortenPath(dest))
 	}
 	// The source stays in the pathspec — its removal is a real change to the
 	// candidates tree — and the store drops it when it was never tracked. The
@@ -138,9 +143,13 @@ func rejectCandidate(a Artifact) (string, string, error) {
 		// move — the store has no log.md to append the decision to is the one
 		// after it — leaves the gesture itself unlanded.
 		if !archived {
-			return "", "", err
+			return "", store.Warn{}, err
 		}
-		return dest, store.ShortReason(err), nil
+		// As in promote: the store's own outcome is kept, since the commit the
+		// archive produced may have landed unpublished.
+		w := warn
+		w.NotCommitted = store.ShortReason(err)
+		return dest, w, nil
 	}
 	return dest, warn, nil
 }

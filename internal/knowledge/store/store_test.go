@@ -108,8 +108,8 @@ func TestApplyNewWriterNeedsNoCommitCode(t *testing.T) {
 		return tx.WriteFile(dest, []byte("# a new writer\n"))
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if subject := testGit(t, root, "log", "-1", "--format=%s"); subject != "write truths/loom/new-writer.md" {
 		t.Errorf("commit subject = %q", subject)
@@ -158,8 +158,8 @@ func TestApplyCommitsEveryOp(t *testing.T) {
 		return tx.Append(filepath.Join(root, "log.md"), "\n## [2026-08-23] every op\n")
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	names := committed(t, root)
 	for _, want := range []string{
@@ -202,8 +202,8 @@ func TestApplyLeavesUnrelatedDirtAlone(t *testing.T) {
 		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if names := committed(t, root); strings.Contains(names, "index.md") || strings.Contains(names, "stray.md") {
 		t.Errorf("commit absorbed pre-existing dirt:\n%s", names)
@@ -234,8 +234,8 @@ func TestApplyDropsUntrackedRemovedPath(t *testing.T) {
 		return tx.Remove(untracked)
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	names := committed(t, root)
 	if !strings.Contains(names, "A\ttruths/loom/one.md") {
@@ -255,8 +255,8 @@ func TestApplyNoRecordedPathsLeavesNoCommit(t *testing.T) {
 
 	warn, err := Apply("touched nothing", func(tx *Tx) error { return nil })
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
 		t.Errorf("HEAD moved for a unit of work that touched nothing: %s -> %s", head, now)
@@ -281,8 +281,8 @@ func TestApplyCommitsWritesThatLandedBeforeAnError(t *testing.T) {
 	if !errors.Is(err, fail) {
 		t.Fatalf("Apply err = %v, want the closure's own error", err)
 	}
-	if warn != "" {
-		t.Fatalf("Apply warn = %q, want the commit to have landed", warn)
+	if warn.NotCommitted != "" {
+		t.Fatalf("Apply warn = %q, want the commit to have landed", warn.NotCommitted)
 	}
 	if names := committed(t, root); !strings.Contains(names, "A\ttruths/loom/one.md") {
 		t.Errorf("commit does not carry the write that landed:\n%s", names)
@@ -309,8 +309,8 @@ func TestApplyAppendNeedsAnExistingFile(t *testing.T) {
 	if !strings.Contains(err.Error(), "log.md") {
 		t.Errorf("err = %v, want a reason naming the file", err)
 	}
-	if warn != "" {
-		t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn)
+	if warn.NotCommitted != "" {
+		t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn.NotCommitted)
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Errorf("append bootstrapped the file: %v", err)
@@ -338,8 +338,8 @@ func TestApplyDroppableIgnoredPathLeavesPathspec(t *testing.T) {
 		return tx.Append(filepath.Join(root, "log.md"), "\n## [2026-08-23] reject one\n")
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	names := committed(t, root)
 	if !strings.Contains(names, "M\tlog.md") {
@@ -374,7 +374,7 @@ func TestApplyIgnoredRecordFailsLoudly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if warn == "" {
+	if warn.NotCommitted == "" {
 		t.Fatal("an ignored record committed cleanly")
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
@@ -406,8 +406,8 @@ func TestApplyIgnoredTrackedRemovalStaysInPathspec(t *testing.T) {
 
 	warn, err := Apply("reject one", func(tx *Tx) error { return tx.Remove(tracked) })
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if names := committed(t, root); !strings.Contains(names, "D\t_candidates/truths/loom/one.md") {
 		t.Errorf("commit does not delete the tracked candidate:\n%s", names)
@@ -427,8 +427,8 @@ func TestApplyNonRepoDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if warn != errNoGitRepo.Error() {
-		t.Errorf("warn = %q, want %q", warn, errNoGitRepo.Error())
+	if warn.NotCommitted != errNoGitRepo.Error() {
+		t.Errorf("warn = %q, want %q", warn.NotCommitted, errNoGitRepo.Error())
 	}
 	if _, err := os.Stat(dest); err != nil {
 		t.Errorf("written file missing: %v", err)
@@ -460,8 +460,8 @@ func TestApplyEnclosingRepoDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if warn != errEnclosingRepo.Error() {
-		t.Errorf("warn = %q, want %q", warn, errEnclosingRepo.Error())
+	if warn.NotCommitted != errEnclosingRepo.Error() {
+		t.Errorf("warn = %q, want %q", warn.NotCommitted, errEnclosingRepo.Error())
 	}
 	if now := testGit(t, parent, "rev-parse", "HEAD"); now != head {
 		t.Errorf("enclosing repo HEAD moved: %s -> %s", head, now)
@@ -485,11 +485,11 @@ func TestApplyMissingGitDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if strings.Contains(warn, errNoGitRepo.Error()) {
-		t.Errorf("warn blames the store's layout for a git that would not run: %q", warn)
+	if strings.Contains(warn.NotCommitted, errNoGitRepo.Error()) {
+		t.Errorf("warn blames the store's layout for a git that would not run: %q", warn.NotCommitted)
 	}
-	if !strings.Contains(warn, "git") {
-		t.Errorf("warn = %q, want a reason naming git", warn)
+	if !strings.Contains(warn.NotCommitted, "git") {
+		t.Errorf("warn = %q, want a reason naming git", warn.NotCommitted)
 	}
 	if logged := gitLog(t); !strings.Contains(logged, exec.ErrNotFound.Error()) {
 		t.Errorf("log record does not record the missing binary:\n%q", logged)
@@ -547,11 +547,11 @@ func TestApplyFailedCommitUnstagesAndLogsInFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if warn == "" {
+	if warn.NotCommitted == "" {
 		t.Fatal("a rejected commit reported success")
 	}
-	if len([]rune(warn)) > gitReasonMax {
-		t.Errorf("warn is %d runes, want at most %d: %q", len([]rune(warn)), gitReasonMax, warn)
+	if len([]rune(warn.NotCommitted)) > gitReasonMax {
+		t.Errorf("warn is %d runes, want at most %d: %q", len([]rune(warn.NotCommitted)), gitReasonMax, warn.NotCommitted)
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
 		t.Errorf("HEAD moved despite a failed commit: %s -> %s", head, now)
@@ -572,6 +572,173 @@ func TestApplyFailedCommitUnstagesAndLogsInFull(t *testing.T) {
 	}
 }
 
+// seedRemoteStore is seedStore with a bare repo alongside it as origin and the
+// branch tracking it, so a gesture's push has somewhere to land. file:// rather
+// than a bare path: it is the form a real store's remote takes, and it is what
+// makes the push a push rather than a local shortcut.
+func seedRemoteStore(t *testing.T) (root, remote string) {
+	t.Helper()
+	root = seedStore(t)
+	remote = filepath.Join(t.TempDir(), "origin.git")
+	testGit(t, root, "init", "--bare", remote)
+	testGit(t, root, "remote", "add", "origin", "file://"+remote)
+	testGit(t, root, "push", "-u", "origin", "HEAD")
+	return root, remote
+}
+
+// TestApplyPushesTheCommit: the store's commits are the only copy of a human's
+// promote and reject decisions, so a gesture that commits and stops leaves the
+// irreplaceable part of the store unpublished. The push is the gesture's, which
+// is what bounds that window.
+func TestApplyPushesTheCommit(t *testing.T) {
+	root, remote := seedRemoteStore(t)
+	branch := testGit(t, root, "symbolic-ref", "--short", "HEAD")
+	// The seed left the remote's ref at HEAD, so "published == head" alone holds
+	// for a gesture that committed nothing. The commit has to be seen to move.
+	before := testGit(t, root, "rev-parse", "HEAD")
+
+	warn, err := Apply("write one", func(tx *Tx) error {
+		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
+	})
+
+	if err != nil || warn != (Warn{}) {
+		t.Fatalf("Apply: err=%v warn=%+v", err, warn)
+	}
+	head := testGit(t, root, "rev-parse", "HEAD")
+	if head == before {
+		t.Fatalf("HEAD did not move: the gesture left no commit to push (%s)", head)
+	}
+	if published := testGit(t, remote, "rev-parse", branch); published != head {
+		t.Errorf("remote ref = %s, want the commit the gesture made (%s)", published, head)
+	}
+	if st := testGit(t, root, "status", "-sb"); strings.Contains(st, "ahead") {
+		t.Errorf("branch is still ahead of its upstream after the gesture:\n%s", st)
+	}
+}
+
+// TestApplyPushIgnoresHostPushConfig: the push names its remote and its
+// remote-side ref, so the store cannot inherit a push it did not ask for.
+// push.default=nothing would refuse a plain push every time — a not-pushed warn
+// no later gesture could heal — matching would carry a second branch nobody
+// pointed the store at, and followTags would publish a tag this gesture never
+// touched. All three are set here, and exactly the current branch's commit is
+// what lands.
+func TestApplyPushIgnoresHostPushConfig(t *testing.T) {
+	root, remote := seedRemoteStore(t)
+	branch := testGit(t, root, "symbolic-ref", "--short", "HEAD")
+	testGit(t, root, "checkout", "-b", "side")
+	testGit(t, root, "commit", "--allow-empty", "-m", "side seed")
+	testGit(t, root, "push", "origin", "side")
+	published := testGit(t, root, "rev-parse", "side")
+	testGit(t, root, "commit", "--allow-empty", "-m", "side work the gesture never touched")
+	testGit(t, root, "checkout", branch)
+	testGit(t, root, "tag", "local-tag")
+	testGit(t, root, "config", "push.default", "nothing")
+	testGit(t, root, "config", "push.followTags", "true")
+
+	warn, err := Apply("write one", func(tx *Tx) error {
+		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
+	})
+
+	if err != nil || warn != (Warn{}) {
+		t.Fatalf("Apply: err=%v warn=%+v", err, warn)
+	}
+	head := testGit(t, root, "rev-parse", "HEAD")
+	if got := testGit(t, remote, "rev-parse", branch); got != head {
+		t.Errorf("remote %s = %s, want the commit the gesture made (%s)", branch, got, head)
+	}
+	if got := testGit(t, remote, "rev-parse", "side"); got != published {
+		t.Errorf("remote side moved: %s -> %s, a branch the gesture never touched", published, got)
+	}
+	if tags := testGit(t, remote, "tag"); tags != "" {
+		t.Errorf("push published tags the gesture never touched:\n%s", tags)
+	}
+}
+
+// TestApplyFailedPushKeepsTheCommit: a push that fails is not the commit
+// failing. The record is correct and complete locally, the next gesture's push
+// carries it, and rolling the commit back to keep the branch in sync would throw
+// away the human judgment the commit exists to hold.
+func TestApplyFailedPushKeepsTheCommit(t *testing.T) {
+	root, remote := seedRemoteStore(t)
+	head := testGit(t, root, "rev-parse", "HEAD")
+	// An absent local path rather than an unreachable host: git fails at once,
+	// so the test asserts the store's handling instead of waiting out a network
+	// timeout.
+	testGit(t, root, "remote", "set-url", "origin", filepath.Join(filepath.Dir(remote), "absent.git"))
+
+	warn, err := Apply("write one", func(tx *Tx) error {
+		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
+	})
+
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if warn.NotCommitted != "" {
+		t.Errorf("a failed push reported the commit as missing: %q", warn.NotCommitted)
+	}
+	if warn.NotPushed == "" {
+		t.Fatal("a failed push reported a published record")
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now == head {
+		t.Error("HEAD did not move: a failed push took the commit with it")
+	}
+	if st := testGit(t, root, "status", "-sb"); !strings.Contains(st, "ahead 1") {
+		t.Errorf("branch is not ahead of its upstream after a failed push:\n%s", st)
+	}
+	logged := gitLog(t)
+	if !strings.Contains(logged, "write one") || !strings.Contains(logged, "git push") {
+		t.Errorf("log record does not name the gesture and the failed push:\n%q", logged)
+	}
+}
+
+// TestApplyNoUpstreamDegrades: a store nobody configured a remote for is the
+// bootstrap's own shape, not a failure. It degrades like a store that is not a
+// repo — a stated reason, no error, and the commit still lands.
+func TestApplyNoUpstreamDegrades(t *testing.T) {
+	root := seedStore(t)
+	head := testGit(t, root, "rev-parse", "HEAD")
+
+	warn, err := Apply("write one", func(tx *Tx) error {
+		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
+	})
+
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if warn.NotCommitted != "" {
+		t.Errorf("warn = %q, want the commit to have landed", warn.NotCommitted)
+	}
+	if warn.NotPushed != errNoUpstream.Error() {
+		t.Errorf("push warn = %q, want %q", warn.NotPushed, errNoUpstream.Error())
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now == head {
+		t.Error("HEAD did not move: the commit did not land")
+	}
+}
+
+// TestApplyDetachedHeadDegrades: a detached HEAD names no branch whose tracking
+// configuration the push could resolve, so it degrades with its own reason
+// rather than moving a ref nobody pointed us at.
+func TestApplyDetachedHeadDegrades(t *testing.T) {
+	root, _ := seedRemoteStore(t)
+	testGit(t, root, "checkout", "--detach")
+
+	warn, err := Apply("write one", func(tx *Tx) error {
+		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
+	})
+
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if warn.NotCommitted != "" {
+		t.Errorf("warn = %q, want the commit to have landed", warn.NotCommitted)
+	}
+	if warn.NotPushed != errDetachedHead.Error() {
+		t.Errorf("push warn = %q, want %q", warn.NotPushed, errDetachedHead.Error())
+	}
+}
+
 // TestApplyHooksDoNotRun: the store's hooks stay out of every writer. One that
 // blocked would hang the TUI with no way to answer it and wedge an unattended
 // sweep with nobody there to; the store is a data store loom's bootstrap
@@ -588,8 +755,8 @@ func TestApplyHooksDoNotRun(t *testing.T) {
 		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if subject := testGit(t, root, "log", "-1", "--format=%s"); subject != "write one" {
 		t.Errorf("commit subject = %q", subject)
@@ -609,8 +776,8 @@ func TestApplyCommitSubjectIsOneLine(t *testing.T) {
 		return tx.WriteFile(filepath.Join(root, "truths", "loom", "one.md"), []byte("one\n"))
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	body := testGit(t, root, "log", "-1", "--format=%B")
 	if strings.Contains(body, "\n") {
@@ -744,8 +911,8 @@ func TestApplyRefusesWritesOutsideTheStore(t *testing.T) {
 			if tc.want == outsideStore && !strings.Contains(err.Error(), root) && !strings.Contains(err.Error(), shortenPath(root)) {
 				t.Errorf("err = %v, does not name the root it was held against", err)
 			}
-			if warn != "" {
-				t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn)
+			if warn.NotCommitted != "" {
+				t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn.NotCommitted)
 			}
 			if body, err := os.ReadFile(external); err != nil || string(body) != "untouched\n" {
 				t.Errorf("the external file was touched: %q, %v", string(body), err)
@@ -775,8 +942,8 @@ func TestApplyCommitsThroughASymlinkedRoot(t *testing.T) {
 		return tx.WriteFile(filepath.Join(link, "truths", "loom", "one.md"), []byte("one\n"))
 	})
 
-	if err != nil || warn != "" {
-		t.Fatalf("Apply: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("Apply: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if names := committed(t, real); !strings.Contains(names, "A\ttruths/loom/one.md") {
 		t.Errorf("commit does not add the written file:\n%s", names)
@@ -799,8 +966,8 @@ func TestApplyNoChangeLeavesNoCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if warn != "" {
-		t.Errorf("warn = %q, want no failure for a path that did not change", warn)
+	if warn.NotCommitted != "" {
+		t.Errorf("warn = %q, want no failure for a path that did not change", warn.NotCommitted)
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
 		t.Errorf("HEAD moved for a path that did not change: %s -> %s", head, now)
@@ -828,8 +995,8 @@ func TestApplyInCommitsAgainstTheRootItIsGiven(t *testing.T) {
 			return tx.Append(filepath.Join(root, "log.md"), "\n## [2026-08-23] retrospect loom/one\n")
 		})
 
-	if err != nil || warn != "" {
-		t.Fatalf("ApplyIn: err=%v warn=%q", err, warn)
+	if err != nil || warn.NotCommitted != "" {
+		t.Fatalf("ApplyIn: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if names := committed(t, root); !strings.Contains(names, "M\tlog.md") {
 		t.Errorf("commit does not record the entry:\n%s", names)
@@ -908,8 +1075,8 @@ func TestApplyRefusesTheStoresOwnRepository(t *testing.T) {
 			if !strings.Contains(err.Error(), "the store's own git repository") {
 				t.Errorf("err = %v, want a reason naming the rule", err)
 			}
-			if warn != "" {
-				t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn)
+			if warn.NotCommitted != "" {
+				t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn.NotCommitted)
 			}
 			if now, err := os.ReadFile(config); err != nil || string(now) != string(before) {
 				t.Errorf("the repository's config was touched: %v", err)
@@ -947,8 +1114,8 @@ func TestApplyRefusesARootItCannotOpen(t *testing.T) {
 		if !strings.Contains(err.Error(), "knowledge store") || !strings.Contains(err.Error(), shortenPath(root)) {
 			t.Errorf("err = %v, does not name the store it could not open", err)
 		}
-		if warn != "" {
-			t.Errorf("warn = %q, want no commit for a store that was never opened", warn)
+		if warn.NotCommitted != "" {
+			t.Errorf("warn = %q, want no commit for a store that was never opened", warn.NotCommitted)
 		}
 		// Checked for absence rather than for ErrNotExist: a root that is a file
 		// answers "not a directory", which is equally a tree that was not created.
@@ -1033,8 +1200,8 @@ func TestApplyRefusesASymlinkInTheStore(t *testing.T) {
 			if !strings.Contains(err.Error(), "is a symlink") {
 				t.Errorf("err = %v, want a reason naming the link", err)
 			}
-			if warn != "" {
-				t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn)
+			if warn.NotCommitted != "" {
+				t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn.NotCommitted)
 			}
 			if now, err := os.ReadFile(config); err != nil || string(now) != string(before) {
 				t.Errorf("the repository's config was touched: %v", err)
@@ -1081,8 +1248,8 @@ func TestApplyRefusesTouchingADirectory(t *testing.T) {
 		if !strings.Contains(err.Error(), "is a directory") {
 			t.Errorf("err = %v, want a reason naming the directory", err)
 		}
-		if warn != "" {
-			t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn)
+		if warn.NotCommitted != "" {
+			t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn.NotCommitted)
 		}
 		if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
 			t.Errorf("HEAD moved for a refused touch: %s -> %s", head, now)

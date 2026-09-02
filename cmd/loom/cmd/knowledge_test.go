@@ -46,6 +46,25 @@ func storeGit(t *testing.T, root string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// writeResult is the subcommand's JSON response. The two outcomes are separate
+// because they degrade differently: warn means no commit records the writes,
+// push_warn that a commit that did land is still local — which a fixture store,
+// having no upstream, reports for every plan that commits.
+type writeResult struct {
+	Warn     string `json:"warn"`
+	PushWarn string `json:"push_warn"`
+}
+
+// parseWriteResult reads the response off the subcommand's stdout.
+func parseWriteResult(t *testing.T, out string) writeResult {
+	t.Helper()
+	var result writeResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("stdout %q: %v", out, err)
+	}
+	return result
+}
+
 // runWrite drives one plan through a command built exactly like the registered
 // one, returning its stdout and the error the process would exit on.
 func runWrite(t *testing.T, plan string) (string, error) {
@@ -95,8 +114,8 @@ func TestKnowledgeWriteAppliesAPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("knowledge write: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(out) != `{"warn":""}` {
-		t.Errorf("stdout = %q, want an empty warning", out)
+	if warn := parseWriteResult(t, out).Warn; warn != "" {
+		t.Errorf("warn = %q, want an empty warning", warn)
 	}
 	if subject := storeGit(t, root, "log", "-1", "--format=%s"); subject != "extract abc | loom | 1 truth candidate(s)" {
 		t.Errorf("commit subject = %q", subject)
@@ -172,8 +191,8 @@ func TestKnowledgeWriteFailedWriteStillCommits(t *testing.T) {
 	if !strings.Contains(err.Error(), "log.md") {
 		t.Errorf("error %v does not name the failed write", err)
 	}
-	if !strings.Contains(out, `{"warn":""}`) {
-		t.Errorf("stdout = %q, want the record's own outcome alongside the failure", out)
+	if warn := parseWriteResult(t, out).Warn; warn != "" {
+		t.Errorf("warn = %q, want the record's own outcome alongside the failure", warn)
 	}
 	if names := storeGit(t, root, "show", "--name-status", "--format=", "HEAD"); !strings.Contains(names, "A\ttruths/loom/one.md") {
 		t.Errorf("the write that landed was not committed:\n%s", names)
@@ -194,10 +213,7 @@ func TestKnowledgeWriteReportsAFailedCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("knowledge write: %v\n%s", err, out)
 	}
-	var result struct{ Warn string }
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		t.Fatalf("stdout %q: %v", out, err)
-	}
+	result := parseWriteResult(t, out)
 	if !strings.Contains(result.Warn, "not a git repo") {
 		t.Errorf("warn = %q, want a not-a-git-repo reason", result.Warn)
 	}
@@ -234,7 +250,7 @@ func TestKnowledgeWriteRefusesAPathOutsideTheStore(t *testing.T) {
 	if now := storeGit(t, root, "rev-parse", "HEAD"); now != head {
 		t.Errorf("HEAD moved for a refused write: %s -> %s", head, now)
 	}
-	if !strings.Contains(out, `{"warn":""}`) {
-		t.Errorf("stdout = %q, want the record's own outcome alongside the failure", out)
+	if warn := parseWriteResult(t, out).Warn; warn != "" {
+		t.Errorf("warn = %q, want the record's own outcome alongside the failure", warn)
 	}
 }
