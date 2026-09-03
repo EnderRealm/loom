@@ -6,7 +6,9 @@
 // package rather than of each caller, so a new writer carries no commit code and
 // cannot forget one; the store's rules (writes confined to the store,
 // path-scoped commits, an untouched dirty tree, the non-repo and enclosing-repo
-// sentinels, record sanitization) live here and nowhere else.
+// sentinels, record sanitization) live here and nowhere else. ApplyDeferred
+// hands the caller when the store's commit runs — never what it does — for the
+// writer that cannot block where Apply returns.
 package store
 
 import (
@@ -314,6 +316,31 @@ func Apply(message string, fn func(*Tx) error) (Warn, error) {
 // re-resolved per rule, so the containment check, the writes and the commit are
 // all held against the same store.
 func ApplyIn(root, message string, fn func(*Tx) error) (Warn, error) {
+	commit, err := ApplyDeferred(root, message, fn)
+	return commit(), err
+}
+
+// Commit records and publishes one unit of work whose filesystem writes have
+// already landed, returning what Apply's warn carries. ApplyDeferred never
+// returns a nil Commit: a unit of work that recorded nothing to commit gets one
+// that yields the zero Warn.
+type Commit func() Warn
+
+// ApplyDeferred is ApplyIn with the commit left for the caller to run: the
+// writes have landed when it returns, and the returned Commit is the record.
+// For the caller that must not block where ApplyIn commits — the TUI's promote
+// and reject run it as a tea.Cmd, off the bubbletea update loop, since a unit of
+// work makes several git invocations in sequence and a frozen frame is the cost.
+// The store still owns what the commit does; the caller owns only when it runs.
+//
+// The open root handle is closed before the returned Commit runs, which the
+// commit does not need: commitKnowledge addresses the store by path (git -C
+// root) and never through that handle.
+//
+// Error semantics are ApplyIn's: the store's own error when the root could not
+// be opened, in which case fn never ran, and fn's error verbatim otherwise —
+// both logged in full first.
+func ApplyDeferred(root, message string, fn func(*Tx) error) (Commit, error) {
 	message = SanitizeRecord(message)
 	dir, err := os.OpenRoot(root)
 	if err != nil {
@@ -324,7 +351,7 @@ func ApplyIn(root, message string, fn func(*Tx) error) (Warn, error) {
 		// reason Append never creates the file it appends to.
 		err = fmt.Errorf("knowledge store %s: %w", shortenPath(root), err)
 		logFailure(message, err)
-		return Warn{}, err
+		return noCommit, err
 	}
 	defer dir.Close()
 	tx := &Tx{root: root, rootAbs: abs(root), dir: dir}
@@ -334,10 +361,14 @@ func ApplyIn(root, message string, fn func(*Tx) error) (Warn, error) {
 	}
 	paths, droppable := tx.pathspec()
 	if len(paths)+len(droppable) == 0 {
-		return Warn{}, err
+		return noCommit, err
 	}
-	return recordKnowledgeCommit(root, paths, droppable, message), err
+	return func() Warn { return recordKnowledgeCommit(root, paths, droppable, message) }, err
 }
+
+// noCommit is the Commit for a unit of work that recorded no path: nothing was
+// touched, so there is nothing to record and nothing to warn about.
+func noCommit() Warn { return Warn{} }
 
 // ShortReason collapses an error Apply handed back to the head of its first
 // line, bounded, for a caller with one line to report it on. Apply has already

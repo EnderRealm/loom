@@ -56,8 +56,12 @@ likeliest steady-state failure for a store shared across machines — is rejecte
 identically on every later gesture, and the store stays unpublished until a human
 pulls or rebases; nothing here pulls on their behalf. A store with no remote, no
 upstream for the branch, or a detached HEAD degrades with a stated reason rather
-than an error, the way a store that is not a repo does, and every git call is
-bounded so a hung network cannot lock the TUI.
+than an error, the way a store that is not a repo does. Every git call is bounded
+on its own, and a unit of work is the sum of the several it makes — that bound is
+what keeps an unattended sweep from wedging on a child blocked with nobody there
+to answer it. The TUI's gestures stay responsive for a different reason: their
+commit runs off the update loop as a `tea.Cmd`, so the sum is never paid on a
+frame.
 
 `Apply` writes the store at `knowledge.Root()`. `ApplyIn(root, message, fn)` is
 the same against a named root, for the caller that resolves the store some other
@@ -65,6 +69,13 @@ way — `internal/extract` takes it from the extractor's persisted tunables, whi
 may name a store the process environment does not. The root travels with the
 unit of work, so the containment check, the writes and the commit are all held
 against the same store.
+
+`ApplyDeferred(root, message, fn)` is `ApplyIn` with the commit handed back
+rather than run: the writes have landed when it returns, and the record does not
+exist until the returned `Commit` is called. A dropped `Commit` skips the record
+silently — nothing catches it, `go vet` included — so this is for the caller that
+must not block where `ApplyIn` commits, which today is the TUI's promote and
+reject and nothing else. A writer that can block uses `Apply` or `ApplyIn`.
 
 `Tx` is the whole write vocabulary:
 
@@ -124,6 +135,11 @@ Call `store.Apply` — or `store.ApplyIn` when you resolve the store root
 yourself. That is the whole of it: see `commitEdit` in
 `internal/tui/knowledge.go` and `appendRetrospectLog` in
 `internal/extract/retrospect.go`, neither of which contains any git.
+
+`ApplyDeferred` is not a third option to weigh. It is for a writer that cannot
+block where the commit runs — the TUI's gestures, whose commit would otherwise
+freeze a frame — and it moves the record's timing onto that writer, which is a
+way to lose the record rather than a convenience.
 
 ## Adding a writer in Python
 

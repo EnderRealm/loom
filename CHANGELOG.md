@@ -42,6 +42,29 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The knowledge gestures no longer run their git on the bubbletea update
+  loop. A promote or a reject is several git invocations in sequence,
+  each bounded on its own by the store's timeout, and running them where
+  bubbletea dispatches keys froze the frame for their sum — on a slow
+  remote, seconds of a TUI that answered nothing. The move is what takes
+  the candidate out of the list, so it stays where it was: it has landed
+  when the gesture returns, the list reloads against it immediately, and
+  the commit's outcome arrives afterwards on the status line, composed
+  onto the line the gesture already set rather than replacing it. The
+  seam is `store.ApplyDeferred`, which performs the write and hands back
+  the commit to run later; what the commit does — the pathspec, the
+  droppable paths, the push, `knowledge-git.log` — is still the store's,
+  so no caller gained git code. The store now also serializes its own
+  commits in-process, since two of them overlapping in one repo contend
+  on `index.lock`, which git answers by failing rather than waiting.
+  Quitting waits on a commit still in flight, reporting the wait on the
+  status line: bubbletea abandons a Cmd's goroutine at exit and cmd/loom
+  returns as soon as Run does, so leaving mid-commit abandons the
+  sequence partway — the git child already running is orphaned rather
+  than killed, but the push, the unstaging recovery and the outcome
+  report never happen, stranding the gesture's already-moved file with a
+  record that is at best partial and reported nowhere. The wait is
+  bounded only by git, so a second press leaves anyway.
 - The knowledge store's entry point now pushes the commit it just made,
   so a promote or a reject leaves the store's branch in sync with its
   upstream. Nothing ever pushed the store before: it was published only

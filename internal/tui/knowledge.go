@@ -34,6 +34,12 @@ type knowledgeModel struct {
 
 	showDetail   bool // sub-view: full body of selected artifact
 	detailScroll int  // line offset into selected.Body when showDetail
+
+	// pendingCommits counts the deferred commits still running off the update
+	// loop, which App drains before it quits: bubbletea abandons a Cmd's
+	// goroutine at exit, so the steps left in the sequence — and the outcome
+	// report — never run, and the gesture's file has already moved.
+	pendingCommits int
 }
 
 func (m *knowledgeModel) setSize(w, h int) {
@@ -187,19 +193,21 @@ func (m knowledgeModel) promote() (knowledgeModel, tea.Cmd) {
 	if a.Status != "candidate" {
 		return m, statusCmd("only candidates can be promoted")
 	}
-	dest, warn, err := promoteCandidate(*a)
+	dest, commit, err := promoteCandidate(*a)
 	if err != nil {
 		return m, statusCmd("promote failed: " + err.Error())
 	}
 	m.showDetail = false
+	m.pendingCommits++
 	status := "promoted → " + shortenPath(dest)
-	if warn.NotCommitted != "" {
-		status += " — not committed: " + warn.NotCommitted
-	}
-	if warn.NotPushed != "" {
-		status += " — not pushed: " + warn.NotPushed
-	}
-	return m, tea.Batch(statusCmd(status), loadKnowledgeCmd())
+	// The move has landed, so the status and the reload go first and the git work
+	// follows off the update loop: the promoted candidate leaves the list at the
+	// gesture rather than at the end of the commit. Sequenced against the status,
+	// since the commit's outcome composes onto that line and a batch would let the
+	// plain line arrive last and wipe it; the reload stays a batch member so it is
+	// not held behind git.
+	return m, tea.Batch(loadKnowledgeCmd(),
+		tea.Sequence(statusCmd(status), commitCmd(commit, status, " — not committed: ")))
 }
 
 func (m knowledgeModel) reject() (knowledgeModel, tea.Cmd) {
@@ -210,24 +218,31 @@ func (m knowledgeModel) reject() (knowledgeModel, tea.Cmd) {
 	if a.Status != "candidate" {
 		return m, statusCmd("only candidates can be rejected")
 	}
-	_, warn, err := rejectCandidate(*a)
+	_, commit, err := rejectCandidate(*a)
 	if err != nil {
 		return m, statusCmd("reject failed: " + err.Error())
 	}
 	m.showDetail = false
+	m.pendingCommits++
 	status := "rejected — archived to _rejected/"
-	if warn.NotCommitted != "" {
-		// Not "not committed": the reject's record can also fail to be written
-		// at all, when the store has no log.md to append the decision to.
-		status += " — record not saved: " + warn.NotCommitted
+	// Not "not committed": the reject's record can also fail to be written at
+	// all, when the store has no log.md to append the decision to. Ordered as in
+	// promote: the outcome composes onto the gesture's line, so it cannot precede
+	// it.
+	return m, tea.Batch(loadKnowledgeCmd(),
+		tea.Sequence(statusCmd(status), commitCmd(commit, status, " — record not saved: ")))
+}
+
+// commitCmd runs a gesture's deferred store commit off the update loop. The git
+// work is several invocations in sequence, each bounded on its own by
+// gitTimeout, so running it where bubbletea dispatches keys would freeze the
+// frame for their sum. status is the line the gesture already set and
+// notCommitted its own wording for a record that did not land, both carried
+// through so the outcome composes onto that line rather than replacing it.
+func commitCmd(commit store.Commit, status, notCommitted string) tea.Cmd {
+	return func() tea.Msg {
+		return knowledgeCommittedMsg{status: status, notCommitted: notCommitted, warn: commit()}
 	}
-	if warn.NotPushed != "" {
-		// The record exists in the store's history and only the publication is
-		// missing, which the next gesture's push carries unless the remote has
-		// diverged.
-		status += " — not pushed: " + warn.NotPushed
-	}
-	return m, tea.Batch(statusCmd(status), loadKnowledgeCmd())
 }
 
 func (m knowledgeModel) edit() (knowledgeModel, tea.Cmd) {
@@ -244,14 +259,20 @@ func (m knowledgeModel) edit() (knowledgeModel, tea.Cmd) {
 	}
 	cmd := exec.Command(editor, a.Path)
 	edited := *a
+	// The commit runs inside ExecProcess's callback, which bubbletea dispatches
+	// off the update loop, so it is counted like a gesture's: a quit that did not
+	// wait for it would kill the commit and leave what $EDITOR wrote as
+	// working-tree state nothing records. Every path out of the callback reports
+	// as knowledgeEditedMsg so the count always comes back down.
+	m.pendingCommits++
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
-			return statusMsg("editor exited: " + err.Error())
+			return knowledgeEditedMsg{status: "editor exited: " + err.Error()}
 		}
 		warn := commitEdit(edited)
 		arts, e := LoadKnowledge()
 		if e != nil {
-			return errMsg(e)
+			return knowledgeEditedMsg{status: "edited — reload failed: " + e.Error()}
 		}
 		return knowledgeEditedMsg{artifacts: arts, warn: warn}
 	})

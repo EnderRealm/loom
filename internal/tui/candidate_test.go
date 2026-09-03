@@ -80,13 +80,31 @@ func seedCandidate(t *testing.T) (string, Artifact) {
 	return root, arts[0]
 }
 
+// promoteNow and rejectNow run a gesture and its deferred commit together, for
+// the tests that assert on the record rather than on the ordering of the two.
+func promoteNow(a Artifact) (string, store.Warn, error) {
+	dest, commit, err := promoteCandidate(a)
+	if err != nil {
+		return dest, store.Warn{}, err
+	}
+	return dest, commit(), nil
+}
+
+func rejectNow(a Artifact) (string, store.Warn, error) {
+	dest, commit, err := rejectCandidate(a)
+	if err != nil {
+		return dest, store.Warn{}, err
+	}
+	return dest, commit(), nil
+}
+
 func TestPromoteCandidate(t *testing.T) {
 	root, art := seedCandidate(t)
 	if art.Status != "candidate" {
 		t.Fatalf("seed status = %q, want candidate", art.Status)
 	}
 
-	dest, _, err := promoteCandidate(art)
+	dest, _, err := promoteNow(art)
 	if err != nil {
 		t.Fatalf("promoteCandidate: %v", err)
 	}
@@ -147,7 +165,7 @@ func TestPromoteCandidateNoOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := promoteCandidate(art); err == nil {
+	if _, _, err := promoteNow(art); err == nil {
 		t.Fatal("expected promote to refuse overwriting an existing validated file")
 	}
 	if b, _ := os.ReadFile(existing); string(b) != "keep me\n" {
@@ -161,7 +179,7 @@ func TestPromoteCandidateNoOverwrite(t *testing.T) {
 func TestRejectCandidate(t *testing.T) {
 	root, art := seedCandidate(t)
 
-	dest, _, err := rejectCandidate(art)
+	dest, _, err := rejectNow(art)
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
@@ -230,7 +248,7 @@ func seedGitCandidate(t *testing.T, initArgs ...string) (root string, art Artifa
 func TestPromoteCandidateCommits(t *testing.T) {
 	root, art := seedGitCandidate(t)
 
-	dest, warn, err := promoteCandidate(art)
+	dest, warn, err := promoteNow(art)
 	if err != nil {
 		t.Fatalf("promoteCandidate: %v", err)
 	}
@@ -256,6 +274,42 @@ func TestPromoteCandidateCommits(t *testing.T) {
 	}
 }
 
+// TestPromoteMovesTheFileBeforeTheCommit: the move is what takes the candidate
+// out of the list, and it is ordered ahead of the record — the TUI reloads at
+// the gesture and runs the commit off its update loop, so a reload that happens
+// while git is still working has to already see the promotion.
+func TestPromoteMovesTheFileBeforeTheCommit(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	head := testGit(t, root, "rev-parse", "HEAD")
+
+	dest, commit, err := promoteCandidate(art)
+	if err != nil {
+		t.Fatalf("promoteCandidate: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("promoted file missing before the commit ran: %v", err)
+	}
+	if _, err := os.Stat(art.Path); !os.IsNotExist(err) {
+		t.Errorf("candidate still present before the commit ran: %v", err)
+	}
+	arts, err := LoadKnowledge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arts) != 1 || arts[0].Status != "validated" {
+		t.Errorf("a reload before the commit does not report the promotion: %+v", arts)
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
+		t.Errorf("HEAD moved before the deferred commit ran: %s -> %s", head, now)
+	}
+	if warn := commit(); warn.NotCommitted != "" {
+		t.Fatalf("the deferred commit did not record the promote: %s", warn.NotCommitted)
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now == head {
+		t.Error("HEAD did not move: the deferred commit left no record")
+	}
+}
+
 // seedGitUntrackedCandidate seeds a git store whose candidate was never
 // committed — the live store's shape, where the working tree is full of
 // uncommitted candidates. An empty seed commit gives the gesture a HEAD without
@@ -276,7 +330,7 @@ func seedGitUntrackedCandidate(t *testing.T) (root string, art Artifact) {
 func TestPromoteUntrackedCandidateCommits(t *testing.T) {
 	root, art := seedGitUntrackedCandidate(t)
 
-	dest, warn, err := promoteCandidate(art)
+	dest, warn, err := promoteNow(art)
 	if err != nil {
 		t.Fatalf("promoteCandidate: %v", err)
 	}
@@ -308,7 +362,7 @@ const forgedID = "loom-notify-state\ninjected: forged\x07\u202e\u2066"
 func TestRejectCandidateCommits(t *testing.T) {
 	root, art := seedGitCandidate(t)
 
-	dest, warn, err := rejectCandidate(art)
+	dest, warn, err := rejectNow(art)
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
@@ -351,6 +405,33 @@ func readLog(t *testing.T, root string) string {
 	return string(b)
 }
 
+// TestRejectArchivesTheFileBeforeTheCommit is promote's mirror: the archive move
+// lands at the gesture, and the record follows.
+func TestRejectArchivesTheFileBeforeTheCommit(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	head := testGit(t, root, "rev-parse", "HEAD")
+
+	dest, commit, err := rejectCandidate(art)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("archived file missing before the commit ran: %v", err)
+	}
+	if _, err := os.Stat(art.Path); !os.IsNotExist(err) {
+		t.Errorf("candidate still present before the commit ran: %v", err)
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
+		t.Errorf("HEAD moved before the deferred commit ran: %s -> %s", head, now)
+	}
+	if warn := commit(); warn.NotCommitted != "" {
+		t.Fatalf("the deferred commit did not record the reject: %s", warn.NotCommitted)
+	}
+	if now := testGit(t, root, "rev-parse", "HEAD"); now == head {
+		t.Error("HEAD did not move: the deferred commit left no record")
+	}
+}
+
 // TestRejectCandidateIgnoredArchiveCommits holds the guarantee that lets the
 // archive be in the pathspec at all: with _candidates/_rejected/ gitignored,
 // `git add` over the archived file is a fatal "paths are ignored" that would
@@ -365,7 +446,7 @@ func TestRejectCandidateIgnoredArchiveCommits(t *testing.T) {
 	testGit(t, root, "commit", "-m", "ignore the archive")
 	head := testGit(t, root, "rev-parse", "HEAD")
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+	if _, warn, err := rejectNow(art); err != nil || warn.NotCommitted != "" {
 		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now == head {
@@ -403,7 +484,7 @@ func TestPromoteIgnoredDestinationDegrades(t *testing.T) {
 	testGit(t, root, "commit", "-m", "ignore the validated tree")
 	head := testGit(t, root, "rev-parse", "HEAD")
 
-	if _, warn, err := promoteCandidate(art); err != nil || warn.NotCommitted == "" {
+	if _, warn, err := promoteNow(art); err != nil || warn.NotCommitted == "" {
 		t.Fatalf("promote of an ignored destination did not degrade: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
@@ -414,7 +495,7 @@ func TestPromoteIgnoredDestinationDegrades(t *testing.T) {
 func TestRejectUntrackedCandidateCommits(t *testing.T) {
 	root, art := seedGitUntrackedCandidate(t)
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+	if _, warn, err := rejectNow(art); err != nil || warn.NotCommitted != "" {
 		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD")
@@ -452,7 +533,7 @@ func TestRejectCandidateLeavesDirtUncommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+	if _, warn, err := rejectNow(art); err != nil || warn.NotCommitted != "" {
 		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 
@@ -481,7 +562,7 @@ func TestRejectLogEntryFieldsAreAllowListed(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	art.ID = "loom-notify <!-- hidden | forged <script>x</script> [link](u)"
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+	if _, warn, err := rejectNow(art); err != nil || warn.NotCommitted != "" {
 		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 
@@ -507,7 +588,7 @@ func TestRejectLogEntryLongIDKeepsTail(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	art.ID = strings.Repeat("a", 400)
 
-	dest, warn, err := rejectCandidate(art)
+	dest, warn, err := rejectNow(art)
 	if err != nil || warn.NotCommitted != "" {
 		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
@@ -583,7 +664,7 @@ func TestRejectLogEntryIsOneEntry(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	art.ID = forgedID
 
-	if _, warn, err := rejectCandidate(art); err != nil || warn.NotCommitted != "" {
+	if _, warn, err := rejectNow(art); err != nil || warn.NotCommitted != "" {
 		t.Fatalf("rejectCandidate: err=%v warn=%q", err, warn.NotCommitted)
 	}
 
@@ -614,7 +695,7 @@ func TestRejectMissingLogDegrades(t *testing.T) {
 	testGit(t, root, "rm", "-q", "--", filepath.Join(root, "log.md"))
 	testGit(t, root, "commit", "-m", "drop log")
 
-	dest, warn, err := rejectCandidate(art)
+	dest, warn, err := rejectNow(art)
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
@@ -637,6 +718,31 @@ func TestRejectMissingLogDegrades(t *testing.T) {
 	}
 }
 
+// TestRejectDeferredCommitCarriesTheGesturesReason: a closure that failed after
+// the archive move composes its own reason onto the store's outcome, and that
+// outcome only exists once the deferred commit runs — so the reason has to
+// travel with the commit rather than be read at the gesture.
+func TestRejectDeferredCommitCarriesTheGesturesReason(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	testGit(t, root, "rm", "-q", "--", filepath.Join(root, "log.md"))
+	testGit(t, root, "commit", "-m", "drop log")
+
+	dest, commit, err := rejectCandidate(art)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("archived file missing before the commit ran: %v", err)
+	}
+	warn := commit()
+	if warn.NotCommitted == "" {
+		t.Fatal("the deferred commit dropped the gesture's own reason")
+	}
+	if !strings.Contains(warn.NotCommitted, "log.md") {
+		t.Errorf("reason %q does not name the record that could not be written", warn.NotCommitted)
+	}
+}
+
 // TestRejectCommitFailureKeepsArchive: the archive is in the pathspec now, so a
 // failed commit has to degrade like every other knowledge-store commit failure
 // — the file stays archived, log.md keeps the entry, and neither is rolled back
@@ -654,7 +760,7 @@ func TestRejectCommitFailureKeepsArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dest, warn, err := rejectCandidate(art)
+	dest, warn, err := rejectNow(art)
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
@@ -751,7 +857,7 @@ func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
 	// Restored before the temp directory's own cleanup, which runs after this.
 	t.Cleanup(func() { os.Chmod(dir, 0o755) })
 
-	dest, warn, err := promoteCandidate(art)
+	dest, warn, err := promoteNow(art)
 
 	if err != nil {
 		t.Fatalf("promote reported a failure for a gesture that landed: %v", err)

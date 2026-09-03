@@ -8,17 +8,25 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
 	"loom/internal/config"
 )
 
-// gitTimeout bounds every git invocation. Apply runs both inside the fullscreen
-// TUI and unattended on the LaunchAgent, and a child that blocks — on an index
-// lock, a credential or a signing prompt — is unrecoverable for the user in the
-// first case and wedges the sweep in the second. The TUI is the binding
-// constraint, so its bound is the one both callers get.
+// gitTimeout bounds one git invocation, not one unit of work: a unit of work
+// runs several sequentially — commitKnowledge does rev-parse, a check-ignore per
+// droppable path, an ls-files per path the work removed, add, diff --cached and
+// commit, plus a reset when the commit failed, and pushKnowledge adds
+// symbolic-ref, two config reads and the push — so what bounds a commit that
+// pushes is the sum of those, on the order of a minute and a half rather than
+// ten seconds. Apply runs both inside the fullscreen TUI and unattended on the
+// LaunchAgent, and a child that blocks — on an index lock, a credential or a
+// signing prompt — wedges the sweep with nobody there to answer it. The TUI's
+// gestures run their commit as a tea.Cmd rather than on the update loop, so the
+// sum is not paid on a frame; the unattended sweep is what the per-call bound
+// protects.
 const gitTimeout = 10 * time.Second
 
 // gitReasonMax bounds the git failure text that reaches the status line, so a
@@ -302,6 +310,20 @@ func pushKnowledge(root string) error {
 	return nil
 }
 
+// commitMu serializes one process's commits. ApplyDeferred lets a caller hold
+// several units of work's commits at once — the TUI's gestures run theirs as a
+// tea.Cmd, so two of them can be in flight together rather than ordered by the
+// update loop — and two concurrent `git add`/`commit` in one repo contend on
+// index.lock, which git answers by failing rather than waiting. The push is
+// inside the lock too, for its own reason: git takes no index.lock for it, but
+// two pushes of one branch race and the loser comes back non-fast-forward. It is
+// also the dominant queueing cost — what a second gesture waits for is the
+// first's commit and push, not its commit alone. In-process only: the LaunchAgent
+// sweep is a separate process, and gitTimeout stays the backstop there. That
+// queueing is paid off the update loop, so it costs latency and not
+// responsiveness.
+var commitMu sync.Mutex
+
 // recordKnowledgeCommit commits one unit of work, publishes it, and returns the
 // zero Warn on success or the short reason the record fell short. Neither
 // failure is ever silent: it is appended to knowledgeGitLogPath() in full, and
@@ -310,6 +332,8 @@ func pushKnowledge(root string) error {
 // push that fails cannot reach that function's unstaging recovery: the commit
 // landed, and the local record is correct and complete.
 func recordKnowledgeCommit(root string, paths, droppable []string, message string) Warn {
+	commitMu.Lock()
+	defer commitMu.Unlock()
 	message = SanitizeRecord(message)
 	committed, err := commitKnowledge(root, paths, droppable, message)
 	if err != nil {

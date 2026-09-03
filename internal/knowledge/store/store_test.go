@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"loom/internal/config"
@@ -1257,5 +1258,50 @@ func TestApplyRefusesTouchingADirectory(t *testing.T) {
 		if st := testGit(t, root, "status", "--porcelain", "-uall"); !strings.Contains(st, "stray.md") {
 			t.Errorf("the untracked file was absorbed:\n%s", st)
 		}
+	}
+}
+
+// TestApplyDeferredCommitsCalledConcurrentlyBothLand: ApplyDeferred lets one
+// process hold several units of work's commits at once — the TUI's gestures run
+// theirs as a tea.Cmd, so two are called together rather than ordered by the
+// update loop — and two overlapping `git add`/`commit` in one repo contend on
+// index.lock, which git answers by failing rather than waiting. The store
+// serializes its commits in-process, so the two run one after the other; this is
+// a smoke check that both records land, not a deterministic reproduction of that
+// contention — without the serialization the two git sequences may simply not
+// overlap.
+func TestApplyDeferredCommitsCalledConcurrentlyBothLand(t *testing.T) {
+	root, _ := seedRemoteStore(t)
+	before := testGit(t, root, "rev-parse", "HEAD")
+
+	var commits []Commit
+	for _, name := range []string{"one", "two"} {
+		commit, err := ApplyDeferred(root, "write truths/loom/"+name+".md", func(tx *Tx) error {
+			return tx.WriteFile(filepath.Join(root, "truths", "loom", name+".md"), []byte(name+"\n"))
+		})
+		if err != nil {
+			t.Fatalf("ApplyDeferred %s: %v", name, err)
+		}
+		commits = append(commits, commit)
+	}
+
+	warns := make([]Warn, len(commits))
+	var wg sync.WaitGroup
+	for i, commit := range commits {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			warns[i] = commit()
+		}()
+	}
+	wg.Wait()
+
+	for i, warn := range warns {
+		if warn != (Warn{}) {
+			t.Errorf("commit %d: warn = %+v", i, warn)
+		}
+	}
+	if n := testGit(t, root, "rev-list", "--count", before+"..HEAD"); n != "2" {
+		t.Errorf("commits since the seed = %s, want one per unit of work", n)
 	}
 }

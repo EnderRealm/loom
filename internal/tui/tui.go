@@ -35,8 +35,10 @@ type App struct {
 	width     int
 	height    int
 	status    string
+	statusGen int
 	err       error
 	loading   bool
+	quitting  bool
 }
 
 func New() App {
@@ -60,10 +62,25 @@ type knowledgeLoadedMsg []Artifact
 // knowledgeEditedMsg is an $EDITOR return: the reload the edit needs, carrying
 // the reason its commit did not land or was not published. One message rather
 // than two so a degraded commit reaches the status line without the reload
-// waiting on it.
+// waiting on it. status is set instead when the edit never reached its commit —
+// the editor or the reload failed — since every path out of the edit's
+// ExecProcess has to land here or the count the quit drain waits on never
+// returns to zero.
 type knowledgeEditedMsg struct {
 	artifacts []Artifact
 	warn      store.Warn
+	status    string
+}
+
+// knowledgeCommittedMsg is a promote or reject's deferred commit returning: the
+// git work ran off the update loop, so its outcome arrives here rather than at
+// the gesture. status is the line the gesture already set and notCommitted the
+// wording it uses for a record that did not land — a reject's can fail before
+// any commit — so the reason composes onto that line instead of replacing it.
+type knowledgeCommittedMsg struct {
+	status       string
+	notCommitted string
+	warn         store.Warn
 }
 type activityLoadedMsg struct {
 	view    *summaries.ActivityView
@@ -71,7 +88,12 @@ type activityLoadedMsg struct {
 }
 type errMsg error
 type statusMsg string
-type clearStatusMsg struct{}
+
+// clearStatusMsg carries the status generation it was armed for: a line set
+// later — a deferred commit's warn composed after the gesture's own line — must
+// outlive the earlier line's timer, which is still pending and would otherwise
+// wipe it partway through.
+type clearStatusMsg int
 type tickMsg time.Time
 
 func loadCmd() tea.Cmd {
@@ -112,8 +134,30 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func clearStatusAfter(d time.Duration) tea.Cmd {
-	return tea.Tick(d, func(time.Time) tea.Msg { return clearStatusMsg{} })
+// setStatus puts one line on the status bar and returns the cmd that clears it
+// after d, or no cmd at d == 0 — a line held until something replaces it, for a
+// wait bounded by work rather than by the clock. Every site that writes a.status
+// goes through here, so no line is shown without a clear armed for that line and
+// no other. Call sites bind the returned cmd to a variable before returning it:
+// Go orders the calls in a return statement but not the plain `a` operand
+// against them, so `return a, a.setStatus(…)` may return the pre-mutation copy
+// and drop the line.
+func (a *App) setStatus(status string, d time.Duration) tea.Cmd {
+	a.status = status
+	a.statusGen++
+	gen := a.statusGen
+	if d == 0 {
+		return nil
+	}
+	return tea.Tick(d, func(time.Time) tea.Msg { return clearStatusMsg(gen) })
+}
+
+// clearStatus takes the current line down now. The generation bump leaves any
+// clear still armed for it pointing at a generation that no longer matches, so
+// it cannot blank whatever line comes next.
+func (a *App) clearStatus() {
+	a.status = ""
+	a.statusGen++
 }
 
 func (a App) Init() tea.Cmd {
@@ -148,6 +192,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case knowledgeEditedMsg:
+		// The edit's commit runs off the update loop too, inside ExecProcess's
+		// callback, so it is drained on the way out like a gesture's.
+		a.knowledge.pendingCommits--
+		if a.quitting {
+			if a.knowledge.pendingCommits == 0 {
+				return a, tea.Quit
+			}
+			return a, nil
+		}
+		if msg.status != "" {
+			return a, statusCmd(msg.status)
+		}
 		a.knowledge.setArtifacts(msg.artifacts)
 		if msg.warn.NotCommitted != "" {
 			return a, statusCmd("edited — not committed: " + msg.warn.NotCommitted)
@@ -156,6 +212,36 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, statusCmd("edited — not pushed: " + msg.warn.NotPushed)
 		}
 		return a, nil
+
+	case knowledgeCommittedMsg:
+		a.knowledge.pendingCommits--
+		if a.quitting {
+			// A warn is not shown on the way out: the whole failure is already in
+			// knowledge-git.log, which is the record that outlives the session.
+			if a.knowledge.pendingCommits == 0 {
+				return a, tea.Quit
+			}
+			// The drain's line was set with no clear armed, so it stands for the
+			// rest of the wait without being re-armed here.
+			return a, nil
+		}
+		// A clean record leaves the gesture's own status alone: re-arming it would
+		// hold a line the user has already read past for another three seconds.
+		if msg.warn == (store.Warn{}) {
+			return a, nil
+		}
+		status := msg.status
+		if msg.warn.NotCommitted != "" {
+			status += msg.notCommitted + msg.warn.NotCommitted
+		}
+		if msg.warn.NotPushed != "" {
+			// The record exists in the store's history and only the publication is
+			// missing, which the next gesture's push carries unless the remote has
+			// diverged.
+			status += " — not pushed: " + msg.warn.NotPushed
+		}
+		cmd := a.setStatus(status, 3*time.Second)
+		return a, cmd
 
 	case activityLoadedMsg:
 		a.activity.setData(msg.view, msg.tickets)
@@ -169,14 +255,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case statusMsg:
-		a.status = string(msg)
-		return a, clearStatusAfter(3 * time.Second)
+		cmd := a.setStatus(string(msg), 3*time.Second)
+		return a, cmd
 
 	case clearStatusMsg:
-		a.status = ""
+		if int(msg) == a.statusGen {
+			a.status = ""
+		}
 		return a, nil
 
 	case tea.KeyMsg:
+		// Any key but a repeat quit withdraws a held quit: the user went back to
+		// work, and a flag left set would exit from under them — mid-review, with
+		// the last gesture's outcome reported nowhere — the moment the drain
+		// reaches zero. A second q or ctrl+c still arrives with it set, so the
+		// escape hatch out of a slow commit survives.
+		if a.quitting && msg.String() != "q" && msg.String() != "ctrl+c" {
+			a.quitting = false
+			a.clearStatus()
+		}
 		if a.overlay == overlayDetail {
 			switch msg.String() {
 			case "esc", "q":
@@ -209,8 +306,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.overlay = overlayNone
 				return a, nil
 			case "r":
-				a.status = "refreshing…"
-				return a, tea.Batch(loadActivityCmd(), clearStatusAfter(2*time.Second))
+				cmd := a.setStatus("refreshing…", 2*time.Second)
+				return a, tea.Batch(loadActivityCmd(), cmd)
 			}
 			var cmd tea.Cmd
 			a.activity, cmd = a.activity.update(msg)
@@ -218,10 +315,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
-			return a, tea.Quit
+			return a.quit()
 		case "r":
-			a.status = "refreshing…"
-			return a, tea.Batch(loadCmd(), loadKnowledgeCmd(), clearStatusAfter(2*time.Second))
+			cmd := a.setStatus("refreshing…", 2*time.Second)
+			return a, tea.Batch(loadCmd(), loadKnowledgeCmd(), cmd)
 		case "a":
 			a.activity = activityModel{}
 			a.activity.setSize(a.width, a.contentHeight())
@@ -261,6 +358,33 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	a.dashboard, cmd = a.dashboard.update(msg)
 	return a, cmd
 }
+
+// quit leaves, unless a gesture's deferred commit is still in flight. bubbletea
+// does not wait on a Cmd's goroutine and cmd/loom returns as soon as Run does,
+// so quitting mid-commit abandons that goroutine partway through the sequence:
+// the git child already running is orphaned rather than killed — nothing signals
+// it, and runGit's deferred cancel never runs — but every step after it does not
+// happen. The push, commitKnowledge's unstaging recovery and the Warn that would
+// have reached the status line and knowledge-git.log are all lost, leaving the
+// gesture's already-moved file as working-tree state whose record is at best
+// partial and unreported — the state the store package exists to prevent. The
+// wait is bounded only by git, so a second q or ctrl+c leaves anyway: a user who
+// presses twice has decided. The
+// drain's line is set with no clear armed for the same reason — a line that
+// timed out mid-wait would leave the help footer up under a TUI silently
+// refusing to exit, which is what pushes the user into that second q.
+func (a App) quit() (tea.Model, tea.Cmd) {
+	if a.quitting || a.knowledge.pendingCommits == 0 {
+		return a, tea.Quit
+	}
+	a.quitting = true
+	cmd := a.setStatus(quitDrainStatus, 0)
+	return a, cmd
+}
+
+// quitDrainStatus reports the held quit. It carries the way out rather than the
+// footer, which has no room for it and is not on screen while a status line is.
+const quitDrainStatus = "finishing knowledge commit… (q again leaves anyway)"
 
 func (a App) findProject(slug string) *Project {
 	for i := range a.dashboard.projects {

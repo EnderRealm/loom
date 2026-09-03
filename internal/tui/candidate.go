@@ -40,24 +40,28 @@ func candidateKebab(id, scope string) string {
 // promoteCandidate moves a candidate from _candidates/<type>s/<scope>/ to its
 // validated home <type>s/<scope>/, cleaning candidate-only frontmatter (drops
 // extracted_at/extracted_by, flips status to validated, bumps verified_at), and
-// commits the written destination and the removed source — those paths only, so
-// unrelated working-tree dirt stays out of the record. Returns the destination
-// path and, when the commit did not happen or was not published, the reason. It
-// never overwrites an existing validated file.
-func promoteCandidate(a Artifact) (string, store.Warn, error) {
+// defers the commit of the written destination and the removed source — those
+// paths only, so unrelated working-tree dirt stays out of the record. The move
+// has landed when it returns, so the list can be reloaded before the record is
+// attempted; the returned Commit performs it and yields the reason the commit
+// did not happen or was not published. Returns the destination path and that
+// Commit, which is nil only alongside an error — the gesture itself did not
+// land, so there is nothing to record. It never overwrites an existing validated
+// file.
+func promoteCandidate(a Artifact) (string, store.Commit, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
-		return "", store.Warn{}, fmt.Errorf("unknown type %q", a.Type)
+		return "", nil, fmt.Errorf("unknown type %q", a.Type)
 	}
 	if a.Status != "candidate" {
-		return "", store.Warn{}, fmt.Errorf("not a candidate")
+		return "", nil, fmt.Errorf("not a candidate")
 	}
 	// Resolved once and handed to the store: KnowledgeRoot() twice — once to
 	// build the paths, once inside Apply — is two answers waiting to differ.
 	root := KnowledgeRoot()
 	dest := filepath.Join(root, plural, a.Scope, candidateKebab(a.ID, a.Scope)+".md")
 	if _, err := os.Stat(dest); err == nil {
-		return "", store.Warn{}, fmt.Errorf("%s already exists", shortenPath(dest))
+		return "", nil, fmt.Errorf("%s already exists", shortenPath(dest))
 	}
 	// The files move inside the closure, so a failed commit is reported rather
 	// than rolled back: undoing the move to keep history tidy would throw away the
@@ -66,7 +70,7 @@ func promoteCandidate(a Artifact) (string, store.Warn, error) {
 	// whose ignore rules cover the validated tree fails the commit loudly
 	// rather than recording the candidate's removal alone.
 	written := false
-	warn, err := store.ApplyIn(root, gestureMessage("promote", a), func(tx *store.Tx) error {
+	commit, err := store.ApplyDeferred(root, gestureMessage("promote", a), func(tx *store.Tx) error {
 		if err := tx.WriteFile(dest, []byte(promoteFrontmatter(a.Body))); err != nil {
 			return err
 		}
@@ -76,21 +80,16 @@ func promoteCandidate(a Artifact) (string, store.Warn, error) {
 		return tx.Remove(a.Path)
 	})
 	if err != nil {
-		// Once the destination exists the promote has landed, and the store has
-		// already committed it: reporting "promote failed" would leave the
-		// candidate listed and the next attempt refused for a destination that is
-		// now there. Only a failure before the write leaves nothing behind.
+		// Once the destination exists the promote has landed, and the store still
+		// records it: reporting "promote failed" would leave the candidate listed
+		// and the next attempt refused for a destination that is now there. Only a
+		// failure before the write leaves nothing behind.
 		if !written {
-			return "", store.Warn{}, err
+			return "", nil, err
 		}
-		// The store still committed and pushed what the write left behind, so its
-		// own outcome is kept and only the record's reason is overridden: a commit
-		// that landed unpublished has to reach the status line too.
-		w := warn
-		w.NotCommitted = store.ShortReason(err)
-		return dest, w, nil
+		return dest, withReason(commit, store.ShortReason(err)), nil
 	}
-	return dest, warn, nil
+	return dest, commit, nil
 }
 
 // rejectCandidate moves a candidate into the _rejected/ archive, preserving its
@@ -100,20 +99,22 @@ func promoteCandidate(a Artifact) (string, store.Warn, error) {
 // belongs in history rather than in untracked working-tree state. The record is
 // still the log.md entry alone and stays independent of the archive, which is
 // passed as droppable: a store that gitignores the archive gets its record
-// anyway. Returns the destination path and, when the record did not land or was
-// not published, the reason.
-func rejectCandidate(a Artifact) (string, store.Warn, error) {
+// anyway. The commit is deferred like promote's: the archive move has landed
+// when it returns, and the returned Commit performs the record and yields the
+// reason it did not land or was not published. Returns the destination path and
+// that Commit, which is nil only alongside an error.
+func rejectCandidate(a Artifact) (string, store.Commit, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
-		return "", store.Warn{}, fmt.Errorf("unknown type %q", a.Type)
+		return "", nil, fmt.Errorf("unknown type %q", a.Type)
 	}
 	if a.Status != "candidate" {
-		return "", store.Warn{}, fmt.Errorf("not a candidate")
+		return "", nil, fmt.Errorf("not a candidate")
 	}
 	root := KnowledgeRoot()
 	dest := filepath.Join(root, "_candidates", "_rejected", plural, a.Scope, filepath.Base(a.Path))
 	if _, err := os.Stat(dest); err == nil {
-		return "", store.Warn{}, fmt.Errorf("%s already exists", shortenPath(dest))
+		return "", nil, fmt.Errorf("%s already exists", shortenPath(dest))
 	}
 	// The source stays in the pathspec — its removal is a real change to the
 	// candidates tree — and the store drops it when it was never tracked. The
@@ -129,7 +130,7 @@ func rejectCandidate(a Artifact) (string, store.Warn, error) {
 	// durable.
 	logPath := filepath.Join(root, "log.md")
 	archived := false
-	warn, err := store.ApplyIn(root, gestureMessage("reject", a), func(tx *store.Tx) error {
+	commit, err := store.ApplyDeferred(root, gestureMessage("reject", a), func(tx *store.Tx) error {
 		if err := tx.Rename(a.Path, dest); err != nil {
 			return err
 		}
@@ -143,15 +144,24 @@ func rejectCandidate(a Artifact) (string, store.Warn, error) {
 		// move — the store has no log.md to append the decision to is the one
 		// after it — leaves the gesture itself unlanded.
 		if !archived {
-			return "", store.Warn{}, err
+			return "", nil, err
 		}
-		// As in promote: the store's own outcome is kept, since the commit the
-		// archive produced may have landed unpublished.
-		w := warn
-		w.NotCommitted = store.ShortReason(err)
-		return dest, w, nil
+		return dest, withReason(commit, store.ShortReason(err)), nil
 	}
-	return dest, warn, nil
+	return dest, commit, nil
+}
+
+// withReason overrides a deferred commit's record reason while keeping the rest
+// of the store's own outcome: the part of a gesture that landed is still
+// committed and pushed, and a commit that landed unpublished has to reach the
+// status line too. The wrapper is deferred like the commit it wraps, since that
+// outcome is not known until it runs.
+func withReason(commit store.Commit, reason string) store.Commit {
+	return func() store.Warn {
+		w := commit()
+		w.NotCommitted = reason
+		return w
+	}
 }
 
 // rejectLogFormat is the store's log.md convention for a reject decision.
