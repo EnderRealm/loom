@@ -6,6 +6,8 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-09-02 — Committed knowledge writes
+
 ### Added
 
 - A stated trust and redaction policy for transcript-derived artifacts,
@@ -39,6 +41,18 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   `extract.state`, so changing the threshold re-admits the sessions it
   passed over, and the backfill dry run reports the excluded count as
   its own bucket so a threshold can be chosen from data.
+- `loom work-report` reports per-`/work`-run compliance as JSON over
+  `summaries.db` for a `--since`/`--until` range: fan-out dispatch,
+  review iterations, contamination reports, unverified criteria, and
+  ticket-edit span. Runs are recognized from transcript content across
+  both Claude verdict-delivery shapes and both Codex invocation forms,
+  and the runtimes are classified separately so an inlined Codex pass
+  does not read as a skipped one. Anything the parser cannot resolve
+  fails closed to unknown, never to compliant, and evidence a transcript
+  can trivially write for itself is discounted: a verdict block must
+  carry a known lens and verdict, inlined evidence needs distinct
+  contract and quality verdicts, and a router call counts only when its
+  recorded output holds a lens verdict.
 
 ### Changed
 
