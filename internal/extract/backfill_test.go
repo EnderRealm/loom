@@ -21,6 +21,9 @@ import (
 const (
 	loomRemote  = "https://github.com/EnderRealm/loom.git"
 	forgeRemote = "https://github.com/EnderRealm/forge.git"
+	// warp is the un-onboarded project: a remote whose scope the fixture store
+	// has no directory for until a test creates one.
+	warpRemote = "https://github.com/EnderRealm/warp.git"
 )
 
 // historical pushes the watermark ahead of every session the test adds, so the

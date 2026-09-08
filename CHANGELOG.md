@@ -6,6 +6,50 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `loom knowledge scope add <name>...` creates `truths/<name>/` under the
+  store the **extractor** resolves — its persisted `LOOM_KNOWLEDGE_ROOT`,
+  which may name a store the invoking shell does not — and commits and
+  pushes it through the store's single write entry point. Extraction is
+  gated on that directory and there is deliberately no default scope, so
+  a project nobody onboarded accumulates nothing rather than filing its
+  truths under another project's name. The directory carries a
+  `.gitkeep`, since git tracks files and not directories and an empty
+  scope would otherwise exist only on the machine that made it. Names
+  clear the same gate a derived scope clears, validated whole before
+  anything is written, and a name that already has a directory is
+  reported rather than refused. See `docs/knowledge-scopes.md`.
+- `loom status` grows a `=== knowledge scopes ===` section: every scope
+  this host's sessions resolve to, which of them the store has a
+  directory for, how many sessions each un-onboarded one is costing, and
+  the command that onboards it. It counts the whole summary DB rather
+  than one sweep's window, since the backlog a scope would rescue is the
+  number that decides whether onboarding it is worth anything — and
+  without it, the sessions the sweep declines are visible only in
+  `extractor.log`, which makes non-use of the knowledge layer read as a
+  decline rather than as an onboarding step nobody took.
+
+### Changed
+
+- A session the sweep cannot resolve a scope for is no longer recorded
+  in `~/.loom/extract.state`. The ledger is permanent — it is what makes
+  extraction at-most-once — and such a session was never spent on, so
+  recording it meant creating `truths/<scope>/` later could never rescue
+  the very sessions the directory was created for. They are counted per
+  sweep instead, the way the sessions below `--min-turns` already were:
+  the pending scopes by name with the command that fixes them, and the
+  failures no directory fixes — no git remote, an unsafe name — by
+  reason, with no part of the offending name in the labels. The
+  per-session skip lines went with the record: unrecorded means
+  re-decided every tick, and a backlog a thousand sessions wide would
+  otherwise restate them in `extractor.log` every 15 minutes.
+- Scope-skip records written before that change are retired from the
+  ledger on read, in memory and from the file at its next write, so
+  onboarding rescues the sessions they would otherwise claim forever.
+  Only those: an `extracted` or `failed` record paid for its run and is
+  never dropped.
+
 ## [1.5.0] — 2026-09-02 — Committed knowledge writes
 
 ### Added

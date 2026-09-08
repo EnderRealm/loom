@@ -83,6 +83,26 @@ func (e *env) setWatermark(at time.Time) {
 	}
 }
 
+// seedLedger rewrites extract.state holding these records, the way an earlier
+// run left it — including the outcomeSkipped records the sweep wrote for a
+// scope it could not resolve, before it stopped recording that decision.
+func (e *env) seedLedger(records map[string]record) {
+	e.t.Helper()
+	st := &state{Watermark: time.Now().Add(-time.Hour).UTC(), Sessions: records}
+	if err := st.save(); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// onboard creates truths/<scope>/ mid-test, which is all `loom knowledge scope
+// add` leaves behind for the sweep to read.
+func (e *env) onboard(scope string) {
+	e.t.Helper()
+	if err := os.MkdirAll(filepath.Join(config.Home(), "knowledge", "truths", scope), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
 // addSession folds one Claude Code session into summaries.db the way the
 // summarizer does, and writes the artifact the trigger feeds to the extractor.
 func (e *env) addSession(sessionID, gitRemote string) string {
@@ -190,32 +210,133 @@ func TestSweepExtractsOnceAcrossRuns(t *testing.T) {
 	}
 }
 
-func TestSweepSkipsUnresolvableScopes(t *testing.T) {
+// A session the sweep can't resolve a scope for is counted, not claimed: the
+// ledger is permanent, so recording it would mean creating truths/<scope>/
+// later could never rescue the very sessions it was created for. Unrecorded
+// means re-decided every sweep, which is why the per-session line goes too.
+func TestSweepLeavesUnresolvableScopesUnclaimed(t *testing.T) {
 	e := newEnv(t, "loom")
 	e.addSession("no-remote", "")
-	e.addSession("unknown-scope", "https://github.com/EnderRealm/ticket.git")
+	e.addSession("unknown-scope", warpRemote)
+	// A remote whose basename is not a safe scope name: onboarding reverses
+	// neither this nor the missing remote, so both belong to the reason
+	// breakdown rather than to the pending list.
+	e.addSession("unsafe-scope", "https://github.com/BadOwner/..")
+
+	for i := 0; i < 2; i++ {
+		e.logs.Reset()
+		sweep(context.Background(), Options{})
+
+		if len(e.runs) != 0 {
+			t.Fatalf("runs = %v, want none (no session resolves to a scope the store has)", e.runs)
+		}
+		logs := e.logs.String()
+		if strings.Contains(logs, "skip ") {
+			t.Fatalf("sweep %d logged a per-session skip; a thousand-session backlog would do that every tick:\n%s", i, logs)
+		}
+		for _, want := range []string{
+			"unresolved-scope=2",
+			"1 session(s) waiting on a knowledge scope (warp=1)",
+			ScopeAddCommand,
+			// The audit line for the failures onboarding cannot fix: without it
+			// the count above names nothing.
+			"2 session(s) with no resolvable scope (" + reasonNoRemote + "=1, " + reasonUnsafeScope + "=1)",
+		} {
+			if !strings.Contains(logs, want) {
+				t.Fatalf("sweep %d log missing %q; got:\n%s", i, want, logs)
+			}
+		}
+		// Labels only: a client-supplied remote that reached the breakdown could
+		// otherwise multiply the buckets the one line exists to summarize.
+		if strings.Contains(strings.ToLower(logs), "badowner") {
+			t.Fatalf("sweep %d echoed the rejected remote into the aggregate:\n%s", i, logs)
+		}
+	}
+
+	st, err := loadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(st.Sessions) != 0 {
+		t.Fatalf("ledger = %v, want no record for a session no scope resolved for", st.Sessions)
+	}
+}
+
+// The point of the ticket: onboarding a scope rescues the sessions that were
+// skipped for want of it, with no edit to extract.state in between.
+func TestSweepExtractsAfterAScopeIsOnboarded(t *testing.T) {
+	e := newEnv(t, "loom")
+	path := e.addSession("waiting", warpRemote)
+
+	sweep(context.Background(), Options{})
+	if len(e.runs) != 0 {
+		t.Fatalf("runs = %v, want none before truths/warp/ exists", e.runs)
+	}
+
+	e.onboard("warp")
+
+	sweep(context.Background(), Options{})
+	if want := "warp " + path; len(e.runs) != 1 || e.runs[0] != want {
+		t.Fatalf("runs = %v, want exactly [%q] once the scope exists", e.runs, want)
+	}
+}
+
+// The same for the records written before the sweep stopped recording scope
+// skips: they claim their sessions forever, so they are retired on read.
+func TestSweepRetiresLedgerRecordsThatClaimAnUnresolvedScope(t *testing.T) {
+	e := newEnv(t, "loom")
+	path := e.addSession("was-unknown", warpRemote)
+	e.addSession("was-remoteless", "")
+	e.addSession("was-escaping", "")
+	e.seedLedger(map[string]record{
+		sessionKey("claude-code", "was-unknown"):    {Outcome: outcomeSkipped, Reason: `unknown scope "warp" (no such directory under /x/truths)`},
+		sessionKey("claude-code", "was-remoteless"): {Outcome: outcomeSkipped, Reason: "no git remote"},
+		// The containment refusal: the rarest of the four and unreachable behind
+		// scopePattern today, but a record carrying it was never spent on either,
+		// so it claims its session on the same terms as the rest.
+		sessionKey("claude-code", "was-escaping"): {Outcome: outcomeSkipped, Reason: `scope ".." escapes /x/truths`},
+	})
+	e.onboard("warp")
+
+	sweep(context.Background(), Options{})
+
+	if want := "warp " + path; len(e.runs) != 1 || e.runs[0] != want {
+		t.Fatalf("runs = %v, want exactly [%q] — the old skip record must not still claim it", e.runs, want)
+	}
+	st, err := loadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	for _, id := range []string{"was-remoteless", "was-escaping"} {
+		if _, ok := st.Sessions[sessionKey("claude-code", id)]; ok {
+			t.Fatalf("ledger = %v, want %s unclaimed too", st.Sessions, id)
+		}
+	}
+}
+
+// The purge must stop at the records that were paid for: dropping one of those
+// buys a second extraction at real LLM cost, which is what the ledger exists to
+// prevent.
+func TestSweepKeepsTheRecordsItPaidFor(t *testing.T) {
+	e := newEnv(t, "loom")
+	e.addSession("done", loomRemote)
+	e.addSession("broken", loomRemote)
+	e.seedLedger(map[string]record{
+		sessionKey("claude-code", "done"):   {Outcome: outcomeExtracted, Scope: "loom", Candidates: 2},
+		sessionKey("claude-code", "broken"): {Outcome: outcomeFailed, Scope: "loom", Reason: errExtractorFailed.Error()},
+	})
 
 	sweep(context.Background(), Options{})
 
 	if len(e.runs) != 0 {
-		t.Fatalf("runs = %v, want none (neither session resolves to a known scope)", e.runs)
+		t.Fatalf("runs = %v, want none — both sessions were already visited", e.runs)
 	}
-	logs := e.logs.String()
-	for _, want := range []string{
-		"skip claude-code/no-remote: no git remote",
-		"skip claude-code/unknown-scope: unknown scope \"ticket\"",
-	} {
-		if !strings.Contains(logs, want) {
-			t.Fatalf("log missing %q; got:\n%s", want, logs)
-		}
+	st, err := loadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
 	}
-
-	// A skipped session is recorded, so the skip is logged once rather than
-	// on every sweep.
-	e.logs.Reset()
-	sweep(context.Background(), Options{})
-	if strings.Contains(e.logs.String(), "skip ") {
-		t.Fatalf("second sweep re-logged skips:\n%s", e.logs.String())
+	if len(st.Sessions) != 2 {
+		t.Fatalf("ledger = %v, want both paid-for records kept", st.Sessions)
 	}
 }
 
@@ -310,7 +431,13 @@ func TestSweepEscapesHostileIdentityInTheLog(t *testing.T) {
 			skipID := "skip" + tc.injected
 			e.addSession(okID, remote)
 			e.addSession(failID, remote)
-			e.addSession(skipID, "")
+			// Through the artifact-unreadable path: the sweep no longer logs a
+			// session it declined for want of a scope, and this is the other
+			// skip whose reason carries the id a second time (in the
+			// *os.PathError's path).
+			if err := os.Remove(e.addSession(skipID, remote)); err != nil {
+				t.Fatal(err)
+			}
 			e.addSessionAs(summary.Agent("codex-cli"+tc.injected), "rollout", remote, "", 0)
 
 			orig := runExtractor

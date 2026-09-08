@@ -218,11 +218,11 @@ func TestSweepEscapesHostileRemoteInTheDisagreementLog(t *testing.T) {
 }
 
 // resolveScope takes the dedupe map as an ordinary parameter, so a caller can
-// reasonably pass nil for "don't dedupe" — which must log, not panic.
+// reasonably pass a nil one for "don't dedupe" — which must log, not panic.
 func TestResolveScopeLogsWithoutADedupeMap(t *testing.T) {
 	newEnv(t, "loom", "forge")
 
-	if _, err := resolveScope(newCheckout(t, "forge\n"), loomRemote, nil); err != nil {
+	if _, err := resolveScope(newCheckout(t, "forge\n"), loomRemote, logOnce(nil)); err != nil {
 		t.Fatalf("resolveScope with a nil logOnce: %v", err)
 	}
 }

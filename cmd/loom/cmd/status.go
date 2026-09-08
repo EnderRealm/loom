@@ -12,6 +12,7 @@ import (
 	"loom/internal/config"
 	"loom/internal/extract"
 	"loom/internal/launchd"
+	"loom/internal/parse/summary"
 	"loom/internal/updater"
 	"loom/transport/receiver"
 	"loom/transport/shipper"
@@ -99,6 +100,12 @@ var statusCmd = &cobra.Command{
 			role:     role,
 			expected: expected[updater.AgentLabel],
 		})
+		// Extraction is gated on truths/<scope>/ existing, and a project with no
+		// directory accumulates nothing while its skipped sessions are visible
+		// only in the extractor's log — which is what makes non-use of the
+		// knowledge layer read as a decline rather than as an onboarding
+		// default nobody chose. See docs/knowledge-scopes.md.
+		printScopes()
 		// Sync health is shipper-specific notify state; only meaningful on
 		// machines that actually run the shipper.
 		if plistInstalled(shipper.AgentLabel) {
@@ -122,6 +129,58 @@ var statusCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// printScopes reports which knowledge scopes this host's sessions resolve to
+// and which of them the store has no directory for. The pending scopes are the
+// point: they are the sessions the sweep declines and the one exclusion an
+// operator reverses, so they carry their counts and the command that fixes them.
+func printScopes() {
+	fmt.Println("=== knowledge scopes ===")
+	rep, err := extract.ScopeStatus()
+	if err != nil {
+		// The header stands so the section's absence isn't read as a machine
+		// with no scopes, which is a different state.
+		fmt.Fprintf(os.Stderr, "  (no scope report: %v)\n", err)
+		fmt.Println()
+		return
+	}
+	// The reference tree, not the store root the extractor section prints as
+	// `knowledge`: one operator reads both, so each says which it is.
+	fmt.Printf("  truths = %s\n", rep.TruthsDir)
+	if !rep.TruthsDirExists {
+		// No reference tree at all, so every scope below would be pending and
+		// nothing on this machine is extracted yet.
+		fmt.Println("  no scope directories here — nothing on this machine extracts")
+		fmt.Println()
+		return
+	}
+	fmt.Printf("  eligible sessions = %d (%s, min-turns=%d)\n", rep.Eligible, summary.AgentClaude, rep.MinTurns)
+
+	var onboarded, pending []string
+	skipped := 0
+	for _, sc := range rep.Scopes {
+		entry := fmt.Sprintf("%s=%d", sc.Name, sc.Sessions)
+		if sc.Onboarded {
+			onboarded = append(onboarded, entry)
+			continue
+		}
+		pending = append(pending, entry)
+		skipped += sc.Sessions
+	}
+	if len(onboarded) > 0 {
+		fmt.Printf("  onboarded: %s\n", strings.Join(onboarded, ", "))
+	}
+	if len(pending) > 0 {
+		fmt.Printf("  not onboarded — %d sessions skipped for want of a scope directory:\n", skipped)
+		fmt.Printf("    %s\n", strings.Join(pending, ", "))
+		fmt.Printf("    onboard with: %s\n", extract.ScopeAddCommand)
+	}
+	if rep.Unresolved > 0 {
+		fmt.Printf("  unresolved: %d sessions (no .loom-project marker naming a scope this store has, and no usable git remote)\n",
+			rep.Unresolved)
+	}
+	fmt.Println()
 }
 
 type agentReport struct {

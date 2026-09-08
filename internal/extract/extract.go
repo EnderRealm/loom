@@ -3,9 +3,11 @@
 // installed that have not been through extractors/extract.py, derives each
 // session's knowledge scope from its checkout's .loom-project marker or, when
 // there is none to read on this host, from its git remote, and shells out to the
-// extractor so candidates land in ~/.loom/knowledge/_candidates/. Sessions
-// whose scope can't be resolved, or whose agent the extractor can't read, are
-// skipped with a logged reason, and every session is visited at most once.
+// extractor so candidates land in ~/.loom/knowledge/_candidates/. A session
+// whose agent the extractor can't read is skipped with a logged reason, and
+// every session is visited at most once; a session whose scope can't be
+// resolved is counted in the sweep's summary and left unclaimed, so onboarding
+// its scope later rescues it (docs/knowledge-scopes.md).
 //
 // The same Run entry point backs the `loom extract` subcommand and the
 // com.loom.extractor LaunchAgent (`loom extract --watch`).
@@ -15,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -83,6 +86,12 @@ const (
 // runs unattended, so a change to the script's defaults must not silently
 // redirect what it produces.
 const extractType = extractTypeTruth
+
+// ScopeAddCommand is the remedy a session waiting on a knowledge scope names.
+// Declared once because two readers state it — the sweep's log line and
+// `loom status` — and an operator who is told the wrong command reads the
+// pending count as a defect rather than as an onboarding step.
+const ScopeAddCommand = "loom knowledge scope add <name>"
 
 // Options configure one Run. Zero Interval/Idle mean "no wait", which only
 // tests want; the CLI supplies the Default* values.
@@ -214,6 +223,37 @@ func Run(opts Options) error {
 
 type sweepResult struct {
 	extracted, skipped, failed, deferred, belowThreshold int
+	// pendingScopes counts the sessions declined per scope the store has no
+	// directory for — the exclusion an operator can reverse, so it is reported
+	// by name rather than as one total.
+	pendingScopes map[string]int
+	// unresolvedReasons counts the scope failures onboarding cannot reverse, by
+	// reason. Their sum is the summary line's unresolved-scope count; the
+	// breakdown is what keeps a hostile or malformed remote visible in
+	// extractor.log now that these sessions are neither marked nor logged one by
+	// one.
+	unresolvedReasons map[string]int
+}
+
+// scopeFailureReason labels a resolveScope failure for that breakdown. The label
+// set is closed and carries no part of the offending name: the whole point of
+// the aggregate is one line per sweep rather than one per session, and a
+// client-supplied remote must not be able to multiply the buckets. Classified by
+// error rather than by message for the same reason — the message is mostly the
+// name — with a fallback bucket so a failure path added later lands somewhere
+// rather than under an empty label.
+func scopeFailureReason(err error) string {
+	var unsafe errUnsafeScope
+	var escapes errScopeEscapes
+	switch {
+	case errors.Is(err, errNoRemote):
+		return reasonNoRemote
+	case errors.As(err, &unsafe):
+		return reasonUnsafeScope
+	case errors.As(err, &escapes):
+		return reasonScopeEscapes
+	}
+	return reasonScopeFailed
 }
 
 // belowMinTurns reports whether the threshold excludes this session. An unknown
@@ -227,7 +267,7 @@ func belowMinTurns(s summaries.SessionSource, minTurns int) bool {
 }
 
 func sweep(ctx context.Context, opts Options) sweepResult {
-	r := sweepResult{}
+	r := sweepResult{pendingScopes: map[string]int{}, unresolvedReasons: map[string]int{}}
 
 	script, err := ScriptPath()
 	if err != nil {
@@ -289,8 +329,20 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 		}
 		res, err := resolveScope(s.CwdRaw, s.GitRemote, seen)
 		if err != nil {
-			r.skipped++
-			markSkip(st, s, err.Error())
+			// Neither marked nor logged per session, for belowMinTurns' reason
+			// carried further: creating truths/<scope>/ is what reverses this,
+			// and a ledger record would mean the directory could never rescue
+			// the very sessions it was created for. Unrecorded means re-decided
+			// every sweep, so the per-session line has to go too — the backlog
+			// is a thousand sessions wide here, and one line each per tick would
+			// bury the log these skips are reported in. The aggregate below
+			// replaces both.
+			var unknown errUnknownScope
+			if errors.As(err, &unknown) {
+				r.pendingScopes[unknown.scope]++
+			} else {
+				r.unresolvedReasons[scopeFailureReason(err)]++
+			}
 			continue
 		}
 		if r.extracted+r.failed >= maxPerSweep {
@@ -310,8 +362,23 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 		r.extracted++
 	}
 
-	log.Printf("sweep sessions=%d extracted=%d skipped=%d failed=%d deferred=%d below-min-turns=%d",
-		len(sessions), r.extracted, r.skipped, r.failed, r.deferred, r.belowThreshold)
+	log.Printf("sweep sessions=%d extracted=%d skipped=%d failed=%d deferred=%d below-min-turns=%d unresolved-scope=%d",
+		len(sessions), r.extracted, r.skipped, r.failed, r.deferred, r.belowThreshold, total(r.unresolvedReasons))
+	if len(r.pendingScopes) > 0 {
+		// The scopes are named, and the remedy with them: a count alone reads as
+		// a defect, where the whole of the fix is a directory nobody created.
+		log.Printf("sweep: %d session(s) waiting on a knowledge scope (%s) — onboard with: %s",
+			total(r.pendingScopes), formatCounts(r.pendingScopes), ScopeAddCommand)
+	}
+	if len(r.unresolvedReasons) > 0 {
+		// The rest of the scope failures, which no directory fixes. Named by
+		// reason and not by session, but named: extractor.log is the audit record
+		// for what the sweep declined, and a bare unresolved-scope=N leaves a
+		// malformed or hostile remote indistinguishable from a laptop's worth of
+		// sessions captured outside a checkout.
+		log.Printf("sweep: %d session(s) with no resolvable scope (%s)",
+			total(r.unresolvedReasons), formatCounts(r.unresolvedReasons))
+	}
 	return r
 }
 
@@ -425,6 +492,20 @@ func echoRemote(s string) string {
 	}
 	return logSafe(s)
 }
+
+// logger is the sink resolveScope states a repo's marker facts to. An interface
+// rather than logOnce itself so a read-only caller can pass discardLog:
+// `loom status` resolves every session's scope to report onboarding, and must
+// not write marker warnings into the operator's terminal to do it.
+type logger interface {
+	printf(format string, args ...any)
+}
+
+// discardLog is the logger for a caller that derives scopes to count them, not
+// to act on them.
+type discardLog struct{}
+
+func (discardLog) printf(string, ...any) {}
 
 // logOnce dedupes lines that state a fact about a repo rather than about a
 // session. Scope resolution runs per session, so a backfill over a repo's whole

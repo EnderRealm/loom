@@ -254,3 +254,137 @@ func TestKnowledgeWriteRefusesAPathOutsideTheStore(t *testing.T) {
 		t.Errorf("warn = %q, want the record's own outcome alongside the failure", warn)
 	}
 }
+
+// runScopeAdd drives one `knowledge scope add` through a command built exactly
+// like the registered one, returning its stdout and the error the process would
+// exit on.
+func runScopeAdd(t *testing.T, names ...string) (string, error) {
+	t.Helper()
+	cmd := newKnowledgeCmd()
+	cmd.SetArgs(append([]string{"scope", "add"}, names...))
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+// TestKnowledgeScopeAddCreatesTheScope: extraction is gated on truths/<name>/
+// existing, so the command's whole job is that directory — committed, since a
+// directory git does not track is one the next clone does not have.
+func TestKnowledgeScopeAddCreatesTheScope(t *testing.T) {
+	root := seedStore(t)
+
+	out, err := runScopeAdd(t, "warp")
+
+	if err != nil {
+		t.Fatalf("scope add: %v\n%s", err, out)
+	}
+	created := filepath.Join(root, "truths", "warp")
+	if fi, err := os.Stat(created); err != nil || !fi.IsDir() {
+		t.Fatalf("truths/warp/ = %v, %v", fi, err)
+	}
+	if !strings.Contains(out, created) {
+		t.Errorf("output %q does not name what it created", out)
+	}
+	if subject := storeGit(t, root, "log", "-1", "--format=%s"); subject != "add knowledge scope warp" {
+		t.Errorf("commit subject = %q", subject)
+	}
+	if names := storeGit(t, root, "show", "--name-status", "--format=", "HEAD"); !strings.Contains(names, "A\ttruths/warp/.gitkeep") {
+		t.Errorf("commit does not carry the placeholder:\n%s", names)
+	}
+
+	// Onboarding a project twice is what an operator does when they cannot
+	// remember whether they already did, so it reports rather than fails.
+	head := storeGit(t, root, "rev-parse", "HEAD")
+	out, err = runScopeAdd(t, "warp")
+	if err != nil {
+		t.Fatalf("scope add of an existing scope: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "already exists") {
+		t.Errorf("output %q does not report the scope as already present", out)
+	}
+	if now := storeGit(t, root, "rev-parse", "HEAD"); now != head {
+		t.Errorf("HEAD moved for a scope that already existed: %s -> %s", head, now)
+	}
+}
+
+// TestKnowledgeScopeAddDedupesRepeatedNames: no stat finds a name that does not
+// exist yet, so a name given twice would otherwise be written twice and reach
+// the commit subject twice.
+func TestKnowledgeScopeAddDedupesRepeatedNames(t *testing.T) {
+	root := seedStore(t)
+
+	out, err := runScopeAdd(t, "warp", "warp")
+
+	if err != nil {
+		t.Fatalf("scope add: %v\n%s", err, out)
+	}
+	if n := strings.Count(out, "created "); n != 1 {
+		t.Errorf("output reports %d creations of one scope:\n%s", n, out)
+	}
+	if subject := storeGit(t, root, "log", "-1", "--format=%s"); subject != "add knowledge scope warp" {
+		t.Errorf("commit subject = %q", subject)
+	}
+}
+
+// TestKnowledgeScopeAddReportsNothingItCouldNotCreate: a name already taken by a
+// regular file is not an existing scope, and the write for it fails — so the
+// path must not be reported as created alongside the error.
+func TestKnowledgeScopeAddReportsNothingItCouldNotCreate(t *testing.T) {
+	root := seedStore(t)
+	if err := os.MkdirAll(filepath.Join(root, "truths"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "truths", "warp"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScopeAdd(t, "warp")
+
+	if err == nil {
+		t.Fatalf("scope add succeeded against a name taken by a regular file:\n%s", out)
+	}
+	if strings.Contains(out, "created ") {
+		t.Errorf("output reports creating a path where nothing was created:\n%s", out)
+	}
+}
+
+// TestKnowledgeScopeAddRefusesUnsafeNames: the name becomes a path under the
+// store, and the whole invocation is refused rather than half applied, so an
+// operator's next run doesn't have to work out which half landed.
+func TestKnowledgeScopeAddRefusesUnsafeNames(t *testing.T) {
+	for _, name := range []string{"../evil", "Loom", ".", ""} {
+		t.Run(name, func(t *testing.T) {
+			root := seedStore(t)
+			head := storeGit(t, root, "rev-parse", "HEAD")
+
+			if _, err := runScopeAdd(t, "warp", name); err == nil {
+				t.Fatalf("scope add %q was accepted", name)
+			}
+			if _, err := os.Stat(filepath.Join(root, "truths")); err == nil {
+				t.Error("a refused invocation created truths/ anyway")
+			}
+			if now := storeGit(t, root, "rev-parse", "HEAD"); now != head {
+				t.Errorf("HEAD moved for a refused invocation: %s -> %s", head, now)
+			}
+		})
+	}
+}
+
+// TestKnowledgeScopeAddWithoutAStore: a machine that has no knowledge store gets
+// a reason, not the ENOENT of a path it never named.
+func TestKnowledgeScopeAddWithoutAStore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "knowledge")
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+	t.Setenv("LOOM_HOME", t.TempDir())
+
+	_, err := runScopeAdd(t, "warp")
+
+	if err == nil {
+		t.Fatal("scope add succeeded against a store that does not exist")
+	}
+	if !strings.Contains(err.Error(), "no knowledge store at "+root) {
+		t.Errorf("error %v does not name the missing store", err)
+	}
+}

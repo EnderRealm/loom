@@ -14,8 +14,9 @@ import (
 	"loom/internal/summaries"
 )
 
-// Exclusion buckets for the backfill's report. The full reason is logged per
-// session; these labels are what the summary counts, so a run over hundreds of
+// Exclusion buckets for the backfill's report, and — for the scope failures —
+// for the sweep's aggregate too. The full reason is logged per session by the
+// backfill; these labels are what the summaries count, so a run over hundreds of
 // sessions reads at a glance.
 const (
 	reasonVisited      = "already visited"
@@ -26,6 +27,9 @@ const (
 	reasonNoRemote     = "no git remote"
 	reasonUnknownScope = "unknown scope"
 	reasonOtherScope   = "outside --scope"
+	reasonUnsafeScope  = "unsafe scope"
+	reasonScopeEscapes = "escapes the store"
+	reasonScopeFailed  = "unclassified"
 )
 
 // progressEvery paces the running-count line. A full backfill is hundreds of

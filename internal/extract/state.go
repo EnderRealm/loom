@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -84,7 +85,38 @@ func peekState() (*state, error) {
 	if s.Sessions == nil {
 		s.Sessions = map[string]record{}
 	}
+	s.purgeScopeSkips()
 	return &s, nil
+}
+
+// scopeSkipReasons are the reasons the sweep wrote for a session it could not
+// resolve a scope for, before it stopped recording that decision at all. Matched
+// as prefixes because each carries the offending name after it. The last is the
+// containment refusal, whose name is quoted — the quote is kept in the prefix so
+// this cannot claim a skip recorded for some other reason beginning "scope ".
+var scopeSkipReasons = []string{"no git remote", "unknown scope ", "unsafe scope ", `scope "`}
+
+// purgeScopeSkips drops the records that still claim a session for a scope
+// failure. Safe precisely because nothing was ever spent on them: an
+// outcomeSkipped record carrying one of these reasons means the session never
+// reached the extractor, so re-admitting it cannot cause a second charge —
+// unlike outcomeExtracted and outcomeFailed, which paid for their run and must
+// never be dropped. Without it, onboarding a scope rescues nothing: every
+// session declined for want of truths/<scope>/ before this change is claimed
+// forever. In memory only, which is what keeps peekState non-mutating; the file
+// loses them at the next commit, whose reload reads through here too.
+func (s *state) purgeScopeSkips() {
+	for k, r := range s.Sessions {
+		if r.Outcome != outcomeSkipped {
+			continue
+		}
+		for _, reason := range scopeSkipReasons {
+			if strings.HasPrefix(r.Reason, reason) {
+				delete(s.Sessions, k)
+				break
+			}
+		}
+	}
 }
 
 func (s *state) visited(agent, sessionID string) bool {

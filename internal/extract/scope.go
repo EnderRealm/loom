@@ -27,6 +27,45 @@ var scopePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 // from a scope the store simply doesn't have.
 var errNoRemote = errors.New("no git remote")
 
+// errUnknownScope is a name that clears the safety gate but has no directory in
+// the store. Typed rather than a formatted string because it is the one scope
+// failure onboarding reverses: the sweep and `loom status` tally the pending
+// scope by name, and they pull it back out with errors.As rather than by
+// re-parsing the message resolveScope wrapped. See docs/knowledge-scopes.md.
+type errUnknownScope struct{ scope string }
+
+func (e errUnknownScope) Error() string {
+	// The store root rather than the joined path: dir repeats the name, and this
+	// message is what a rejected marker echoes into the log.
+	return fmt.Sprintf("unknown scope %s (no such directory under %s)", echoScope(e.scope), TruthsDir())
+}
+
+// errUnsafeScope and errScopeEscapes are the two ValidScopeName refusals —
+// onboarding reverses neither, since both mean the name itself is wrong. Typed
+// for errUnknownScope's reason: the sweep buckets a scope failure by reason, and
+// the only other way to tell these two apart is to match a message whose text is
+// the offending name.
+type errUnsafeScope struct{ scope string }
+
+func (e errUnsafeScope) Error() string {
+	return fmt.Sprintf("unsafe scope %s", echoScope(e.scope))
+}
+
+type errScopeEscapes struct{ scope, truths string }
+
+func (e errScopeEscapes) Error() string {
+	return fmt.Sprintf("scope %s escapes %s", echoScope(e.scope), e.truths)
+}
+
+// TruthsDir is the store's reference tree, and the only place a scope name
+// becomes a path. Resolved through knowledgeRoot() so the gate the sweep checks
+// is the store the extractor was configured with, not this shell's — which is
+// why `loom knowledge scope add` creates its directory through here rather than
+// joining "truths" onto a root of its own.
+func TruthsDir() string {
+	return filepath.Join(knowledgeRoot(), "truths")
+}
+
 // markerName is the repo-root file a project declares its canonical name in.
 // This path walks for it as extractors/resolve_project.py does — nearest usable
 // marker from the cwd up to the repo root wins, an unusable one continues the
@@ -62,7 +101,7 @@ type resolution struct {
 // that names nothing on this host, and a marker chain with nothing usable in
 // it, both fall through to the remote, so every session that resolves today
 // still resolves.
-func resolveScope(cwdRaw, gitRemote string, seen logOnce) (resolution, error) {
+func resolveScope(cwdRaw, gitRemote string, seen logger) (resolution, error) {
 	remote := scopeFromRemote(gitRemote)
 	if scope, marker := markerScope(cwdRaw, seen); scope != "" {
 		if remote != "" && remote != scope {
@@ -102,22 +141,36 @@ func scopeFromRemote(gitRemote string) string {
 // repo-controlled text reached through a client-supplied cwd, so it clears the
 // same gate a remote-derived name does rather than a shorter one.
 func validScope(scope string) error {
-	if !scopePattern.MatchString(scope) {
-		return fmt.Errorf("unsafe scope %s", echoScope(scope))
+	if err := ValidScopeName(scope); err != nil {
+		return err
 	}
-	// truths/<scope>/ is what extract.py loads as few-shot references; its
-	// absence means the store has no such scope.
-	truths := filepath.Join(knowledgeRoot(), "truths")
+	return scopeInStore(scope)
+}
+
+// ValidScopeName is the name half of the gate: what makes a name safe to join
+// onto truths/, with no claim that the store has such a scope. Exported for
+// `loom knowledge scope add`, which is about to create the very directory the
+// store half would refuse the name for.
+func ValidScopeName(scope string) error {
+	if !scopePattern.MatchString(scope) {
+		return errUnsafeScope{scope: scope}
+	}
+	truths := TruthsDir()
 	dir := filepath.Join(truths, scope)
 	// Belt and braces on the pattern above: the scope must still name a direct
 	// child of truths/ after Join has cleaned the path.
 	if filepath.Dir(dir) != truths {
-		return fmt.Errorf("scope %s escapes %s", echoScope(scope), truths)
+		return errScopeEscapes{scope: scope, truths: truths}
 	}
-	// The store root rather than the joined path: dir repeats the name, and this
-	// message is what a rejected marker echoes into the log.
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		return fmt.Errorf("unknown scope %s (no such directory under %s)", echoScope(scope), truths)
+	return nil
+}
+
+// scopeInStore is the store half: truths/<scope>/ is what extract.py loads as
+// few-shot references, so its absence means the store has no such scope. There
+// is deliberately no default to fall back to — see docs/knowledge-scopes.md.
+func scopeInStore(scope string) error {
+	if fi, err := os.Stat(filepath.Join(TruthsDir(), scope)); err != nil || !fi.IsDir() {
+		return errUnknownScope{scope: scope}
 	}
 	return nil
 }
@@ -134,7 +187,7 @@ func validScope(scope string) error {
 // scopePattern requires a leading [a-z0-9] — and wantedScopes lowercases
 // --scope for the same reason, so an exact-case marker derivation would make
 // `--backfill --scope Loom` stop matching sessions it matches today.
-func markerScope(cwdRaw string, seen logOnce) (string, string) {
+func markerScope(cwdRaw string, seen logger) (string, string) {
 	start := strings.TrimSpace(cwdRaw)
 	// Absolute only: a relative path would resolve against the daemon's working
 	// directory, which has nothing to do with the session's checkout.

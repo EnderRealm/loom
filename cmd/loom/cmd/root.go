@@ -28,6 +28,8 @@ Knowledge:
   retrospect <id>              Extract candidates from the sessions that closed a ticket
   knowledge write              Apply one JSON write plan (stdin) to the knowledge
                                  store, committing what it touched
+  knowledge scope add <name>   Create truths/<name>/ so that project's sessions
+                                 are extracted rather than skipped
 
 Reports:
   work-report [--since|--until]  /work-run compliance metrics from summaries.db, as JSON
