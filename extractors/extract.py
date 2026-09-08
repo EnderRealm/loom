@@ -9,6 +9,15 @@ Usage:
 
 `--scope auto` resolves the scope from --project-path via the repo's
 `.loom-project` marker (see resolve_project.py).
+
+`--scope` names the project the *session* ran in, which is not always the
+project its truths are about: a loom session routinely produces a truth about
+tk. Candidates were filed under --scope regardless of the `scope:` they
+declared, which left the store with files sitting in a directory their own
+frontmatter disagreed with. Each candidate is now routed by its declared scope
+when the store has a directory for it (route_candidate_scope); one that cannot
+be routed stays under --scope carrying `scope_mismatch:` for a human. See
+docs/knowledge-scopes.md.
 """
 from __future__ import annotations
 
@@ -32,8 +41,9 @@ sys.path.insert(0, str(LOOM_ROOT / "extractors"))
 from knowledge_store import (StoreWriteError, append_change, apply_changes,
                              knowledge_root, write_change)
 from preprocess import preprocess as preprocess_jsonl
-from redact import log_redaction, redact_with_report
-from resolve_project import describe as describe_project, resolve_project
+from redact import log_redaction, redact, redact_with_report
+from resolve_project import (NAME_PATTERN, describe as describe_project,
+                             resolve_project)
 
 # Knowledge store lives outside the loom repo so it survives reinstalls and
 # accumulates across projects. Eval fixtures stay in-repo as test data. Resolved
@@ -433,6 +443,12 @@ TICKET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}/[A-Za-z0-9][A-Za-z0
 # to read as the same key.
 TICKET_ENTRY_RE = re.compile(r"^[ \t]*-?[ \t]*[\"']?ticket[\"']?[ \t]*:")
 
+# Any frontmatter line carrying a `scope_mismatch:` key, in the same YAML
+# spellings TICKET_ENTRY_RE accepts. The key is this process's routing verdict,
+# so a model-emitted one is dropped before the verdict is injected: it would
+# otherwise reach a reviewer as if this process had raised it.
+SCOPE_MISMATCH_ENTRY_RE = re.compile(r"^[ \t]*-?[ \t]*[\"']?scope_mismatch[\"']?[ \t]*:")
+
 # Every derived id appends a line to every candidate the run emits, and a
 # client can author as many distinct commit confirmation lines as it likes.
 # Bound the collection the way the rest of this path bounds transcript-derived
@@ -598,12 +614,129 @@ def inject_source_tickets(raw: str, ticket_ids: list[str]) -> str:
     return f"---\n{fm}\n---\n{body}"
 
 
+def strip_scope_mismatch(raw: str) -> str:
+    """Drop every model-emitted `scope_mismatch:` key from the frontmatter.
+
+    `inject_frontmatter` appends, so without this a model-emitted key survives
+    verbatim on a candidate that routed cleanly and tells a reviewer — the TUI
+    renders the body as written — that this process flagged a correctly-filed
+    candidate. Dropped whether or not a verdict follows, the way
+    `inject_source_tickets` drops model-emitted `ticket:` entries.
+    """
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.DOTALL)
+    if not m:
+        return raw
+    fm, body = m.group(1), m.group(2)
+    # Line-anchored, so `scope_mismatch:` inside a prose value is never dropped.
+    fm = "\n".join(ln for ln in fm.split("\n") if not SCOPE_MISMATCH_ENTRY_RE.match(ln))
+    return f"---\n{fm}\n---\n{body}"
+
+
+# How much of a rejected or re-scoped name a note or a frontmatter value may
+# carry. The declared scope is model output steered by a transcript this process
+# did not author — the CANDIDATE_ID_RE threat model — and `scope_mismatch:`
+# lands in a file a human reads, so it is bounded and reduced to one
+# conservative token rather than echoed whole.
+SCOPE_ECHO_LIMIT = 60
+
+# What a declaration carrying a credential is echoed as instead. The charset
+# reduction below would mangle `[REDACTED:<kind>]` into something that no longer
+# reads as a marker, and a credential's shape is the evidence a reader needs —
+# its bytes are not, the reasoning redact.py's `bearer` rows already state.
+SCOPE_ECHO_REDACTED = "redacted"
+
+
+def echo_scope(declared: str) -> str:
+    """A declared scope, safe to put in a note or a frontmatter value.
+
+    The one place a declaration becomes text this process prints or stores, so
+    every echo is bounded and credential-free by construction. Redaction runs
+    before the truncation: a cut at SCOPE_ECHO_LIMIT can split a credential and
+    leave a head no pattern claims. A cut is marked, the way resolve_project.py
+    marks a truncated marker value: unmarked, a long declaration reaches a
+    reviewer as a plausible, well-formed, different scope name.
+    """
+    if redact(declared) != declared:
+        return SCOPE_ECHO_REDACTED
+    echoed = re.sub(r"[^A-Za-z0-9._-]", "_", declared[:SCOPE_ECHO_LIMIT])
+    if len(declared) > SCOPE_ECHO_LIMIT:
+        echoed += "..."
+    return echoed
+
+
+# The longest declaration this process hands to the filesystem. A path component
+# past the filesystem's NAME_MAX — 255 bytes on APFS and ext4 — makes the lookup
+# in route_candidate_scope raise ENAMETOOLONG rather than report absence, and
+# pathlib does not swallow that errno, so an unbounded declaration is a crash
+# channel for model output. NAME_PATTERN's charset is ASCII, so a declaration
+# that reaches the bound is one byte per character. The rule belongs to this call
+# site — it is not a tightening of the shared name pattern, which stays unbounded
+# on both sides — and a name this long is no more a scope than a mis-cased one.
+SCOPE_NAME_LIMIT = 255
+
+
+def route_candidate_scope(declared: str, requested: str,
+                          truths_root: Path) -> tuple[str, str, str]:
+    """The scope a candidate is filed under, the note explaining why — "" when
+    there is nothing to say — and the echo to flag the candidate with, "" when it
+    is filed under the scope it declares.
+
+    The declared scope names the project the truth is *about*, which is not the
+    project the session ran in whenever a session in one repo discovers
+    something about another. Filing by the declaration is what keeps a
+    candidate's `scope:` and its parent directory in agreement, which
+    truths/_schema.md requires.
+
+    Gated on `truths/<declared>/` existing, the same gate the sweep applies
+    (`scopeInStore` in internal/extract/scope.go): the store's write path
+    creates parent directories, so an ungated route would silently onboard a
+    scope nobody opted into. A declaration this store has no scope for keeps the
+    candidate where it was requested — visible, and re-scopable by hand.
+    """
+    if not declared or declared == requested:
+        return requested, "", ""
+    # Every rejection note reaches stderr, which loom ships in transcripts, and
+    # --json-out, so none echoes the declaration itself. The routing branch is
+    # the exception: it names a scope the store already holds a directory for.
+    echoed = echo_scope(declared)
+    if not NAME_PATTERN.match(declared) or len(declared) > SCOPE_NAME_LIMIT:
+        # Before it can become a path segment: the same reason resolve_project.py
+        # holds a marker's value to this pattern, plus SCOPE_NAME_LIMIT so the
+        # lookup below is never handed a name the filesystem refuses to answer for.
+        return requested, (f"declared scope {echoed!r} is not a usable "
+                           f"scope name — filed under {requested}, needs re-scoping"), echoed
+    try:
+        in_store = (truths_root / declared).is_dir()
+    except OSError as e:
+        # Belt and braces with the bound above, for the limits it does not know
+        # about (an eCryptfs component stops at 143): a lookup that errored is
+        # not an answer about the directory, and the declaration is model output,
+        # so the candidate stays put and says so. Only the errno's own text is
+        # echoed — OSError's str() carries the filename, unsanitized.
+        return requested, (f"declared scope {echoed!r} could not be checked "
+                           f"({e.strerror}) — filed under {requested}, "
+                           f"needs re-scoping"), echoed
+    if in_store:
+        note = f"declares scope {declared}, not {requested} — filed under {declared}"
+        return declared, note, ""
+    return requested, (f"declares scope {echoed!r}, which the store has no "
+                       f"{truths_root.name}/{echoed}/ for — filed under {requested}, "
+                       f"needs re-scoping"), echoed
+
+
 def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
                     provider: str, model: str, reasoning: str | None,
-                    session_id: str, ticket_ids: list[str]) -> list[dict]:
-    """Build the write for each valid candidate: base_dir/scope/<id>--<timestamp>.md.
+                    session_id: str, ticket_ids: list[str],
+                    truths_root: Path) -> tuple[list[dict], Counter]:
+    """Build the write for each valid candidate: base_dir/<scope>/<id>--<timestamp>.md,
+    with the scope routed per candidate (route_candidate_scope) rather than fixed
+    at `scope` for the run. Returns the changes and the count filed per scope.
 
-    Adds `status: candidate`, `extracted_at`, `extracted_by` to frontmatter.
+    Adds `status: candidate`, `extracted_at`, `extracted_by` to frontmatter, plus
+    `scope_mismatch: <declared>` on a candidate filed somewhere other than the
+    scope it declares. That key is the reviewer's only channel: the Go side
+    derives an artifact's scope from its directory and parses no scope out of
+    frontmatter, and the TUI's detail view renders the body verbatim.
     Filename suffix is the wall-clock timestamp at run start, so a re-run on
     the same session produces a sibling rather than overwriting. Candidates
     whose id isn't a safe filename are skipped with a warning.
@@ -612,7 +745,6 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
     the run's files and its log.md entry land and are committed as one record
     (knowledge_store.apply_changes).
     """
-    out_dir = base_dir / scope
     now = datetime.now()
     timestamp_slug = now.strftime("%Y%m%d-%H%M%S")
     extracted_by = f"{provider}:{model}"
@@ -620,8 +752,9 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
         extracted_by += f":{reasoning}"
     extracted_at = now.replace(microsecond=0).isoformat()
 
-    resolved_out = out_dir.resolve()
+    resolved_base = base_dir.resolve()
     changes = []
+    routed = Counter()
     counts = Counter()
     chars = 0
     for c in candidates:
@@ -629,19 +762,38 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
         if not CANDIDATE_ID_RE.match(cid):
             print(f"  warn: skipping candidate with unusable id {cid!r}", file=sys.stderr)
             continue
+        declared = c.get("scope") or ""
+        dest, note, mismatch = route_candidate_scope(declared, scope, truths_root)
+        if note:
+            # Onto the candidate's own warnings so the note reaches --json-out,
+            # and to the log so an unattended run says what moved. That list
+            # otherwise holds schema defects, which are counted and printed as
+            # "candidate(s) with schema warnings"; a clean re-scope is not a
+            # defect, and stays out of that count only because the summary block
+            # runs before this function.
+            c.setdefault("warnings", []).append(note)
+            print(f"  warn: {cid}: {note}", file=sys.stderr)
+        out_dir = base_dir / dest
         path = out_dir / f"{cid}--{timestamp_slug}.md"
-        # Belt and braces: the write must land in out_dir even if the pattern
-        # above is ever loosened.
-        if path.resolve().parent != resolved_out:
-            print(f"  warn: skipping candidate {cid!r}: {path} escapes {out_dir}", file=sys.stderr)
+        # Belt and braces: both segments are model-authored, so the write must
+        # land in base_dir/<dest> even if either pattern above is ever loosened.
+        resolved_out = out_dir.resolve()
+        if path.resolve().parent != resolved_out or resolved_out.parent != resolved_base:
+            print(f"  warn: skipping candidate {cid!r}: {path} escapes {base_dir}", file=sys.stderr)
             continue
         raw = override_source_sessions(c["raw"], session_id)
         raw = inject_source_tickets(raw, ticket_ids)
-        body = inject_frontmatter(raw, {
+        raw = strip_scope_mismatch(raw)
+        fields = {
             "status": "candidate",
             "extracted_at": extracted_at,
             "extracted_by": extracted_by,
-        })
+        }
+        if mismatch:
+            # route_candidate_scope's own verdict, not a second derivation of it:
+            # re-deriving "was this a mismatch" here would be free to drift.
+            fields["scope_mismatch"] = mismatch
+        body = inject_frontmatter(raw, fields)
         # Policy enforcement point on the output side: a secret that reached the
         # model some other way — a hand-edited store, a model echo — still never
         # lands in the store. See docs/transcript-trust-and-redaction.md.
@@ -649,11 +801,13 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
         counts.update(found)
         chars += n
         changes.append(write_change(path, body))
+        routed[dest] += 1
     log_redaction("candidates", counts, chars)
-    return changes
+    return changes, routed
 
 
-def append_extract_log(extract_type: str, scope: str, session_id: str, count: int) -> dict | None:
+def append_extract_log(extract_type: str, scope: str, session_id: str, count: int,
+                       routed: Counter) -> dict | None:
     """Build the log.md append for one extraction run — one entry per run, in the
     store's `## [YYYY-MM-DD] <summary>` convention.
 
@@ -665,7 +819,7 @@ def append_extract_log(extract_type: str, scope: str, session_id: str, count: in
     if not log_path.exists():
         return None
     today = date.today().isoformat()
-    return append_change(log_path, f"\n## [{today}] {run_label(extract_type, scope, session_id, count)}\n")
+    return append_change(log_path, f"\n## [{today}] {run_label(extract_type, scope, session_id, count, routed)}\n")
 
 
 def short_session(session_id: str) -> str:
@@ -674,11 +828,20 @@ def short_session(session_id: str) -> str:
     return session_id[:8] if session_id else "?"
 
 
-def run_label(extract_type: str, scope: str, session_id: str, count: int) -> str:
+def run_label(extract_type: str, scope: str, session_id: str, count: int,
+              routed: Counter) -> str:
     """One run's label, verbatim in both the log.md entry (after its date) and
     the knowledge-store commit subject — they name the same unit, so an edit
-    here moves both rather than desyncing them."""
-    return f"extract {short_session(session_id)} | {scope} | {count} {extract_type} candidate(s)"
+    here moves both rather than desyncing them.
+
+    `routed` is the per-scope count emit_candidates filed; anything under a scope
+    other than the requested one is named in the label, because otherwise the
+    permanent record says a run filed under one scope when it filed under two."""
+    label = f"extract {short_session(session_id)} | {scope} | {count} {extract_type} candidate(s)"
+    elsewhere = ", ".join(f"{n} → {s}" for s, n in sorted(routed.items()) if s != scope)
+    if elsewhere:
+        label += f" ({elsewhere})"
+    return label
 
 
 def keywords(text: str) -> set[str]:
@@ -1092,9 +1255,13 @@ def main():
     # or running in benchmark mode (a measurement run, not production).
     if args.emit_candidates and not args.benchmark and valid:
         reasoning = args.reasoning if args.provider == "codex" else None
-        changes = emit_candidates(valid, tcfg["candidates"], args.scope,
-                                  args.provider, args.model, reasoning, session_id,
-                                  ticket_ids)
+        # truths/, not the type's own tree, for both extract types — the gate the
+        # sweep applies (scopeInStore) and the only directory `loom knowledge
+        # scope add` creates, so gating a decision run on decisions/<scope>/
+        # would refuse every scope onboarded before it filed a decision.
+        changes, routed = emit_candidates(valid, tcfg["candidates"], args.scope,
+                                          args.provider, args.model, reasoning, session_id,
+                                          ticket_ids, TYPE_CONFIG["truth"]["training"])
         # One write per run, covering the candidate files and the log.md append
         # together, committed as one record by the store rather than here. A run
         # that produced no candidate to write records nothing at all — not even
@@ -1103,10 +1270,10 @@ def main():
         if changes:
             count = len(changes)
             log_change = append_extract_log(args.extract_type, args.scope,
-                                            session_id, count)
+                                            session_id, count, routed)
             if log_change:
                 changes.append(log_change)
-            message = run_label(args.extract_type, args.scope, session_id, count)
+            message = run_label(args.extract_type, args.scope, session_id, count, routed)
             try:
                 reason = apply_changes(message, changes)
             except StoreWriteError as exc:
@@ -1114,7 +1281,11 @@ def main():
                 # them, and writing them anywhere else is what the single entry
                 # point exists to prevent.
                 sys.exit(f"[extract] knowledge store write failed: {exc}")
-            print(f"[extract] wrote {count} candidate(s) → {tcfg['candidates']}/{args.scope}/", file=sys.stderr)
+            # Per scope, not per run: a run that re-scoped a candidate wrote to
+            # more than one directory, and naming only --scope would be wrong.
+            destinations = ", ".join(f"{tcfg['candidates']}/{s}/ ({n})"
+                                     for s, n in sorted(routed.items()))
+            print(f"[extract] wrote {count} candidate(s) → {destinations}", file=sys.stderr)
             if reason:
                 print(f"[extract] knowledge store not committed: {reason}", file=sys.stderr)
             else:

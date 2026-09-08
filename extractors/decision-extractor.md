@@ -32,7 +32,7 @@ Emit zero or more decision files as markdown, separated by the literal sentinel 
 ---
 id: <scope>-<kebab-slug>
 title: <one-line summary of the choice, ~80 chars max>
-scope: <project name>
+scope: <project the decision is about — usually the session's project, but name the other one when the decision is about a different project>
 type: decision
 status: candidate
 tag: <human|auto>

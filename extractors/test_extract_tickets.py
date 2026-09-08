@@ -355,8 +355,9 @@ class EmitCandidatesTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             # emit_candidates builds the writes; the store performs them.
-            changes = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
-                                      "low", session, [TICKET, OTHER_TICKET])
+            changes, _ = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
+                                         "low", session, [TICKET, OTHER_TICKET],
+                                         Path(tmp) / "truths")
 
             self.assertEqual(len(changes), 1)
             parsed = parse_truth(changes[0]["body"], source=changes[0]["path"])
@@ -380,8 +381,9 @@ class EmitCandidatesTest(unittest.TestCase):
         )}
 
         with tempfile.TemporaryDirectory() as tmp:
-            changes = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
-                                      "low", session, [TICKET])
+            changes, _ = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
+                                         "low", session, [TICKET],
+                                         Path(tmp) / "truths")
 
             self.assertEqual(len(changes), 1)
             parsed = parse_truth(changes[0]["body"], source=changes[0]["path"])

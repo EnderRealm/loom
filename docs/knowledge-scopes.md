@@ -20,6 +20,63 @@ directory it sits in. A skipped session is recoverable — the transcript is sti
 in `received/` and the scope can be created after the fact — where a
 misattributed one is not.
 
+## Cross-scope extraction
+
+A session's scope is the project it *ran in*; a truth's scope is the project it
+is *about*, and the two diverge routinely — a loom session that debugs a tk
+failure discovers a truth about tk. Both extractor templates ask the model to
+name the subject project in the candidate's `scope:`, and it does; what the
+extractor did with that value was nothing. Every candidate was filed under
+`--scope`, so one declaring `scope: ticket` landed in
+`_candidates/truths/loom/` — a file whose frontmatter disagrees with its own
+directory, which `truths/_schema.md` requires to match. Nothing downstream
+notices: `internal/knowledge` derives an artifact's scope from the directory
+name and never reads the key.
+
+`route_candidate_scope` in `extractors/extract.py` files each candidate by its
+declaration instead, gated on `truths/<declared>/` existing — deliberately the
+same gate as [The gate](#the-gate) above, not a looser one:
+
+- **Nothing declared, or the declaration matches `--scope`.** Filed under
+  `--scope`, nothing reported.
+- **Declared, a usable name, and the store has the directory.** Filed under the
+  declared scope. The file's `scope:` and its parent directory agree again,
+  which is the whole point.
+- **Declared, a usable name, no directory.** Filed under `--scope` carrying
+  `scope_mismatch: <declared>` in its frontmatter. The store's write path
+  creates parent directories, so routing here would onboard a scope nobody
+  opted into — the same reason the sweep skips a session rather than defaulting
+  it, and the same reason onboarding is an explicit command.
+- **Declared, but not a usable scope name.** Filed under `--scope` with
+  `scope_mismatch:` as well. The declaration is model output steered by a
+  transcript loom did not author, so it clears `NAME_PATTERN` before it can
+  become a path segment, and `SCOPE_NAME_LIMIT` — 255 characters, the component
+  limit on APFS and ext4 — before it is joined to a path at all: a longer name
+  makes the directory lookup raise `ENAMETOOLONG` rather than report absence.
+  That bound belongs to that call site in `extract.py`; the shared name pattern
+  stays unbounded on both sides. A lookup that errors regardless leaves the
+  candidate under `--scope`, flagged the same way. Every echo of a
+  declaration — both notes and the frontmatter value — goes through
+  `echo_scope`, which redacts before it truncates to 60 chars, marks a
+  truncation with `...` so a cut name is not read as a shorter one, and reduces
+  to `[A-Za-z0-9._-]`; a declaration carrying something credential-shaped is
+  echoed as `redacted` whole, since the shape is the evidence and the bytes are
+  not.
+
+`scope_mismatch:` is the reviewer's only channel that needs no Go change: the
+TUI renders a candidate's body verbatim, while `Artifact.Scope` comes from the
+directory. The key in a stored file is always this process's verdict — a
+model-emitted one is stripped from the frontmatter first, or a candidate that
+routed cleanly would carry a flag loom never raised. A human then either
+onboards the declared scope and moves the file, or corrects the declaration. The
+trade-off is that an un-onboarded subject scope still costs a manual move — but
+a candidate misfiled loudly is recoverable where one misfiled silently, as ~200
+in the store were, is not.
+
+The run's log.md entry and commit subject name every scope a run filed under
+(`extract 92118425 | loom | 6 truth candidate(s) (1 → ticket)`), so a re-scope is
+in the store's history rather than only in a directory listing.
+
 ## The three derivations
 
 | Derivation | Entry point | Source |

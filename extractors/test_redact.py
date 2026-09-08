@@ -579,8 +579,8 @@ class EmitCandidatesBackstopTest(unittest.TestCase):
 
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp, redirect_stderr(err):
-            changes = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
-                                      "low", session, [])
+            changes, _ = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
+                                         "low", session, [], Path(tmp) / "truths")
 
         self.assertEqual(len(changes), 1)
         self.assertIn("[redact] candidates: 1 span(s), 37 chars: anthropic-key×1", err.getvalue())

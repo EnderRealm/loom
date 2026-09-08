@@ -50,7 +50,7 @@ Emit zero or more truth files as markdown, separated by the literal sentinel `==
 ---
 id: <scope>-<kebab-slug>
 title: <one-line summary, ~80 chars max>
-scope: <project name, matches the session's project field>
+scope: <project the truth is about — usually the session's project, but name the other one when the truth is about a different project>
 type: truth
 status: candidate
 evidence:
