@@ -6,6 +6,8 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-09-07 — Knowledge scope onboarding
+
 ### Added
 
 - `loom knowledge scope add <name>...` creates `truths/<name>/` under the
