@@ -83,27 +83,29 @@ TYPE_CONFIG = {
 
 STOPWORDS = set("a an and are as at be but by for from has have if in is it of on or that the this to was were will with not no which when where who why how into over under across between".split())
 
-INPUT_GUIDANCE_SUMMARY = """You will receive a session artifact. Most often it is a markdown summary with a frontmatter block (project, session_id, date) and sections like `### Overview`, `### Decisions`, `### Problems`, `### Discoveries`. Prioritize the `Discoveries` section — it contains verified claims. Read `Problems` and `Decisions` for context but be careful: not everything stated there is a truth.
+INPUT_GUIDANCE_SUMMARY = """You will receive a session artifact. Most often it is a markdown summary with a frontmatter block (project, session_id, date) and sections like `### Overview`, `### Decisions`, `### Problems`, `### Discoveries`. Those sections tell you where to look — `### Discoveries` and `### Problems` for observed behavior, `### Decisions` for choices and their reasoning.
 
-Also look at `### Outcome` for the session's own self-assessment of what landed vs what didn't. A "partially_achieved" outcome often means the session surfaced *discoveries* more than *work* — exactly what you want for truth extraction."""
+`### Outcome` holds the session's self-assessment of what landed vs what didn't."""
 
 INPUT_GUIDANCE_RAW = """You will receive a **pre-processed conversation transcript** from a Claude Code session. The format uses labeled blocks:
 
-- **ASSISTANT:** — Claude's visible analysis, recommendations, and discoveries. This is your primary extraction source. Look for architectural claims, root cause analyses, mechanism descriptions, and corrections ("I had that wrong", "this means...").
-- **USER:** — Human input. Short messages are decisions/corrections ("no", "Let's do B", "that's wrong"). Longer blocks may be skill prompts or injected context — skim those for structure but don't extract truths from boilerplate.
-- **TOOL:** — One-line summaries of tool calls (e.g., `TOOL: Grep("pattern" in path)`). These show what was investigated but rarely contain truths directly.
-- **RESULT:** — Tool output, truncated. Occasionally contains the specific evidence that proves a truth (grep counts, error messages, file contents).
-- **ERROR:** — Tool failures. These often trigger the root-cause analysis in the next ASSISTANT block — pay attention to the analysis, not just the error.
+- **ASSISTANT:** — Claude's visible analysis, recommendations, and discoveries. Look here for architectural claims, root cause analyses, mechanism descriptions, and corrections ("I had that wrong", "this means...").
+- **USER:** — Human input. Short messages are decisions/corrections ("no", "Let's do B", "that's wrong"). Longer blocks may be skill prompts or injected context — skim those for structure but don't extract candidates from boilerplate.
+- **TOOL:** — One-line summaries of tool calls (e.g., `TOOL: Grep("pattern" in path)`). These show what was investigated.
+- **RESULT:** — Tool output, truncated. Sometimes carries the specific evidence a claim would need (grep counts, error messages, file contents).
+- **ERROR:** — Tool failures. These often precede a root-cause analysis in the next ASSISTANT block.
 
-Key patterns to watch for in raw transcripts:
+Places where candidates tend to surface:
 
-1. **Corrections/reversals**: "I had that wrong", "actually it's X not Y", "Option A would have broken..." — the correction itself is often the truth.
-2. **Root cause chains**: multiple errors → investigation → single root cause. The root cause mechanism is the truth.
-3. **User pushback**: when the user says "no" or redirects, the new direction often reveals a constraint or architectural fact.
-4. **Evidence-backed claims**: when an ASSISTANT block cites specific file paths, line numbers, grep counts, or commit shas, and draws a conclusion — that's a high-confidence truth candidate.
-5. **Architecture statements**: "X is designed as Y", "agents are stateless text processors", "the dist bundle is what runs, not the source" — direct claims about how systems work.
+1. **Corrections/reversals**: "I had that wrong", "actually it's X not Y", "Option A would have broken...".
+2. **Root cause chains**: multiple errors → investigation → a single stated root cause.
+3. **User pushback**: when the user says "no" or redirects, the new direction sometimes names a constraint.
+4. **Evidence-backed claims**: an ASSISTANT block that cites specific file paths, line numbers, grep counts, or commit shas and draws a conclusion from them.
+5. **Architecture statements**: "X is designed as Y", "agents are stateless text processors", "the dist bundle is what runs, not the source".
 
-Unlike summaries, raw transcripts do NOT have curated `### Discoveries` sections. You must find the signal in the conversation flow. Expect more noise — but also richer evidence and corrections that summaries sometimes miss."""
+Finding one of these tells you where to look. It does not settle whether the candidate passes the tests above.
+
+Unlike summaries, raw transcripts do NOT have curated `### Discoveries` sections. You must find the signal in the conversation flow. Expect more noise."""
 
 
 def load_reference_truths_from(scope_dir: Path, label: str = "reference examples") -> list[dict]:
