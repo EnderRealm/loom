@@ -261,8 +261,26 @@ def build_prompt(template: str, refs: list[dict], input_text: str, today: str, i
 
 
 def call_claude(prompt: str, model: str) -> str:
+    """Call the claude CLI non-interactively, with no tools. Returns its stdout.
+
+    Every call through here is text in, text out — the transcript arrives on
+    stdin and candidates come back on stdout — so the agent needs no tools and
+    is given none. Both flags are load-bearing and neither implies the other:
+    --tools "" drops the built-in set, and the MCP servers survive it. Those
+    are the wider exposure, since a stdio server runs in its client's process
+    tree at the client's privilege and this client is an unattended
+    LaunchAgent. The transcript is untrusted input (see
+    docs/transcript-trust-and-redaction.md), which is what makes handing it to
+    a tool-enabled agent worth refusing.
+    """
     proc = subprocess.run(
-        [CLAUDE_BIN, "-p", "--model", model],
+        [
+            CLAUDE_BIN, "-p", "--model", model,
+            "--tools", "",
+            # The empty server set --strict-mcp-config then confines the
+            # session to; without a config there is nothing to be strict about.
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        ],
         input=prompt,
         capture_output=True,
         text=True,

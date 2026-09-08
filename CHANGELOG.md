@@ -6,6 +6,26 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The extractor's `claude` provider spawned an agent with every tool the
+  host offers. Extraction is text in, text out — the transcript arrives
+  on stdin and candidates come back on stdout — so `call_claude` now
+  passes `--tools ""` to drop the built-in set and
+  `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` to drop the MCP
+  servers, and the CLI's own init event reports `tools: []` and
+  `mcp_servers: []`. Neither flag implies the other: `--tools ""` leaves
+  the MCP servers loaded, and those are the wider exposure, since a
+  stdio server runs in its client's process tree at the client's
+  privilege and this client is an unattended LaunchAgent. Measured on
+  one host before the change: 30 built-in tools and 45 MCP tools across
+  12 servers. The `codex` provider already ran `--sandbox read-only`;
+  the asymmetry was between the two branches of the same function, and
+  the trigger pins `claude` as its default provider, so the unsandboxed
+  branch was the one every unattended sweep took. Transcripts are
+  untrusted input by construction (`docs/transcript-trust-and-redaction.md`),
+  which is what made handing them to a tool-enabled agent worth closing.
+
 ## [1.6.0] — 2026-09-07 — Knowledge scope onboarding
 
 ### Added
