@@ -26,6 +26,42 @@ type Session struct {
 	SessionID string
 	Path      string
 	Cwd       string
+
+	// Subagent is nil for an ordinary top-level session, and set for a
+	// transcript the agent wrote for a subagent it dispatched.
+	Subagent *Subagent
+}
+
+// Subagent describes a subagent transcript: the session that dispatched it
+// plus whatever the on-disk sidecar recorded about the dispatch. Every
+// metadata field is optional — a subagent transcript with no sidecar still
+// ships, just without them.
+type Subagent struct {
+	ParentSessionID string
+	AgentType       string
+	Description     string
+	ToolUseID       string
+	SpawnDepth      int
+}
+
+// Key is the flat, filesystem-safe identifier used for cursor files. A
+// subagent is namespaced under its parent so two parents' subagents can
+// never collide, and a subagent key can never collide with a bare uuid.
+func (s Session) Key() string {
+	if s.Subagent == nil {
+		return s.SessionID
+	}
+	return s.Subagent.ParentSessionID + "." + s.SessionID
+}
+
+// ParentID is the id of the session that dispatched this one, or "" for a
+// top-level session. Staging paths and log lines both take it as a plain
+// string.
+func (s Session) ParentID() string {
+	if s.Subagent == nil {
+		return ""
+	}
+	return s.Subagent.ParentSessionID
 }
 
 // Adapter is one agent's source-file enumerator.

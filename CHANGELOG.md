@@ -28,6 +28,33 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Claude Code subagent transcripts never shipped. The Claude adapter
+  listed only the `.jsonl` files sitting directly in a project
+  directory and skipped every subdirectory, so the
+  `<session>/subagents/` subtree — 1972 transcripts under 143 parent
+  sessions on this host, the record of what each dispatched agent
+  actually did — was enumerated by nothing and captured by nothing.
+  They now enumerate at any depth beneath `subagents/`: 1794 sit
+  directly in it and 178 nest one level deeper under
+  `workflows/<wf_id>/`, and for 3 of the parent sessions every
+  transcript is nested, so a one-level walk would still have shipped
+  them nothing at all. A workflow directory's `journal.jsonl` (13 of
+  them) is that workflow's bookkeeping rather than a dispatch, carries
+  no sidecar, and is excluded. A subagent is identified under its
+  parent — cursor key `<parent>.<agent-id>`, and a nested transcript's
+  `<agent-id>` is its path below `subagents/` joined with `.`
+  (`workflows.wf_5daf2eee-720.agent-a0e0`) — so every id stays a single
+  path component the receiver's identifier guard accepts, and two
+  dispatches under one parent can never share a staging file or an
+  offset. `IngestRequest` grows an optional `subagent` object (parent
+  session, agent type, description, tool use id, spawn depth); staging
+  and `received/` both nest the transcript under `<parent>/subagents/`
+  and persist that metadata in a `.subagent.json` sidecar beside it,
+  refreshed each tick — rewritten only when it changed — so a sidecar
+  Claude Code writes after the transcript's bytes were captured still
+  ships, as long as some of those bytes are still unshipped. A request
+  without the field lands exactly where it does today.
+
 - Codex subagent sessions were being discarded whole. codex-cli 0.153.4
   writes `session_meta.payload.source` as an object describing the spawn
   (parent thread, depth, agent path) rather than the string loom typed

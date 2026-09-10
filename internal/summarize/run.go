@@ -111,7 +111,16 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		// Subagent transcripts land under <session>/subagents/. Ingesting
+		// them here would file each one as a session whose project is the
+		// literal "subagents"; consuming them properly is separate work.
+		if d.IsDir() {
+			if d.Name() == "subagents" {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".jsonl") {

@@ -271,26 +271,49 @@ func capturePass(counts *tickCounts) {
 			continue
 		}
 		for _, s := range sessions {
-			from, err := cursor.Read(cursor.KindSource, agent, s.SessionID)
+			// A subagent gets its own cursor, namespaced under its parent.
+			key := s.Key()
+			parent := s.ParentID()
+			from, err := cursor.Read(cursor.KindSource, agent, key)
 			if err != nil {
-				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q",
-					agent, s.Project, s.SessionID, err)
+				log.Printf("fail stage=capture agent=%s project=%s session=%s parent=%s class=io err=%q",
+					agent, s.Project, s.SessionID, parent, err)
 				counts.captureFailed++
 				continue
 			}
 			data, to, err := source.ReadDeltaBytes(s.Path, from)
 			if err != nil {
-				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q",
-					agent, s.Project, s.SessionID, err)
+				log.Printf("fail stage=capture agent=%s project=%s session=%s parent=%s class=io err=%q",
+					agent, s.Project, s.SessionID, parent, err)
 				counts.captureFailed++
 				continue
+			}
+			// Refresh the dispatch sidecar ahead of the no-new-bytes
+			// short-circuit: Claude Code can write it after the transcript's
+			// bytes were captured, and shipOne only carries a sidecar
+			// alongside a delta. That covers a sidecar landing while captured
+			// bytes are still unshipped (a lagging or failed ship pass), not
+			// one landing after the last delta shipped — that one refreshes
+			// staging and never reaches the receiver. WriteSubagent skips the
+			// rewrite when nothing changed, so the every-tick call is a read.
+			if s.Subagent != nil {
+				if err := staging.WriteSubagent(agent, s.Project, parent, s.SessionID, staging.Subagent{
+					ParentSessionID: s.Subagent.ParentSessionID,
+					AgentType:       s.Subagent.AgentType,
+					Description:     s.Subagent.Description,
+					ToolUseID:       s.Subagent.ToolUseID,
+					SpawnDepth:      s.Subagent.SpawnDepth,
+				}); err != nil {
+					log.Printf("fail stage=capture agent=%s project=%s session=%s parent=%s class=io err=%q (subagent meta)",
+						agent, s.Project, s.SessionID, parent, err)
+				}
 			}
 			if len(data) == 0 {
 				continue
 			}
-			if err := staging.Append(agent, s.Project, s.SessionID, data); err != nil {
-				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q (append)",
-					agent, s.Project, s.SessionID, err)
+			if err := staging.Append(agent, s.Project, parent, s.SessionID, data); err != nil {
+				log.Printf("fail stage=capture agent=%s project=%s session=%s parent=%s class=io err=%q (append)",
+					agent, s.Project, s.SessionID, parent, err)
 				counts.captureFailed++
 				continue
 			}
@@ -303,23 +326,23 @@ func capturePass(counts *tickCounts) {
 					remote = resolveGitRemote(s.Cwd)
 					gitCache[s.Cwd] = remote
 				}
-				if err := staging.WriteIdentity(agent, s.Project, s.SessionID, staging.Identity{
+				if err := staging.WriteIdentity(agent, s.Project, parent, s.SessionID, staging.Identity{
 					GitRemote: remote,
 					Cwd:       s.Cwd,
 					RootSlug:  s.Project,
 				}); err != nil {
-					log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q (meta)",
-						agent, s.Project, s.SessionID, err)
+					log.Printf("fail stage=capture agent=%s project=%s session=%s parent=%s class=io err=%q (meta)",
+						agent, s.Project, s.SessionID, parent, err)
 				}
 			}
-			if err := cursor.Write(cursor.KindSource, agent, s.SessionID, to); err != nil {
-				log.Printf("fail stage=capture agent=%s project=%s session=%s class=io err=%q (cursor)",
-					agent, s.Project, s.SessionID, err)
+			if err := cursor.Write(cursor.KindSource, agent, key, to); err != nil {
+				log.Printf("fail stage=capture agent=%s project=%s session=%s parent=%s class=io err=%q (cursor)",
+					agent, s.Project, s.SessionID, parent, err)
 				counts.captureFailed++
 				continue
 			}
-			log.Printf("capture agent=%s project=%s session=%s bytes=%d offset=%d→%d",
-				agent, s.Project, s.SessionID, len(data), from, to)
+			log.Printf("capture agent=%s project=%s session=%s parent=%s bytes=%d offset=%d→%d",
+				agent, s.Project, s.SessionID, parent, len(data), from, to)
 			counts.captured++
 		}
 	}
@@ -365,17 +388,19 @@ func shipPass(cfg *Config, counts *tickCounts) {
 }
 
 func shipOne(cfg *Config, e staging.Entry, counts *tickCounts) {
-	from, err := cursor.Read(cursor.KindShip, e.Agent, e.SessionID)
+	key := e.Key()
+	parent := e.ParentID()
+	from, err := cursor.Read(cursor.KindShip, e.Agent, key)
 	if err != nil {
-		log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (cursor read)",
-			e.Agent, e.Project, e.SessionID, err)
+		log.Printf("fail stage=ship agent=%s project=%s session=%s parent=%s class=io err=%q (cursor read)",
+			e.Agent, e.Project, e.SessionID, parent, err)
 		counts.addFail(classIO)
 		return
 	}
 	lines, to, err := source.ReadDelta(e.Path, from)
 	if err != nil {
-		log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (read staging)",
-			e.Agent, e.Project, e.SessionID, err)
+		log.Printf("fail stage=ship agent=%s project=%s session=%s parent=%s class=io err=%q (read staging)",
+			e.Agent, e.Project, e.SessionID, parent, err)
 		counts.addFail(classIO)
 		return
 	}
@@ -398,37 +423,47 @@ func shipOne(cfg *Config, e staging.Entry, counts *tickCounts) {
 			RootSlug:  e.Identity.RootSlug,
 		}
 	}
+	if e.Subagent != nil {
+		req.Subagent = &wire.Subagent{
+			ParentSessionID: e.Subagent.ParentSessionID,
+			AgentType:       e.Subagent.AgentType,
+			Description:     e.Subagent.Description,
+			ToolUseID:       e.Subagent.ToolUseID,
+			SpawnDepth:      e.Subagent.SpawnDepth,
+		}
+	}
 	accepted, err := postIngestWithRetry(cfg, req, e)
 	if err != nil {
 		class := classify(err)
 		var resyncErr *wire.ResyncError
 		if errors.As(err, &resyncErr) {
-			log.Printf("resync agent=%s project=%s session=%s cursor=%d→%d (server expects %d: %s)",
-				e.Agent, e.Project, e.SessionID, from, resyncErr.ExpectedFrom, resyncErr.ExpectedFrom, resyncErr.Detail)
-			if wErr := cursor.Write(cursor.KindShip, e.Agent, e.SessionID, resyncErr.ExpectedFrom); wErr != nil {
-				log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (cursor resync write)",
-					e.Agent, e.Project, e.SessionID, wErr)
+			log.Printf("resync agent=%s project=%s session=%s parent=%s cursor=%d→%d (server expects %d: %s)",
+				e.Agent, e.Project, e.SessionID, parent, from, resyncErr.ExpectedFrom, resyncErr.ExpectedFrom, resyncErr.Detail)
+			if wErr := cursor.Write(cursor.KindShip, e.Agent, key, resyncErr.ExpectedFrom); wErr != nil {
+				log.Printf("fail stage=ship agent=%s project=%s session=%s parent=%s class=io err=%q (cursor resync write)",
+					e.Agent, e.Project, e.SessionID, parent, wErr)
 				counts.addFail(classIO)
 			}
 			return
 		}
-		log.Printf("fail stage=ship agent=%s project=%s session=%s class=%s offset=%d→%d lines=%d err=%q",
-			e.Agent, e.Project, e.SessionID, class, from, to, len(lines), err)
+		log.Printf("fail stage=ship agent=%s project=%s session=%s parent=%s class=%s offset=%d→%d lines=%d err=%q",
+			e.Agent, e.Project, e.SessionID, parent, class, from, to, len(lines), err)
 		counts.addFail(class)
 		return
 	}
-	if err := cursor.Write(cursor.KindShip, e.Agent, e.SessionID, accepted); err != nil {
-		log.Printf("fail stage=ship agent=%s project=%s session=%s class=io err=%q (cursor write)",
-			e.Agent, e.Project, e.SessionID, err)
+	if err := cursor.Write(cursor.KindShip, e.Agent, key, accepted); err != nil {
+		log.Printf("fail stage=ship agent=%s project=%s session=%s parent=%s class=io err=%q (cursor write)",
+			e.Agent, e.Project, e.SessionID, parent, err)
 		counts.addFail(classIO)
 		return
 	}
-	log.Printf("ship agent=%s project=%s session=%s offset=%d→%d lines=%d",
-		e.Agent, e.Project, e.SessionID, from, accepted, len(lines))
+	log.Printf("ship agent=%s project=%s session=%s parent=%s offset=%d→%d lines=%d",
+		e.Agent, e.Project, e.SessionID, parent, from, accepted, len(lines))
 	counts.shipped++
 }
 
 func postIngestWithRetry(cfg *Config, req wire.IngestRequest, e staging.Entry) (int64, error) {
+	parent := e.ParentID()
 	backoffs := []time.Duration{0, 500 * time.Millisecond, 2 * time.Second}
 	var lastErr error
 	for attempt := 0; attempt < len(backoffs); attempt++ {
@@ -445,8 +480,8 @@ func postIngestWithRetry(cfg *Config, req wire.IngestRequest, e staging.Entry) (
 			return 0, err
 		}
 		if attempt+1 < len(backoffs) {
-			log.Printf("retry agent=%s project=%s session=%s class=%s attempt=%d/%d err=%q",
-				e.Agent, e.Project, e.SessionID, class, attempt+1, len(backoffs), err)
+			log.Printf("retry agent=%s project=%s session=%s parent=%s class=%s attempt=%d/%d err=%q",
+				e.Agent, e.Project, e.SessionID, parent, class, attempt+1, len(backoffs), err)
 		}
 	}
 	return 0, lastErr
@@ -531,20 +566,20 @@ func refreshPending(state *notify.State) {
 			continue
 		}
 		seen := map[string]bool{}
-		for _, sid := range sessions {
-			seen[sid] = true
+		for _, key := range sessions {
+			seen[key] = true
 		}
 		entries, err := staging.List(agent)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
-			seen[e.SessionID] = true
+			seen[e.Key()] = true
 		}
-		for sid := range seen {
+		for key := range seen {
 			var ent *staging.Entry
 			for i := range entries {
-				if entries[i].SessionID == sid {
+				if entries[i].Key() == key {
 					ent = &entries[i]
 					break
 				}
@@ -552,13 +587,14 @@ func refreshPending(state *notify.State) {
 			if ent == nil {
 				continue
 			}
-			size, err := staging.Size(agent, ent.Project, sid)
+			parent := ent.ParentID()
+			size, err := staging.Size(agent, ent.Project, parent, ent.SessionID)
 			if err != nil {
 				continue
 			}
-			shipOff, _ := cursor.Read(cursor.KindShip, agent, sid)
+			shipOff, _ := cursor.Read(cursor.KindShip, agent, key)
 			if shipOff < size {
-				pending[notify.SessionKey(agent, sid)] = true
+				pending[notify.SessionKey(agent, key)] = true
 			}
 		}
 	}
@@ -711,7 +747,7 @@ func countUncapturedSessions() []uncapturedBucket {
 			if err != nil {
 				continue
 			}
-			off, _ := cursor.Read(cursor.KindSource, agent, s.SessionID)
+			off, _ := cursor.Read(cursor.KindSource, agent, s.Key())
 			if size <= off {
 				continue
 			}
@@ -778,7 +814,7 @@ func printPendingByProject(w io.Writer, pending map[string]bool) {
 			continue
 		}
 		for _, e := range entries {
-			projectOf[notify.SessionKey(e.Agent, e.SessionID)] = e.Project
+			projectOf[notify.SessionKey(e.Agent, e.Key())] = e.Project
 		}
 	}
 

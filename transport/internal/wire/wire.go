@@ -22,6 +22,23 @@ type IngestRequest struct {
 	Lines      []string `json:"lines"`
 
 	ProjectIdentity *ProjectIdentity `json:"project_identity,omitempty"`
+
+	// Subagent is set only when SessionID names a subagent transcript
+	// rather than a top-level session. Absent field is today's shape.
+	Subagent *Subagent `json:"subagent,omitempty"`
+}
+
+// Subagent carries the identity of a subagent transcript: the session that
+// dispatched it plus the dispatch metadata from the agent's own sidecar, so
+// a reader can join the transcript to the tool call that created it without
+// re-reading the source tree. Every field but ParentSessionID is optional —
+// a subagent transcript with no sidecar ships without them.
+type Subagent struct {
+	ParentSessionID string `json:"parent_session_id"`
+	AgentType       string `json:"agent_type,omitempty"`
+	Description     string `json:"description,omitempty"`
+	ToolUseID       string `json:"tool_use_id,omitempty"`
+	SpawnDepth      int    `json:"spawn_depth,omitempty"`
 }
 
 // ProjectIdentity carries the authoritative identity for a session's

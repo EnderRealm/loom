@@ -1,5 +1,9 @@
-// Package cursor persists per-session byte offsets. One file per session,
+// Package cursor persists per-transcript byte offsets. One file per key,
 // atomic replace on write. Missing cursor means "start from 0".
+//
+// A key is a session id, or — for a subagent transcript — its
+// parent-namespaced <parent>.<agent-id>, per source.Session.Key. It is
+// always a single filesystem-safe path component.
 //
 // Two kinds of cursor coexist:
 //
@@ -40,21 +44,21 @@ func kindDir(kind Kind, agent string) string {
 	return filepath.Join(baseDir(), string(kind), agent)
 }
 
-func kindPath(kind Kind, agent, sessionID string) string {
-	return filepath.Join(kindDir(kind, agent), sessionID+".cursor")
+func kindPath(kind Kind, agent, key string) string {
+	return filepath.Join(kindDir(kind, agent), key+".cursor")
 }
 
-// Read returns the stored byte offset for a session, or 0 if none exists yet.
-func Read(kind Kind, agent, sessionID string) (int64, error) {
-	return readFile(kindPath(kind, agent, sessionID))
+// Read returns the stored byte offset for a key, or 0 if none exists yet.
+func Read(kind Kind, agent, key string) (int64, error) {
+	return readFile(kindPath(kind, agent, key))
 }
 
-// Write stores a new byte offset for a session, atomically via temp-file + rename.
-func Write(kind Kind, agent, sessionID string, offset int64) error {
+// Write stores a new byte offset for a key, atomically via temp-file + rename.
+func Write(kind Kind, agent, key string, offset int64) error {
 	if err := os.MkdirAll(kindDir(kind, agent), 0o700); err != nil {
 		return err
 	}
-	return writeFile(kindPath(kind, agent, sessionID), offset)
+	return writeFile(kindPath(kind, agent, key), offset)
 }
 
 func readFile(path string) (int64, error) {
@@ -146,7 +150,7 @@ func Migrate() error {
 	return nil
 }
 
-// ListSessions returns every session that has a cursor in the given kind
+// ListSessions returns every key that has a cursor in the given kind
 // namespace for the given agent. Used by the ship pass and notifier to walk
 // staged state without re-listing source files.
 func ListSessions(kind Kind, agent string) ([]string, error) {

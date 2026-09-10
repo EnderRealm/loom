@@ -50,6 +50,14 @@ Enforcing a confidential transport in the shipper and receiver themselves,
 rather than leaving it to how the operator deploys them, is tracked in
 `loom/require-confidential-transport-3a9a`.
 
+Subagent transcripts travel on this leg too. Claude Code writes one under
+`<session>/subagents/` for each agent a session dispatched, and the shipper
+sends those bodies whole and unredacted, on the same terms as everything
+above. They are the same content class as the session transcript beside them
+— the same prompts, the same tool results, the same hazards — not least
+because a dispatch's prompt and its result already appear in the parent
+session's own transcript. Nothing about the trust model changes for them.
+
 **Leg (a) — the Go summarizer.** `internal/parse/claudeparse` and
 `internal/parse/codexparse` fold `~/.loom/received/` into `~/.loom/summaries.db`
 on the receiver host, whose turns hold verbatim user and assistant text and

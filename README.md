@@ -198,7 +198,7 @@ loom work-report --since 2026-08-01 --until 2026-09-01 | jq .totals
 
 A lightweight agent-session shipper. The client (`loom shipper daemon`) walks agent session files, ships byte-delta batches to the server (`loom receiver`) over HTTP, and persists per-session cursors so subsequent runs are incremental and idempotent. The shipper runs as a long-lived KeepAlive daemon with an in-process ticker (driven by `interval_minutes` in config); it does not rely on launchd's `StartInterval`, which dasd coalesces aggressively on modern macOS.
 
-**Agents supported in v1:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<uuid>.jsonl`).
+**Agents supported in v1:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`, plus the transcripts of the subagents that session dispatched, anywhere under `~/.claude/projects/<sanitized-cwd>/<uuid>/subagents/` — directly in it for a plain dispatch, one level deeper under `workflows/<wf_id>/` for a workflow one, whose `journal.jsonl` is the workflow's own bookkeeping and is not a transcript) and Codex CLI (rollouts at `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<uuid>.jsonl`).
 
 A session run from a throwaway working directory — a review lens started in an empty `mktemp -d` so the reviewed repo cannot instruct its reviewer — reports that directory as its cwd, which would make every run its own project and leave it with no knowledge scope. Its launcher stamps the checkout it is about in `~/.loom/attribution.jsonl` and the Codex adapter resolves identity through it; the producer contract is [`docs/attribution-stamps.md`](./docs/attribution-stamps.md).
 
@@ -208,10 +208,13 @@ A session run from a throwaway working directory — a review lens started in an
 ~/.loom/
   config.json                                  # client: server URL, auth token, interval
   transport/
-    cursors/source/<agent>/<uuid>.cursor       # client: next byte read from source
-    cursors/ship/<agent>/<uuid>.cursor         # client: next byte shipped to receiver
+    cursors/source/<agent>/<key>.cursor        # client: next byte read from source
+    cursors/ship/<agent>/<key>.cursor          # client: next byte shipped to receiver
     staging/<agent>/<project>/<uuid>.jsonl     # client: bytes captured locally
     staging/<agent>/<project>/<uuid>.meta.json # client: per-session project identity
+    staging/<agent>/<project>/<parent>/subagents/
+      <agent-id>.jsonl                         # client: subagent bytes captured locally
+      <agent-id>.subagent.json                 # client: dispatch metadata (parent, agent type, tool use id)
   attribution.jsonl                            # producers: throwaway work root → checkout
     shipper.lock                               # client: flock, one shipper at a time
     shipper.log                                # client: launchd stdout/stderr capture
@@ -221,6 +224,9 @@ A session run from a throwaway working directory — a review lens started in an
         <uuid>.jsonl                           # appended-to session file
         <uuid>.offset                          # next expected byte (idempotency)
         <uuid>.meta.json                       # project identity (git remote, raw cwd)
+        <parent>/subagents/
+          <agent-id>.jsonl                     # subagent transcript, with its own .offset/.meta.json
+          <agent-id>.subagent.json             # dispatch metadata (parent, agent type, tool use id)
   summaries.db                                 # server: normalized summary database
   summarizer.log                               # server: summarizer launchd capture
   extract.state                                # server: extractor watermark + visited sessions
@@ -233,6 +239,8 @@ A session run from a throwaway working directory — a review lens started in an
 State lives per-user per-machine. Override the root with `LOOM_HOME=/some/path`.
 
 `<agent>` is `claude-code` or `codex-cli`. The two-stage shipper captures from the agent's source directory into local `staging/`, then ships staging deltas to the receiver — so the agent can clean up its own session files without losing data.
+
+A subagent transcript travels under the session that dispatched it: it stages at `staging/<agent>/<project>/<parent>/subagents/`, lands at `received/<agent>/<project>/<parent>/subagents/`, and carries a `.subagent.json` sidecar with what the agent recorded about the dispatch. Its cursor key `<key>` is `<parent>.<agent-id>`; for a transcript nested below `subagents/`, `<agent-id>` is its path under that directory joined with `.` (`workflows.wf_5daf2eee-720.agent-a0e0`), so it stays a single path component and two dispatches under one parent can never share a staging file or a cursor. A top-level session's `<key>` is its `<uuid>`.
 
 ### Project identity
 

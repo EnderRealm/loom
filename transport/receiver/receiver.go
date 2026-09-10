@@ -1,7 +1,8 @@
 // Package receiver implements the server side of the loom transport. It
 // accepts POST /v1/ingest, appends each session's delta to a JSONL file
-// under <storage>/<agent>/<project>/<session_id>.jsonl, and tracks per-
-// session "next expected offset" so replays are idempotent.
+// under <storage>/<agent>/<project>/<session_id>.jsonl — or, for a subagent
+// transcript, under <storage>/<agent>/<project>/<parent_session_id>/subagents/<session_id>.jsonl
+// — and tracks per-session "next expected offset" so replays are idempotent.
 //
 // v1 is deliberately dumb: no database, no workers, no processing.
 // Storage is the landing zone for downstream jobs (loom-summarize) to
@@ -132,6 +133,13 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid identifier", http.StatusBadRequest)
 		return
 	}
+	// A subagent's parent id is a path component like any other, so it goes
+	// through the same guard before it can name a directory.
+	if req.Subagent != nil && !safeComponent(req.Subagent.ParentSessionID) {
+		log.Printf("reject 400 from=%s reason=invalid-identifier", r.RemoteAddr)
+		http.Error(w, "invalid identifier", http.StatusBadRequest)
+		return
+	}
 	if req.ToOffset < req.FromOffset {
 		log.Printf("reject 400 from=%s reason=bad-offsets", r.RemoteAddr)
 		http.Error(w, "to_offset must be >= from_offset", http.StatusBadRequest)
@@ -142,6 +150,9 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 
 	dir := filepath.Join(s.storage, req.Agent, req.Project)
+	if req.Subagent != nil {
+		dir = filepath.Join(dir, req.Subagent.ParentSessionID, "subagents")
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		http.Error(w, "mkdir: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -242,7 +253,7 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	identity := "none"
 	if req.ProjectIdentity != nil && *req.ProjectIdentity != (wire.ProjectIdentity{}) {
 		metaPath := filepath.Join(dir, req.SessionID+".meta.json")
-		if err := writeProjectIdentity(metaPath, req.ProjectIdentity); err != nil {
+		if err := writeSidecar(metaPath, req.ProjectIdentity); err != nil {
 			log.Printf("warn from=%s session=%q err=%q (write meta)", r.RemoteAddr, req.SessionID, err)
 		}
 		switch {
@@ -255,15 +266,27 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("ingest from=%s agent=%s project=%s session=%s offset=%d→%d lines=%d identity=%s",
-		r.RemoteAddr, req.Agent, req.Project, req.SessionID, req.FromOffset, req.ToOffset, len(req.Lines), identity)
+	// Persist the subagent's dispatch metadata beside its transcript so a
+	// reader can join it to the tool call that created it. Same best-effort
+	// terms as the identity sidecar: the bytes are already on disk.
+	subagent := "no"
+	if req.Subagent != nil {
+		subagentPath := filepath.Join(dir, req.SessionID+".subagent.json")
+		if err := writeSidecar(subagentPath, req.Subagent); err != nil {
+			log.Printf("warn from=%s session=%q err=%q (write subagent meta)", r.RemoteAddr, req.SessionID, err)
+		}
+		subagent = "parent=" + req.Subagent.ParentSessionID
+	}
+
+	log.Printf("ingest from=%s agent=%s project=%s session=%s offset=%d→%d lines=%d identity=%s subagent=%s",
+		r.RemoteAddr, req.Agent, req.Project, req.SessionID, req.FromOffset, req.ToOffset, len(req.Lines), identity, subagent)
 	writeJSON(w, wire.IngestResponse{AcceptedToOffset: req.ToOffset})
 }
 
-// writeProjectIdentity writes the sidecar atomically via temp+rename so
-// a partial write never leaves a corrupt JSON file behind.
-func writeProjectIdentity(path string, id *wire.ProjectIdentity) error {
-	data, err := json.Marshal(id)
+// writeSidecar writes a JSON sidecar atomically via temp+rename so a
+// partial write never leaves a corrupt JSON file behind.
+func writeSidecar(path string, v any) error {
+	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
