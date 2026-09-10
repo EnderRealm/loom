@@ -200,6 +200,8 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
 
 **Agents supported in v1:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<uuid>.jsonl`).
 
+A session run from a throwaway working directory — a review lens started in an empty `mktemp -d` so the reviewed repo cannot instruct its reviewer — reports that directory as its cwd, which would make every run its own project and leave it with no knowledge scope. Its launcher stamps the checkout it is about in `~/.loom/attribution.jsonl` and the Codex adapter resolves identity through it; the producer contract is [`docs/attribution-stamps.md`](./docs/attribution-stamps.md).
+
 ## State locations
 
 ```
@@ -210,6 +212,7 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
     cursors/ship/<agent>/<uuid>.cursor         # client: next byte shipped to receiver
     staging/<agent>/<project>/<uuid>.jsonl     # client: bytes captured locally
     staging/<agent>/<project>/<uuid>.meta.json # client: per-session project identity
+  attribution.jsonl                            # producers: throwaway work root → checkout
     shipper.lock                               # client: flock, one shipper at a time
     shipper.log                                # client: launchd stdout/stderr capture
   received/                                    # server: default storage root

@@ -6,6 +6,26 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Attribution stamps: a producer that runs an agent in a throwaway
+  working directory can record the checkout that run is about in
+  `~/.loom/attribution.jsonl`, and the Codex adapter resolves session
+  identity through it. warp's `codex-lens.sh` starts each `/work` review
+  lens in an empty `mktemp -d` so the reviewed repo cannot instruct its
+  own reviewer; loom keys project identity on the reported cwd, so every
+  dispatch arrived as its own single-session project — 254 of them, and
+  272 of the ~310 project rows on this host were throwaway directories.
+  The cost was not only a cluttered dashboard: `resolveScope` derives a
+  session's knowledge scope from its cwd and git remote, and a throwaway
+  root has neither, so every Codex review verdict was silently skipped by
+  extraction. The stamp is consulted only for a cwd under a temp root,
+  and every failure mode — no registry, a malformed line, no matching
+  record — leaves the session with the identity it reports today. The
+  storage slug still names the directory the agent ran in; identity is
+  the seam that moves. Producer contract in
+  `docs/attribution-stamps.md`.
+
 ### Fixed
 
 - The extractor's `claude` provider spawned an agent with every tool the

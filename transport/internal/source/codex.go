@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CodexAgent is the Adapter.Agent() value for Codex CLI.
@@ -38,6 +39,9 @@ func (codexAdapter) List() ([]Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// One registry read per pass: every session in this sweep resolves
+	// against the same snapshot, and the next tick picks up new records.
+	stamps := loadStamps()
 	var out []Session
 	walkErr := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -57,7 +61,7 @@ func (codexAdapter) List() ([]Session, error) {
 		if sid == "" {
 			return nil
 		}
-		cwd, err := readCodexCwd(path)
+		cwd, start, err := readCodexMeta(path)
 		if err != nil {
 			// Parse errors on the first line are logged at the capture layer
 			// via the surrounding io-class failure path; silently skip here.
@@ -66,11 +70,20 @@ func (codexAdapter) List() ([]Session, error) {
 		if cwd == "" {
 			return nil
 		}
+		// The slug is the storage directory and stays keyed on the directory
+		// codex actually ran in; identity is what a stamp corrects, so the
+		// two are read from different values here on purpose.
+		identity := cwd
+		if isEphemeralCwd(cwd) {
+			if project := stamps.projectCwd(cwd, start); project != "" {
+				identity = project
+			}
+		}
 		out = append(out, Session{
 			Project:   encodeProjectPath(cwd),
 			SessionID: sid,
 			Path:      path,
-			Cwd:       cwd,
+			Cwd:       identity,
 		})
 		return nil
 	})
@@ -117,40 +130,66 @@ func looksLikeUUID(s string) bool {
 	return true
 }
 
-// readCodexCwd reads only the first line and parses out session_meta.payload.cwd.
-// Returns "" with no error when the file is empty, the first line isn't yet
-// terminated by \n, or the first record isn't a session_meta — all of which
-// are "check back next tick" states, not failures.
-func readCodexCwd(path string) (string, error) {
+// readCodexMeta reads only the first line and parses out
+// session_meta.payload.cwd plus the record's timestamp, which dates the
+// session for stamp matching. Returns "" with no error when the file is
+// empty, the first line isn't yet terminated by \n, or the first record
+// isn't a session_meta — all of which are "check back next tick" states,
+// not failures. An unparseable or absent timestamp yields the zero time:
+// the cwd is the answer this function exists for, and stamp matching
+// degrades to "newest record wins" without it.
+func readCodexMeta(path string) (string, time.Time, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	defer f.Close()
 
 	r := bufio.NewReader(f)
 	line, err := r.ReadBytes('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
+		return "", time.Time{}, err
 	}
 	// Bail unless we saw a terminating newline — a half-written first line
 	// could give us truncated JSON.
 	if len(line) == 0 || line[len(line)-1] != '\n' {
-		return "", nil
+		return "", time.Time{}, nil
 	}
 	var meta struct {
-		Type    string `json:"type"`
-		Payload struct {
-			Cwd string `json:"cwd"`
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+		Payload   struct {
+			Cwd       string `json:"cwd"`
+			Timestamp string `json:"timestamp"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(line[:len(line)-1], &meta); err != nil {
-		return "", fmt.Errorf("parse codex session_meta %s: %w", path, err)
+		return "", time.Time{}, fmt.Errorf("parse codex session_meta %s: %w", path, err)
 	}
 	if meta.Type != "session_meta" {
-		return "", nil
+		return "", time.Time{}, nil
 	}
-	return meta.Payload.Cwd, nil
+	// The record carries the wrapper's timestamp and the payload's own; they
+	// differ by the few milliseconds codex spent writing the line. Either
+	// dates the session well enough for stamp matching.
+	start := parseCodexTime(meta.Timestamp)
+	if start.IsZero() {
+		start = parseCodexTime(meta.Payload.Timestamp)
+	}
+	return meta.Payload.Cwd, start, nil
+}
+
+// parseCodexTime reads a codex record timestamp, returning the zero time for
+// anything it cannot parse.
+func parseCodexTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // encodeProjectPath turns a filesystem path into a Project segment the
