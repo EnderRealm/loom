@@ -20,7 +20,11 @@ type sessionMetaPayload struct {
 	Cwd              string `json:"cwd"`
 	Originator       string `json:"originator"`
 	CLIVersion       string `json:"cli_version"`
-	Source           string `json:"source"`
+	// Source is a string for a top-level session but an object describing the
+	// spawn (parent thread, depth, agent path) when codex-cli >= 0.153.4 runs
+	// the session as a subagent. Kept raw: nothing reads it yet, and a typed
+	// string here discarded every subagent transcript.
+	Source           json.RawMessage `json:"source"`
 	ModelProvider    string `json:"model_provider"`
 	BaseInstructions json.RawMessage `json:"base_instructions"`
 	Git              struct {

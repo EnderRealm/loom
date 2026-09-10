@@ -28,6 +28,25 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Codex subagent sessions were being discarded whole. codex-cli 0.153.4
+  writes `session_meta.payload.source` as an object describing the spawn
+  (parent thread, depth, agent path) rather than the string loom typed
+  it as, so the first line failed to unmarshal and every sweep dropped
+  24 sessions — the subagent transcripts loom has no other record of,
+  re-attempted and re-failed on each pass. The field is now
+  `json.RawMessage`: nothing reads it yet, and keeping the producer's
+  bytes leaves the spawn structure available without modelling it here.
+  The deeper defect was that a payload-level decode failure aborted the
+  whole file where an envelope-level one had always degraded, so a
+  handler's unmarshal error is now counted as an Unknown record and
+  parsing continues. Those records carry the drifted field's name —
+  `session_meta::__unmodeled_payload__:source` — since the discarded
+  error text was the only thing that made this class of drift visible,
+  and the name is bounded by the same allow-list the TUI applies to
+  untrusted transcript fields. `unknown_records` separates it from
+  `__malformed__`: being behind the producer is actionable, a corrupt
+  line is not. On this host the sweep goes from 24 errored to 0.
+
 - The extractor's `claude` provider spawned an agent with every tool the
   host offers. Extraction is text in, text out — the transcript arrives
   on stdin and candidates come back on stdout — so `call_claude` now

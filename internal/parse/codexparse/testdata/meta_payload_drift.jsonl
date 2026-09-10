@@ -1,0 +1,6 @@
+{"timestamp":"2026-04-02T09:00:00.000Z","type":"session_meta","payload":{"id":"sess-drift","timestamp":"2026-04-02T09:00:00.000Z","cwd":{"path":"/tmp/drift"},"cli_version":"0.153.4","source":{"subagent":{"thread_spawn":{"parent_thread_id":"sess-parent","depth":1}}},"model_provider":"openai"}}
+{"timestamp":"2026-04-02T09:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/tmp/drift","model":"gpt-5.4"}}
+{"timestamp":"2026-04-02T09:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"read the notes"}]}}
+{"timestamp":"2026-04-02T09:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"notes read"}]}}
+{"timestamp":"2026-04-02T09:00:04.000Z","type":"session_meta","payload":{"id":"sess-drift","cwd":{"path":"/tmp/drift"},"cli_version":"0.153.4"}}
+{"timestamp":"2026-04-02T09:00:05.000Z","type":"session_meta","payload":"legacy-string-meta"}

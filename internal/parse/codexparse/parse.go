@@ -3,8 +3,10 @@ package codexparse
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -13,23 +15,21 @@ import (
 )
 
 // Parse consumes a Codex CLI rollout JSONL stream and returns the normalized
-// summary. Unknown record types or unknown payload subtypes are folded into
-// Unknown rather than dropped.
+// summary. Unknown record types, unknown payload subtypes and payloads whose
+// shape has drifted away from our structs are all folded into Unknown rather
+// than dropped or erroring: the producer moving ahead of us is something to
+// record, not something to fail on.
 func Parse(r io.Reader) (*summary.SessionSummary, error) {
 	s := &summary.SessionSummary{Agent: summary.AgentCodex}
 	st := newState(s)
 
 	br := bufio.NewReader(r)
-	lineNo := 0
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			lineNo++
 			line = trimNewline(line)
 			if len(line) > 0 {
-				if perr := st.feed(line); perr != nil {
-					return nil, fmt.Errorf("line %d: %w", lineNo, perr)
-				}
+				st.feed(line)
 			}
 		}
 		if err == io.EOF {
@@ -79,33 +79,84 @@ func newState(s *summary.SessionSummary) *state {
 // the session.
 const MalformedLineMarker = "__malformed__"
 
-func (st *state) feed(line []byte) error {
+// UnmodeledPayloadMarker is bumped into Unknown as the subtype of the
+// record's own type when the line is valid JSON but its payload does not fit
+// our structs — the producer changed a shape we model (codex-cli 0.153.4
+// turned session_meta.source from a string into an object). Distinct from
+// MalformedLineMarker, which occupies the type slot because a line that fails
+// to decode names no record type, so the unknown_records table separates "we
+// are behind the producer", which is actionable drift, from "this line is
+// corrupt".
+//
+// The subtype composes as "__unmodeled_payload__:<field>" when the decoder
+// names the field that drifted — session_meta::__unmodeled_payload__:source —
+// and is the bare marker when it does not: a syntax error, or a type error with
+// no field path. Since the parse no longer fails, that field name is the only
+// trace of which shape moved.
+const UnmodeledPayloadMarker = "__unmodeled_payload__"
+
+// unmodeledFieldMax bounds the field name composed into the subtype. Real
+// paths are short ("source", "git.branch"); the cap exists to keep an absurd
+// one out of the column, not to fit any of them.
+const unmodeledFieldMax = 64
+
+// unmodeledFieldDisallowed matches every rune outside the conservative name
+// grammar the knowledge store already holds its interpolated fields to
+// (logFieldDisallowed, internal/tui/candidate.go). A decoder field path is
+// usually one of our own struct tags, but a map key decoded from the transcript
+// can reach it, and transcript text is data with no authority over what renders
+// it (docs/transcript-trust-and-redaction.md).
+var unmodeledFieldDisallowed = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+// unmodeledSubtype names the drifted field in the subtype when the decoder
+// identified one and the name fits the grammar above. A name that does not fit
+// degrades to the bare marker rather than being rewritten or truncated: a
+// subtype is a grouping key, so a mangled one would read as a field that
+// nothing actually drifted on.
+func unmodeledSubtype(err error) string {
+	var te *json.UnmarshalTypeError
+	if !errors.As(err, &te) || te.Field == "" {
+		return UnmodeledPayloadMarker
+	}
+	if len(te.Field) > unmodeledFieldMax ||
+		unmodeledFieldDisallowed.MatchString(te.Field) {
+		return UnmodeledPayloadMarker
+	}
+	return UnmodeledPayloadMarker + ":" + te.Field
+}
+
+func (st *state) feed(line []byte) {
 	var env envelope
 	if err := json.Unmarshal(line, &env); err != nil {
 		st.bumpUnknown(MalformedLineMarker, "", time.Time{})
-		return nil
+		return
 	}
 	ts := parseTime(env.Timestamp)
 	st.touchTimeRange(ts)
 
+	var err error
 	switch env.Type {
 	case "session_meta":
-		return st.handleSessionMeta(env, ts)
+		err = st.handleSessionMeta(env, ts)
 	case "turn_context":
-		return st.handleTurnContext(env, ts)
+		err = st.handleTurnContext(env, ts)
 	case "response_item":
-		return st.handleResponseItem(env, ts)
+		err = st.handleResponseItem(env, ts)
 	case "event_msg":
-		return st.handleEventMsg(env, ts)
+		err = st.handleEventMsg(env, ts)
 	case "compacted":
 		st.s.Compacted = true
 		st.s.Compactions = append(st.s.Compactions, summary.Compaction{
 			Time: ts, Anchor: "compacted",
 		})
-		return nil
 	default:
 		st.bumpUnknown(env.Type, "", ts)
-		return nil
+	}
+	// Every handler error is a payload json.Unmarshal failure; count the
+	// record, naming the drifted field where the decoder gave one, and keep the
+	// rest of the session rather than discarding the file.
+	if err != nil {
+		st.bumpUnknown(env.Type, unmodeledSubtype(err), ts)
 	}
 }
 
