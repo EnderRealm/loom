@@ -16,8 +16,31 @@ import (
 // normalized summary. Unknown record types are folded into Unknown rather
 // than dropped or erroring — schema drift is observable, not fatal.
 func Parse(r io.Reader) (*summary.SessionSummary, error) {
+	return ParseWithSubagents(r, nil)
+}
+
+// ParseWithSubagents parses a session alongside the subagent transcripts it
+// dispatched, folding each into a summary.Subagent.
+func ParseWithSubagents(r io.Reader, subs []SubagentInput) (*summary.SessionSummary, error) {
+	st, err := parseStream(r, false)
+	if err != nil {
+		return nil, err
+	}
+	// Folding runs before finalize so a subagent transcript that fails to
+	// parse is bumped into the same Unknown flush as every other drift.
+	foldSubagents(st, subs)
+	st.finalize()
+	return st.s, nil
+}
+
+// parseStream folds one JSONL stream into a summary. sidechain marks the
+// stream as a subagent transcript, where every record carries isSidechain
+// and must be folded rather than skipped. The caller finalizes, so drift
+// discovered after the stream is consumed still reaches Unknown.
+func parseStream(r io.Reader, sidechain bool) (*state, error) {
 	s := &summary.SessionSummary{Agent: summary.AgentClaude}
-	state := newState(s)
+	st := newState(s)
+	st.sidechain = sidechain
 
 	br := bufio.NewReader(r)
 	lineNo := 0
@@ -27,7 +50,7 @@ func Parse(r io.Reader) (*summary.SessionSummary, error) {
 			lineNo++
 			line = trimNewline(line)
 			if len(line) > 0 {
-				if perr := state.feed(line); perr != nil {
+				if perr := st.feed(line); perr != nil {
 					return nil, fmt.Errorf("line %d: %w", lineNo, perr)
 				}
 			}
@@ -39,14 +62,18 @@ func Parse(r io.Reader) (*summary.SessionSummary, error) {
 			return nil, err
 		}
 	}
-	state.finalize()
-	return s, nil
+	return st, nil
 }
 
 // MalformedLineMarker is bumped into Unknown when a single line fails to
 // decode. Parsing continues so partial corruption doesn't lose the rest of
 // the session.
 const MalformedLineMarker = "__malformed__"
+
+// resultTextLimit bounds the stored text of a result: a tool call's result
+// summary and a subagent's prompt and result alike. One bound so the two
+// read as comparable.
+const resultTextLimit = 800
 
 func trimNewline(b []byte) []byte {
 	if len(b) > 0 && b[len(b)-1] == '\n' {
@@ -76,6 +103,26 @@ type state struct {
 	// derive durations and counts without keeping each line.
 	progressByToolUse map[string]*progressAccum
 
+	// taskAgentType maps a Task/Agent tool_use id to the agent type it
+	// dispatched. It is the only record of that type for a dispatch whose
+	// transcript never shipped, so the row still names what ran.
+	taskAgentType map[string]string
+
+	// sidechain lifts the isSidechain guards: the stream *is* a subagent
+	// transcript, so its turns, tools and errors are this parse's subject.
+	sidechain bool
+
+	// stamps counts records that contributed a parseable timestamp. A span
+	// needs two of them, and zero-length is a real answer only when both
+	// ends were observed.
+	stamps int
+
+	// lastAssistantText is the last assistant message's text, its blocks
+	// joined the way AssistantText joins them. A subagent transcript
+	// carries one promptId end to end, so its single Turn accumulates
+	// every message and only the tail is the result.
+	lastAssistantText string
+
 	unknown map[string]*summary.UnknownRecord
 }
 
@@ -92,6 +139,7 @@ func newState(s *summary.SessionSummary) *state {
 		turnByPromptID:    map[string]int{},
 		toolCallByID:      map[string]int{},
 		progressByToolUse: map[string]*progressAccum{},
+		taskAgentType:     map[string]string{},
 		unknown:           map[string]*summary.UnknownRecord{},
 		currentTurnIdx:    -1,
 	}
@@ -156,8 +204,9 @@ func (st *state) handleUser(line []byte) error {
 	}
 
 	// Sidechain (Task subagent) messages: track but don't open a top-level
-	// turn for them.
-	if rec.IsSidechain {
+	// turn for them. Parsing the subagent transcript itself is the one case
+	// where they are the subject rather than noise.
+	if rec.IsSidechain && !st.sidechain {
 		return nil
 	}
 
@@ -196,9 +245,9 @@ func (st *state) handleAssistant(line []byte) error {
 	ts := parseTime(rec.Timestamp)
 	st.touchTimeRange(ts)
 
-	if rec.IsSidechain {
-		// Subagent assistant turns roll up into the Subagent record at
-		// finalize time; we don't surface them as top-level turns.
+	if rec.IsSidechain && !st.sidechain {
+		// Subagent assistant turns roll up into the Subagent record built
+		// from their own transcript; we don't surface them as top-level turns.
 		return nil
 	}
 
@@ -218,6 +267,7 @@ func (st *state) handleAssistant(line []byte) error {
 		t.CompletionStatus = mapClaudeStopReason(rec.Message.StopReason)
 	}
 
+	var msgText string
 	for _, block := range rec.Message.Content {
 		switch block.Type {
 		case "text":
@@ -226,6 +276,10 @@ func (st *state) handleAssistant(line []byte) error {
 					t.AssistantText += "\n"
 				}
 				t.AssistantText += block.Text
+				if msgText != "" {
+					msgText += "\n"
+				}
+				msgText += block.Text
 			}
 		case "thinking":
 			t.ReasoningPresent = true
@@ -241,8 +295,15 @@ func (st *state) handleAssistant(line []byte) error {
 			}
 			st.s.ToolCalls = append(st.s.ToolCalls, tc)
 			st.toolCallByID[block.ID] = len(st.s.ToolCalls) - 1
+			if tc.Kind == summary.KindTask {
+				st.taskAgentType[block.ID] = subagentType(block.Input)
+			}
 			collectFilesTouched(st.s, block.Name, block.Input)
 		}
+	}
+
+	if msgText != "" {
+		st.lastAssistantText = msgText
 	}
 
 	if rec.Message.Usage != nil {
@@ -455,6 +516,7 @@ func (st *state) touchTimeRange(t time.Time) {
 	if t.IsZero() {
 		return
 	}
+	st.stamps++
 	if st.s.StartTime.IsZero() || t.Before(st.s.StartTime) {
 		st.s.StartTime = t
 	}
@@ -491,7 +553,7 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 		}
 		tc := &st.s.ToolCalls[idx]
 		tc.IsError = b.IsError
-		tc.ResultSummary = truncate(decodeToolResultContent(b.Content), 800)
+		tc.ResultSummary = truncate(decodeToolResultContent(b.Content), resultTextLimit)
 		if !ts.IsZero() && !tc.StartedAt.IsZero() {
 			tc.DurationMs = ts.Sub(tc.StartedAt).Milliseconds()
 		}
@@ -667,6 +729,28 @@ func extractKeyArg(name string, input json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+// subagentType pulls the dispatched agent's type out of a Task/Agent
+// tool_use input — the same field keyArgPriority names for those tools,
+// read the same way and bounded the same.
+func subagentType(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	v, ok := m["subagent_type"]
+	if !ok {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return ""
+	}
+	return truncate(s, 200)
 }
 
 func keyArgPriority(name string) []string {

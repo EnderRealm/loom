@@ -40,14 +40,14 @@ type SessionSummary struct {
 
 	Compacted bool
 
-	Turns         []Turn
-	ToolCalls     []ToolCall
-	Errors        []ErrorEvent
-	Compactions   []Compaction
-	TokenCounts   []TokenCount
-	FilesTouched  []FileTouch
-	Subagents     []Subagent
-	Unknown       []UnknownRecord
+	Turns        []Turn
+	ToolCalls    []ToolCall
+	Errors       []ErrorEvent
+	Compactions  []Compaction
+	TokenCounts  []TokenCount
+	FilesTouched []FileTouch
+	Subagents    []Subagent
+	Unknown      []UnknownRecord
 }
 
 // CompletionStatus normalizes how a turn ended across producers.
@@ -160,8 +160,15 @@ type Subagent struct {
 	AgentType     string
 	Prompt        string
 	ResultSummary string
-	DurationMs    int64
-	ErrorCount    int
+	// DurationMs is the span of the dispatch's own sidechain records. Nil
+	// when that span can't be resolved, so "not measured" stays distinct
+	// from "returned instantly" — a background dispatch's tool_result lands
+	// on acknowledgement, not completion.
+	DurationMs *int64
+	ErrorCount int
+	// ToolUseID is the dispatching tool_use id. Carried in-process for the
+	// parent-turn join and for debugging; not persisted.
+	ToolUseID string
 }
 
 // UnknownRecord is the drift alarm. Any record whose discriminator is not in

@@ -443,9 +443,13 @@ func writeSubagents(ctx context.Context, tx *sql.Tx,
 	}
 	defer stmt.Close()
 	for i, sa := range sum.Subagents {
+		var dur any
+		if sa.DurationMs != nil {
+			dur = *sa.DurationMs
+		}
 		if _, err := stmt.ExecContext(ctx,
 			agent, sum.SessionID, i, sa.ParentTurnIdx, sa.AgentType,
-			sa.Prompt, sa.ResultSummary, sa.DurationMs, sa.ErrorCount,
+			sa.Prompt, sa.ResultSummary, dur, sa.ErrorCount,
 		); err != nil {
 			return err
 		}

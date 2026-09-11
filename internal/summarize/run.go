@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -19,8 +20,8 @@ import (
 
 	"loom/internal/parse/claudeparse"
 	"loom/internal/parse/codexparse"
-	"loom/internal/summaries"
 	"loom/internal/parse/summary"
+	"loom/internal/summaries"
 )
 
 type Options struct {
@@ -114,9 +115,9 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		if err != nil {
 			return nil
 		}
-		// Subagent transcripts land under <session>/subagents/. Ingesting
-		// them here would file each one as a session whose project is the
-		// literal "subagents"; consuming them properly is separate work.
+		// Subagent transcripts land under <session>/subagents/. They are
+		// folded into their parent's summary, so walking them here would
+		// file each one a second time as a standalone session.
 		if d.IsDir() {
 			if d.Name() == "subagents" {
 				return fs.SkipDir
@@ -135,11 +136,19 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		project := filepath.Base(filepath.Dir(path))
 		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		cwdRaw, gitRemote := readMetaSidecar(path)
+		// A background dispatch outlives the parent's last record, so a
+		// subagent transcript can still be growing while the parent file
+		// sits unchanged. Currency tracks the newer of the two, or those
+		// rows keep a truncated span until the next --rebuild.
+		mtime := info.ModTime()
+		if subMtime, ok := newestSubagentMtime(path); ok && subMtime.After(mtime) {
+			mtime = subMtime
+		}
 		source := summaries.SourceInfo{
 			Project:   project,
 			Path:      path,
 			Size:      info.Size(),
-			Mtime:     info.ModTime(),
+			Mtime:     mtime,
 			CwdRaw:    cwdRaw,
 			GitRemote: gitRemote,
 		}
@@ -174,7 +183,7 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 	var sum *summary.SessionSummary
 	switch agent {
 	case summary.AgentClaude:
-		sum, err = claudeparse.Parse(f)
+		sum, err = claudeparse.ParseWithSubagents(f, collectSubagents(source.Path))
 	case summary.AgentCodex:
 		sum, err = codexparse.Parse(f)
 	}
@@ -188,9 +197,9 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		return err
 	}
 	if verbose {
-		log.Printf("[%s] %s turns=%d tools=%d errs=%d unknown=%d",
+		log.Printf("[%s] %s turns=%d tools=%d errs=%d subagents=%d unknown=%d",
 			agent, sessionID, len(sum.Turns), len(sum.ToolCalls),
-			len(sum.Errors), len(sum.Unknown))
+			len(sum.Errors), len(sum.Subagents), len(sum.Unknown))
 	}
 	return nil
 }
@@ -210,6 +219,103 @@ func signalContext() (context.Context, context.CancelFunc) {
 		cancel()
 	}()
 	return ctx, cancel
+}
+
+// subagentDir is where the receiver lands the transcripts one session
+// dispatched.
+func subagentDir(sessionPath string) string {
+	return filepath.Join(strings.TrimSuffix(sessionPath, ".jsonl"), "subagents")
+}
+
+// collectSubagents lists the subagent transcripts one Claude session
+// dispatched, each paired with the dispatch metadata written beside it.
+// Everything here is best-effort: a missing directory or an unreadable
+// transcript costs subagent rows, never the session summary.
+func collectSubagents(sessionPath string) []claudeparse.SubagentInput {
+	dir := subagentDir(sessionPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// No subagents directory is the common case and says nothing. Any
+		// other cause (permissions, a file where the directory belongs)
+		// costs every row for this session, so it gets a line.
+		if !os.IsNotExist(err) {
+			log.Printf("subagents %s: %v", dir, err)
+		}
+		return nil
+	}
+	var inputs []claudeparse.SubagentInput
+	for _, e := range entries {
+		// Non-recursive: the shipper flattens nesting into the filename.
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		in := readSubagentSidecar(path)
+		in.Open = openTranscript(path)
+		inputs = append(inputs, in)
+	}
+	return inputs
+}
+
+// openTranscript defers the open until the parser folds that transcript, so
+// one descriptor is held at a time. A busy parent dispatches dozens and the
+// summarizer runs as a launchd agent, where the soft descriptor limit is low.
+func openTranscript(path string) func() (io.ReadCloser, error) {
+	return func() (io.ReadCloser, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			// The row lands unmeasured either way; this log is the signal.
+			log.Printf("subagent %s: %v", path, err)
+			return nil, err
+		}
+		return f, nil
+	}
+}
+
+// newestSubagentMtime reports the newest mtime across a session's subagent
+// transcripts, false when it has none or the directory can't be read.
+func newestSubagentMtime(sessionPath string) (time.Time, bool) {
+	entries, err := os.ReadDir(subagentDir(sessionPath))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var newest time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	return newest, !newest.IsZero()
+}
+
+// readSubagentSidecar pulls the dispatch metadata for one subagent
+// transcript. Sidecar layout matches wire.Subagent. Missing or corrupt
+// sidecar returns zero values silently — the transcript still yields a
+// duration, just no dispatch to attribute it to.
+func readSubagentSidecar(jsonlPath string) claudeparse.SubagentInput {
+	metaPath := strings.TrimSuffix(jsonlPath, ".jsonl") + ".subagent.json"
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return claudeparse.SubagentInput{}
+	}
+	var m struct {
+		AgentType string `json:"agent_type"`
+		ToolUseID string `json:"tool_use_id"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return claudeparse.SubagentInput{}
+	}
+	return claudeparse.SubagentInput{
+		AgentType: m.AgentType,
+		ToolUseID: m.ToolUseID,
+	}
 }
 
 // readMetaSidecar pulls the receiver-written project identity for one
