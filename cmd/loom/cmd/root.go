@@ -33,6 +33,7 @@ Knowledge:
 
 Reports:
   work-report [--since|--until]  /work-run compliance metrics from summaries.db, as JSON
+  cost-report [--since|--until]  Per-/work-run cost — turns, tokens, tools, time — as JSON
 
 Lifecycle:
   install <component>          Install a launchd agent for the running loom binary

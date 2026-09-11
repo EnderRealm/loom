@@ -7,6 +7,9 @@
 // The report fails closed. A run this parser cannot resolve with confidence is
 // classified unknown and is never counted as compliant — an over-reported
 // compliance rate is the one failure that makes the whole number useless.
+//
+// The same run spans answer a second question — see LoadCost, which reports what
+// each run cost in turns, tokens, tools, subagents and time.
 package workreport
 
 import (
@@ -362,26 +365,37 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 		return nil, err
 	}
 
-	commits, err := db.Query(`
+	data.commits, err = loadCommits(db, agent, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// loadCommits reads one session's commit rows. Shared by both loaders: the
+// commit evidence a run is resolved from is the same for either report.
+func loadCommits(db *sql.DB, agent, sessionID string) ([]commitRow, error) {
+	rows, err := db.Query(`
 		SELECT committed_at, subject FROM commits WHERE agent = ? AND session_id = ?
 	`, agent, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("query commits: %w", err)
 	}
-	defer commits.Close()
-	for commits.Next() {
+	defer rows.Close()
+	var out []commitRow
+	for rows.Next() {
 		var (
 			c                    commitRow
 			committedAt, subject sql.NullString
 		)
-		if err := commits.Scan(&committedAt, &subject); err != nil {
+		if err := rows.Scan(&committedAt, &subject); err != nil {
 			return nil, err
 		}
 		c.committedAt = parseTime(committedAt)
 		c.subject = subject.String
-		data.commits = append(data.commits, c)
+		out = append(out, c)
 	}
-	return data, commits.Err()
+	return out, rows.Err()
 }
 
 // analyze measures one run: the turns from its invocation through endIdx, the
@@ -575,9 +589,29 @@ func classify(runtime Runtime, lines dispatchLines, evidence, toolEvidence, acti
 // committed reports whether the run landed a commit: one inside its time window,
 // or one whose subject names its ticket.
 func committed(inv invocationRow, endsAt time.Time, commits []commitRow) bool {
+	_, ok := runCommit(inv, endsAt, commits)
+	return ok
+}
+
+// runCommit resolves the run's commit: whether it landed one, and when. The two
+// answers are deliberately asymmetric. A commit whose subject names the ticket
+// proves the run committed wherever it landed — a push after the next
+// invocation still belongs to it — but only a commit inside the run's own
+// window can time it: /work re-invoked on the same ticket makes the later run's
+// commit name this one too, and taking it would charge this run with a span
+// past its own end. The time is the latest qualifying commit's — a run that
+// landed two ended at the second — and is zero when the run committed but no
+// commit in its window carries a usable timestamp, which the cost report reads
+// as an unmeasurable span rather than as no commit at all.
+func runCommit(inv invocationRow, endsAt time.Time, commits []commitRow) (time.Time, bool) {
+	var (
+		at time.Time
+		ok bool
+	)
 	for _, c := range commits {
-		if subjectNamesTicket(c.subject, inv.ticket) {
-			return true
+		named := subjectNamesTicket(c.subject, inv.ticket)
+		if named {
+			ok = true
 		}
 		if inv.startedAt.IsZero() || c.committedAt.IsZero() {
 			continue
@@ -593,11 +627,17 @@ func committed(inv invocationRow, endsAt time.Time, commits []commitRow) bool {
 		if c.committedAt.Before(inv.startedAt) {
 			continue
 		}
-		if endsAt.IsZero() || c.committedAt.Before(endsAt) {
-			return true
+		// Bounds the span to the run: a commit at or after the next
+		// invocation is a later run's, whether or not it names this ticket.
+		if !endsAt.IsZero() && !c.committedAt.Before(endsAt) {
+			continue
+		}
+		ok = true
+		if c.committedAt.After(at) {
+			at = c.committedAt
 		}
 	}
-	return false
+	return at, ok
 }
 
 // inRange places a run's invocation in [since, until). A run whose invocation

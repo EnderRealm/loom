@@ -192,6 +192,21 @@ loom work-report --since 2026-08-01 --until 2026-09-01 | jq .totals
 - **JSON only, and diff-stable.** Runs are ordered by invocation time then session id — a stable sort, so runs that tie (two in one session, or two carrying no invocation timestamp) hold their agent/session/turn order — and the document carries no generation timestamp, so two reports over the same range are byte-identical and a before/after diff shows only what changed. `--since` is inclusive, `--until` exclusive; both take `YYYY-MM-DD` (local midnight) or RFC3339. `--db` overrides the database read.
 - **A missing or pre-v4 `summaries.db` is an error**, not an empty report: "no runs" is the number being measured, and a zero meaning "nothing to read" reads exactly like a zero meaning "nobody ran `/work`".
 
+### Per-/work-run cost report
+
+`loom cost-report` measures what each `/work` run in `summaries.db` cost: turns, input/output/cache tokens, tool calls broken down by kind, subagents dispatched and how long they ran, whether the run committed, and two measures of elapsed time. It is the evidence behind "tickets feel slower than they did", which cannot otherwise be confirmed or refuted.
+
+```sh
+loom cost-report --since 2026-08-01 > before.json
+loom cost-report --since 2026-08-01 | jq '[.runs[].wall_clock_ms | values] | add / length'
+```
+
+- **A run is one `/work` invocation**, recognized and bounded exactly as `work-report` does it: from the invocation turn to the turn before the next invocation in the same session, else to the session's end. Session duration cannot stand in for ticket cost — a third of the sessions that commit a ticket commit two or more, one of them 22 — so attributing a whole session to a ticket over-counts by up to an order of magnitude. Cost is an intra-session span.
+- **Two measures of time, on purpose.** `wall_clock_ms` runs from the invocation to the run's commit and is what is actually felt, idle included: every minute the human was asleep, in a meeting or reading the diff. `active_ms` sums the span's turn wall clock and its tool durations, so it is immune to that idle but is not the thing on the calendar. The gap between the two is itself the signal — it separates "the agent got slower" from "I was slower to respond". The two terms of `active_ms` overlap by construction (a tool call runs inside its turn's wall clock), which makes it an upper bound on attention rather than a disjoint sum.
+- **Null means unmeasurable, never zero.** A run that never committed reports `wall_clock_ms` as null rather than running its span to the session end, so an abandoned run cannot inflate the trend; so does a run whose invocation or whose commit carries no usable timestamp, one whose commit timestamp precedes its invocation, and one whose only ticket-named commit landed after the next invocation — `committed` stays true there, but the commit belongs to a later run and cannot time this one. `subagent_duration_ms` is null when no dispatch in the span carried a duration — a background dispatch's span often cannot be resolved, and "not measured" must not read as "returned instantly". The counts beside them (`turns`, `tool_calls`, `subagents`) are still reported for a run that never committed: it cost what it cost.
+- **Every recognized run is reported**, including the ones `work-report` classifies `unknown`. Cost is not a compliance grade, and dropping the runs that are hardest to classify would bias the trend toward the easy ones.
+- **JSON only, and diff-stable**, on `work-report`'s terms: the same ordering, the same `--since`/`--until`/`--db` flags, and no generation timestamp, so two reports over the same range are byte-identical and a before/after diff shows only what changed.
+
 ---
 
 # Transport
@@ -380,6 +395,7 @@ rm -f ~/.local/bin/loom
 | `loom extract [--watch]`      | Run `extract.py` over summarized sessions that haven't been extracted yet.  |
 | `loom retrospect <ticket-id>` | Re-extract every session whose commits closed a ticket, truths + decisions. |
 | `loom work-report`            | `/work`-run compliance metrics from the summary DB, as JSON.                |
+| `loom cost-report`            | Per-`/work`-run cost — turns, tokens, tools, subagents, time — as JSON.     |
 | `loom ui`                     | Interactive dashboard (alias: `loom tui`).                                  |
 | `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `extractor` / `shipper`. `server`/`remote` also record the machine role. |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |
