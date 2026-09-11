@@ -133,6 +133,53 @@ func TestParseRejectsAMalformedTable(t *testing.T) {
 	}
 }
 
+// TestParseRequiresEveryStandardRate pins that a missing or null rate is an
+// error rather than a silent $0: an omitted or misspelled cache_read would
+// otherwise zero out the bulk of a run's tokens without warning.
+func TestParseRequiresEveryStandardRate(t *testing.T) {
+	fields := []string{"input", "output", "cache_write_5m", "cache_write_1h", "cache_read"}
+	table := func(omit, null string) string {
+		var parts []string
+		for _, f := range fields {
+			switch f {
+			case omit: // dropped from the entry
+			case null:
+				parts = append(parts, `"`+f+`":null`)
+			default:
+				parts = append(parts, `"`+f+`":1`)
+			}
+		}
+		// Entry 0 is well-formed so the error must point at entry 1 (n).
+		return `{"currency":"USD","source":"s","checked":"2026-09-11","rates":[
+			{"model":"m","effective":"2026-01-01","input":1,"output":1,"cache_write_5m":1,"cache_write_1h":1,"cache_read":1},
+			{"model":"n","effective":"2026-01-01",` + strings.Join(parts, ",") + `}]}`
+	}
+	for _, f := range fields {
+		for _, c := range []struct{ kind, data string }{{"omitted", table(f, "")}, {"null", table("", f)}} {
+			t.Run(f+" "+c.kind, func(t *testing.T) {
+				_, err := Parse([]byte(c.data))
+				if err == nil {
+					t.Fatalf("Parse accepted a table with %s %s", f, c.kind)
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, f) || !strings.Contains(msg, "entry 1 (n)") {
+					t.Fatalf("error = %q, want it to name entry 1 (n) and field %s", msg, f)
+				}
+			})
+		}
+	}
+
+	zero := `{"currency":"USD","source":"s","checked":"2026-09-11","rates":[
+		{"model":"free","effective":"2026-01-01","input":0,"output":0,"cache_write_5m":0,"cache_write_1h":0,"cache_read":0}]}`
+	tbl, err := Parse([]byte(zero))
+	if err != nil {
+		t.Fatalf("Parse rejected explicit zero rates: %v", err)
+	}
+	if r, ok := tbl.Lookup("free", tbl.Checked); !ok || r.Input != 0 || r.CacheRead != 0 {
+		t.Fatalf("Lookup(free) = %+v, %v, want an all-zero rate", r, ok)
+	}
+}
+
 func TestDefaultTableLoadsAndNamesItsProvenance(t *testing.T) {
 	tbl, err := Default()
 	if err != nil {

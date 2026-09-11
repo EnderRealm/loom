@@ -74,11 +74,11 @@ func Default() (*Table, error) {
 type rateJSON struct {
 	Model        string   `json:"model"`
 	Effective    string   `json:"effective"`
-	Input        float64  `json:"input"`
-	Output       float64  `json:"output"`
-	CacheWrite5m float64  `json:"cache_write_5m"`
-	CacheWrite1h float64  `json:"cache_write_1h"`
-	CacheRead    float64  `json:"cache_read"`
+	Input        *float64 `json:"input"`
+	Output       *float64 `json:"output"`
+	CacheWrite5m *float64 `json:"cache_write_5m"`
+	CacheWrite1h *float64 `json:"cache_write_1h"`
+	CacheRead    *float64 `json:"cache_read"`
 	FastInput    *float64 `json:"fast_input"`
 	FastOutput   *float64 `json:"fast_output"`
 }
@@ -90,9 +90,10 @@ type tableJSON struct {
 	Rates    []rateJSON `json:"rates"`
 }
 
-// Parse decodes and validates a rate table. Every rate must be non-negative,
-// every entry must name a model and a YYYY-MM-DD effective date, and no two
-// entries may share (model, effective).
+// Parse decodes and validates a rate table. Every entry must carry all five
+// standard rates (an explicit 0 is allowed, an omitted or null field is not),
+// every rate must be non-negative, every entry must name a model and a
+// YYYY-MM-DD effective date, and no two entries may share (model, effective).
 func Parse(data []byte) (*Table, error) {
 	var raw tableJSON
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -120,12 +121,20 @@ func Parse(data []byte) (*Table, error) {
 			return nil, fmt.Errorf("rate table: entry %d: duplicate rate for %s effective %s", i, r.Model, r.Effective)
 		}
 		seen[key] = true
-		for name, v := range map[string]float64{
-			"input": r.Input, "output": r.Output, "cache_write_5m": r.CacheWrite5m,
-			"cache_write_1h": r.CacheWrite1h, "cache_read": r.CacheRead,
+		// Required rates are pointers so an omitted, misspelled or null field is
+		// caught rather than silently priced at zero.
+		for _, f := range []struct {
+			name string
+			ptr  *float64
+		}{
+			{"input", r.Input}, {"output", r.Output}, {"cache_write_5m", r.CacheWrite5m},
+			{"cache_write_1h", r.CacheWrite1h}, {"cache_read", r.CacheRead},
 		} {
-			if v < 0 {
-				return nil, fmt.Errorf("rate table: entry %d (%s): %s is negative", i, r.Model, name)
+			if f.ptr == nil {
+				return nil, fmt.Errorf("rate table: entry %d (%s): %s is required", i, r.Model, f.name)
+			}
+			if *f.ptr < 0 {
+				return nil, fmt.Errorf("rate table: entry %d (%s): %s is negative", i, r.Model, f.name)
 			}
 		}
 		if (r.FastInput == nil) != (r.FastOutput == nil) {
@@ -137,11 +146,11 @@ func Parse(data []byte) (*Table, error) {
 		t.rates[r.Model] = append(t.rates[r.Model], Rate{
 			Model:        r.Model,
 			Effective:    effective,
-			Input:        r.Input,
-			Output:       r.Output,
-			CacheWrite5m: r.CacheWrite5m,
-			CacheWrite1h: r.CacheWrite1h,
-			CacheRead:    r.CacheRead,
+			Input:        *r.Input,
+			Output:       *r.Output,
+			CacheWrite5m: *r.CacheWrite5m,
+			CacheWrite1h: *r.CacheWrite1h,
+			CacheRead:    *r.CacheRead,
 			FastInput:    r.FastInput,
 			FastOutput:   r.FastOutput,
 		})
