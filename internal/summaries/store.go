@@ -248,9 +248,10 @@ func writeTurns(ctx context.Context, tx *sql.Tx,
 		INSERT INTO turns (
 		    agent, session_id, idx, turn_id, user_message, assistant_text,
 		    reasoning_chars, stop_reason, completion_status,
+		    model, effort, cli_version,
 		    input_tokens, output_tokens, cache_read_tokens,
 		    started_at, ended_at, wall_clock_ms
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -263,7 +264,9 @@ func writeTurns(ctx context.Context, tx *sql.Tx,
 		if _, err := stmt.ExecContext(ctx,
 			agent, sum.SessionID, t.Idx, t.TurnID, t.UserMessage,
 			t.AssistantText, t.ReasoningChars, t.StopReason,
-			string(t.CompletionStatus), t.InputTokens, t.OutputTokens,
+			string(t.CompletionStatus),
+			strOrNull(t.Model), strOrNull(t.Effort), strOrNull(t.CLIVersion),
+			t.InputTokens, t.OutputTokens,
 			t.CacheReadTokens, isoOrNull(t.StartedAt),
 			isoOrNull(t.EndedAt), ms,
 		); err != nil {
@@ -483,6 +486,15 @@ func isoOrNull(t time.Time) any {
 		return nil
 	}
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// strOrNull stores an empty string as NULL, so "not recorded" is
+// distinguishable from a recorded empty value.
+func strOrNull(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func boolToInt(b bool) int {

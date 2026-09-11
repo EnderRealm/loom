@@ -1,0 +1,7 @@
+{"timestamp":"2026-04-02T09:00:00.000Z","type":"session_meta","payload":{"id":"sess-cond","timestamp":"2026-04-02T09:00:00.000Z","cwd":"/tmp/cond","cli_version":"0.160.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-04-02T09:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/tmp/cond","model":"gpt-5.4","effort":"xhigh"}}
+{"timestamp":"2026-04-02T09:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}}
+{"timestamp":"2026-04-02T09:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}
+{"timestamp":"2026-04-02T09:00:04.000Z","type":"turn_context","payload":{"turn_id":"t2","cwd":"/tmp/cond","model":"gpt-5.4-mini","effort":"low"}}
+{"timestamp":"2026-04-02T09:00:05.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}}
+{"timestamp":"2026-04-02T09:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done again"}]}}

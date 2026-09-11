@@ -219,3 +219,24 @@ func TestSessionMetaPayloadDriftDegrades(t *testing.T) {
 		t.Errorf("Unknown FirstSeen: got %s, want %s", u.FirstSeen, wantSeen)
 	}
 }
+
+// TestTurnConditionsLand pins the per-turn model and effort off each
+// turn_context, and the CLI version every turn inherits from session_meta —
+// a rollout records it once, so it is the value in force for all of them.
+func TestTurnConditionsLand(t *testing.T) {
+	s := parseFixture(t, "testdata/turn_conditions.jsonl")
+	if len(s.Turns) != 2 {
+		t.Fatalf("Turns len: got %d, want 2", len(s.Turns))
+	}
+	want := []struct{ model, effort, version string }{
+		{"gpt-5.4", "xhigh", "0.160.0"},
+		{"gpt-5.4-mini", "low", "0.160.0"},
+	}
+	for i, w := range want {
+		got := s.Turns[i]
+		if got.Model != w.model || got.Effort != w.effort || got.CLIVersion != w.version {
+			t.Errorf("Turn[%d]: got %q/%q/%q, want %q/%q/%q", i,
+				got.Model, got.Effort, got.CLIVersion, w.model, w.effort, w.version)
+		}
+	}
+}

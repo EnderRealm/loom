@@ -27,8 +27,8 @@ func TestOpenFreshDB(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != "5" {
-		t.Errorf("schema_version: got %q, want %q", v, "5")
+	if v != "6" {
+		t.Errorf("schema_version: got %q, want %q", v, "6")
 	}
 }
 
@@ -171,5 +171,53 @@ func TestWriteSummaryRoundTrip(t *testing.T) {
 	}
 	if cur {
 		t.Errorf("claude SessionAlreadyCurrent (size mismatch): got true, want false")
+	}
+}
+
+// TestWriteTurnsStoresConditionsOrNull pins the per-turn model/effort/
+// cli_version columns: a turn that carries them lands with the values, and a
+// turn that carries none lands NULL rather than "" so "not recorded" stays
+// distinguishable from "recorded as none".
+func TestWriteTurnsStoresConditionsOrNull(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	s := &summary.SessionSummary{
+		SessionID: "conditions",
+		Agent:     summary.AgentClaude,
+		StartTime: now,
+		EndTime:   now.Add(time.Minute),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: "hi", Model: "claude-opus-5", Effort: "high", CLIVersion: "2.1.267"},
+			{Idx: 1, UserMessage: "again"},
+		},
+	}
+	if err := st.WriteSummary(context.Background(), s, SourceInfo{Project: "p"}); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+
+	read := func(idx int) (model, effort, version sql.NullString) {
+		t.Helper()
+		err := st.DB().QueryRow(
+			`SELECT model, effort, cli_version FROM turns WHERE session_id = 'conditions' AND idx = ?`, idx,
+		).Scan(&model, &effort, &version)
+		if err != nil {
+			t.Fatalf("read turn %d: %v", idx, err)
+		}
+		return model, effort, version
+	}
+
+	model, effort, version := read(0)
+	if model.String != "claude-opus-5" || effort.String != "high" || version.String != "2.1.267" {
+		t.Errorf("turn 0: got %q/%q/%q, want claude-opus-5/high/2.1.267", model.String, effort.String, version.String)
+	}
+	model, effort, version = read(1)
+	if model.Valid || effort.Valid || version.Valid {
+		t.Errorf("turn 1: got %v/%v/%v, want all NULL", model, effort, version)
 	}
 }

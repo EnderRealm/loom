@@ -23,7 +23,8 @@ func newCostReportCmd() *cobra.Command {
 			"input/output/cache tokens, tool calls broken down by kind, subagent count and summed " +
 			"subagent duration, whether it committed, and two measures of time — wall clock from " +
 			"invocation to commit, and active time (turn wall clock plus tool duration) inside the " +
-			"run's span.\n\n" +
+			"run's span — plus the conditions it ran under: the models, efforts and CLI versions " +
+			"its turns carried, its error count, and how many times the human interacted.\n\n" +
 			"Cost is attributed to the run, not the session: a session that invoked /work three " +
 			"times holds three runs. A run that never committed reports a null wall clock rather " +
 			"than running its span to the session end. The output carries no generation timestamp: " +

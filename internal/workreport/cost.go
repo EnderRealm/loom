@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// costSchemaVersion is the summaries.db schema that added per-turn model,
+// effort and cli_version to turns (schema 6; see the schemaVersion doc comment
+// in internal/summaries/schema.go). A database without them cannot say what
+// conditions a run ran under, so it cannot answer this report.
+const costSchemaVersion = 6
+
 // unknownToolKind keys tool calls whose recorded kind is empty, so the per-kind
 // breakdown never emits an empty JSON key.
 const unknownToolKind = "unknown"
@@ -39,6 +45,22 @@ type CostRun struct {
 	ToolCallsByKind    map[string]int `json:"tool_calls_by_kind"`
 	Subagents          int            `json:"subagents"`
 	SubagentDurationMs *int64         `json:"subagent_duration_ms"`
+	// Models, Efforts and CLIVersions are every distinct value the span's
+	// turns carried, in first-seen order, so a mid-span switch reads in the
+	// order it happened. Null when no turn in the span carried the field —
+	// "not recorded" must not read as "recorded as none" — and never an empty
+	// list or an empty string.
+	Models      []string `json:"models"`
+	Efforts     []string `json:"efforts"`
+	CLIVersions []string `json:"cli_versions"`
+	// Errors is the error rows whose turn falls inside the span, so a session
+	// holding three runs attributes each error to at most one of them. Zero
+	// is a real answer: no error was recorded.
+	Errors int `json:"errors"`
+	// HumanInteractions is the turns in the span whose user message is the
+	// human acting — see humanInteraction for the rule. The invocation itself
+	// is a slash-command envelope and does not count. Zero is a real answer.
+	HumanInteractions int `json:"human_interactions"`
 }
 
 // CostReport is the whole document. Like Report it carries no generation
@@ -67,8 +89,8 @@ func LoadCost(dbPath string, since, until time.Time) (*CostReport, error) {
 	}
 	defer db.Close()
 
-	if v := schemaVersionOf(db); v < requiredSchemaVersion {
-		return nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, requiredSchemaVersion)
+	if v := schemaVersionOf(db); v < costSchemaVersion {
+		return nil, fmt.Errorf("summaries.db is at schema %d and predates per-turn run conditions (want %d) — run `loom summarize --rebuild`", v, costSchemaVersion)
 	}
 
 	invocations, err := loadInvocations(db)
@@ -129,6 +151,10 @@ func LoadCost(dbPath string, since, until time.Time) (*CostReport, error) {
 
 type costTurnRow struct {
 	idx             int
+	userMessage     string
+	model           string
+	effort          string
+	cliVersion      string
 	wallClockMs     int64
 	inputTokens     int64
 	outputTokens    int64
@@ -153,14 +179,17 @@ type costSessionData struct {
 	turns     []costTurnRow
 	calls     []costCallRow
 	subagents []costSubagentRow
-	commits   []commitRow
+	// errors is the turn_idx of every error row that hangs off a turn.
+	errors  []int
+	commits []commitRow
 }
 
 func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, error) {
 	data := &costSessionData{}
 
 	turns, err := db.Query(`
-		SELECT idx, wall_clock_ms, input_tokens, output_tokens, cache_read_tokens
+		SELECT idx, user_message, model, effort, cli_version,
+		       wall_clock_ms, input_tokens, output_tokens, cache_read_tokens
 		FROM turns WHERE agent = ? AND session_id = ? ORDER BY idx
 	`, agent, sessionID)
 	if err != nil {
@@ -169,12 +198,17 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 	defer turns.Close()
 	for turns.Next() {
 		var (
-			t                          costTurnRow
-			wall, input, output, cache sql.NullInt64
+			t                               costTurnRow
+			message, model, effort, version sql.NullString
+			wall, input, output, cache      sql.NullInt64
 		)
-		if err := turns.Scan(&t.idx, &wall, &input, &output, &cache); err != nil {
+		if err := turns.Scan(&t.idx, &message, &model, &effort, &version, &wall, &input, &output, &cache); err != nil {
 			return nil, err
 		}
+		t.userMessage = message.String
+		t.model = model.String
+		t.effort = effort.String
+		t.cliVersion = version.String
 		t.wallClockMs = wall.Int64
 		t.inputTokens = input.Int64
 		t.outputTokens = output.Int64
@@ -244,6 +278,28 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 		return nil, err
 	}
 
+	errs, err := db.Query(`
+		SELECT turn_idx FROM errors WHERE agent = ? AND session_id = ?
+	`, agent, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query errors: %w", err)
+	}
+	defer errs.Close()
+	for errs.Next() {
+		var turnIdx sql.NullInt64
+		if err := errs.Scan(&turnIdx); err != nil {
+			return nil, err
+		}
+		// Same reason as the tool calls above: unattributed is not turn 0.
+		if !turnIdx.Valid {
+			continue
+		}
+		data.errors = append(data.errors, int(turnIdx.Int64))
+	}
+	if err := errs.Err(); err != nil {
+		return nil, err
+	}
+
 	data.commits, err = loadCommits(db, agent, sessionID)
 	if err != nil {
 		return nil, err
@@ -251,8 +307,23 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 	return data, nil
 }
 
+// appendDistinct adds v to list unless it is empty or already there, so the
+// list reads as the distinct values in the order they were first seen.
+func appendDistinct(list []string, v string) []string {
+	if v == "" {
+		return list
+	}
+	for _, have := range list {
+		if have == v {
+			return list
+		}
+	}
+	return append(list, v)
+}
+
 // measure costs one run: the turns from its invocation through endIdx, the tool
-// calls and subagents those turns dispatched, and the commit that ended it.
+// calls and subagents those turns dispatched, the errors and human interactions
+// inside it, and the commit that ended it.
 func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionData) CostRun {
 	run := CostRun{
 		Ticket:          inv.ticket,
@@ -280,6 +351,19 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		// cost, and adding it would net out another turn's.
 		if t.wallClockMs >= 0 {
 			run.ActiveMs += t.wallClockMs
+		}
+		run.Models = appendDistinct(run.Models, t.model)
+		run.Efforts = appendDistinct(run.Efforts, t.effort)
+		run.CLIVersions = appendDistinct(run.CLIVersions, t.cliVersion)
+		if humanInteraction(t.userMessage) {
+			run.HumanInteractions++
+		}
+	}
+	// Claude stores -1 for an error raised before any turn opened; the span's
+	// lower bound is the invocation's own index, so it falls outside naturally.
+	for _, idx := range data.errors {
+		if inSpan(idx) {
+			run.Errors++
 		}
 	}
 	for _, c := range data.calls {

@@ -9,7 +9,10 @@
 // compliance rate is the one failure that makes the whole number useless.
 //
 // The same run spans answer a second question — see LoadCost, which reports what
-// each run cost in turns, tokens, tools, subagents and time.
+// each run cost in turns, tokens, tools, subagents and time, and under what
+// conditions: model, effort, CLI version, errors and human interactions. What
+// counts as a human interaction is defined once, in humanInteraction, and
+// applied to Claude and Codex turns alike.
 package workreport
 
 import (

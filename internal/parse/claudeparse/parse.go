@@ -70,6 +70,10 @@ func parseStream(r io.Reader, sidechain bool) (*state, error) {
 // the session.
 const MalformedLineMarker = "__malformed__"
 
+// syntheticModel is the model Claude stamps on the placeholder assistant record
+// it writes for an API error (isApiErrorMessage). Not a model that ran.
+const syntheticModel = "<synthetic>"
+
 // resultTextLimit bounds the stored text of a result: a tool call's result
 // summary and a subagent's prompt and result alike. One bound so the two
 // read as comparable.
@@ -261,6 +265,24 @@ func (st *state) handleAssistant(line []byte) error {
 	}
 	t := &st.s.Turns[turnIdx]
 	t.EndedAt = ts
+
+	// An API error is recorded as a placeholder assistant message whose model
+	// is the literal "<synthetic>"; it names no model that ran, so the turn
+	// waits for a real record or stays empty.
+	if t.Model == "" && rec.Message.Model != syntheticModel {
+		t.Model = rec.Message.Model
+	}
+	if t.CLIVersion == "" {
+		t.CLIVersion = rec.Version
+	}
+	// perTurnEffort is the per-turn override of the session-level effort
+	// setting, so it wins when set; effort alone is what was in force.
+	if t.Effort == "" {
+		t.Effort = rec.PerTurnEffort
+		if t.Effort == "" {
+			t.Effort = rec.Effort
+		}
+	}
 
 	if rec.Message.StopReason != "" {
 		t.StopReason = rec.Message.StopReason

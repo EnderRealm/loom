@@ -214,6 +214,18 @@ func (st *state) handleTurnContext(env envelope, ts time.Time) error {
 		})
 		st.turnByID[p.TurnID] = idx
 	}
+	t := &st.s.Turns[idx]
+	if t.Model == "" {
+		t.Model = p.Model
+	}
+	if t.Effort == "" {
+		t.Effort = p.Effort
+	}
+	// A rollout records the CLI version once, in session_meta, so every turn
+	// inherits it.
+	if t.CLIVersion == "" {
+		t.CLIVersion = st.s.CLIVersion
+	}
 	st.currentTurnIdx = idx
 	return nil
 }

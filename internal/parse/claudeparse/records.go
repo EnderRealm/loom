@@ -59,7 +59,9 @@ type userContentBlock struct {
 // assistantRecord is a model turn.
 type assistantRecord struct {
 	header
-	Message assistantMessage `json:"message"`
+	Message       assistantMessage `json:"message"`
+	Effort        string           `json:"effort"`
+	PerTurnEffort string           `json:"perTurnEffort"`
 }
 
 type assistantMessage struct {

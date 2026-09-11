@@ -4,6 +4,12 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 6: turns gains model, effort and cli_version — the conditions
+// in force for each turn, NULL where the transcript carried none. Every v5
+// database has those columns absent, and the watch-mode summarizer skips
+// sessions whose file is unchanged, so v5 reads as outdated until a
+// `loom summarize --rebuild` folds the transcripts in.
+//
 // schemaVersion 5: the subagents table is populated — subagent durations now
 // come from the dispatched transcript's own records instead of the parent's
 // acknowledgement. Every v4 database has that table empty, and the watch-mode
@@ -25,7 +31,7 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // commitsSchemaVersion is the version that introduced the commits table.
 // Deliberately pinned rather than tracked to schemaVersion: readers that need
@@ -84,6 +90,9 @@ CREATE TABLE IF NOT EXISTS turns (
     reasoning_chars   INTEGER,
     stop_reason       TEXT,
     completion_status TEXT,
+    model             TEXT,
+    effort            TEXT,
+    cli_version       TEXT,
     input_tokens      INTEGER,
     output_tokens     INTEGER,
     cache_read_tokens INTEGER,

@@ -140,6 +140,63 @@ func claudeInvocation(msg string) (string, bool) {
 	return strings.TrimSpace(rest[:end]), true
 }
 
+// harnessEnvelopeTags open the user messages a harness writes on the human's
+// behalf. A message starting with one of them is not a human interaction.
+var harnessEnvelopeTags = []string{
+	// Slash-command envelope; either tag comes first in the wild.
+	"<command-name>", "<command-message>",
+	// Background task notification the harness posts as a user turn.
+	"<task-notification>",
+	// Output of a local command, written by the harness.
+	"<local-command-stdout>", "<local-command-caveat>", "<bash-stdout>", "<bash-stderr>",
+	// Codex's expanded skill invocation: the injected skill body with the
+	// typed `$skill` line trailing it — the Codex counterpart of the
+	// slash-command envelope.
+	skillOpen,
+	// Codex harness preamble.
+	"<recommended_plugins>", "<environment_context>",
+}
+
+// humanInteraction reports whether a turn's stored user message is the human
+// acting, as opposed to the harness writing on the user side of the transcript.
+// It is judged on the turns table's user_message column, which both parsers
+// fill the same way, so the rule is identical for Claude and Codex by
+// construction.
+//
+// The rule: strip any leading system-reminder blocks and trim; an empty
+// message is not an interaction; a message that then starts with one of
+// harnessEnvelopeTags is not an interaction — a slash-command envelope, a
+// background task notification, local command output, Codex's injected skill
+// body, or Codex's preamble; a message invocation recognizes as /work is not
+// an interaction whatever its form; anything else is. <bash-input> counts: the
+// human ran a `!` command.
+//
+// The invocation is excluded by shape rather than by tag because a run's span
+// starts at its invocation turn on every runtime: Claude's envelope and Codex's
+// skill block already miss on the tags, but Codex's typed `#work` carries none,
+// and counting it would add one to every Codex-typed run and none to a Claude
+// run.
+//
+// Two exclusions are decided before a turn exists and so never reach this
+// rule: a tool result never opens a turn in either parser (it attaches to the
+// tool call it answers), and Claude's injected skill body is an isMeta user
+// record the parser drops. What is left for text to decide is decided here.
+func humanInteraction(userMessage string) bool {
+	msg := strings.TrimSpace(stripReminders(userMessage))
+	if msg == "" {
+		return false
+	}
+	if _, ok := invocation(msg); ok {
+		return false
+	}
+	for _, tag := range harnessEnvelopeTags {
+		if strings.HasPrefix(msg, tag) {
+			return false
+		}
+	}
+	return true
+}
+
 // stripReminders drops the system-reminder blocks the harness prepends to a
 // user message, so the command tags can be tested for at the start.
 func stripReminders(s string) string {

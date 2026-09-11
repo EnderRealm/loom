@@ -89,3 +89,28 @@ func parseFixture(t *testing.T, path string) *summary.SessionSummary {
 	}
 	return s
 }
+
+// TestTurnConditionsLand pins the per-turn model, effort and CLI version: each
+// comes off the turn's own assistant record, perTurnEffort overrides effort
+// when set, a turn whose records carried none reports empty rather than
+// inheriting a neighbour's, and an API error's "<synthetic>" placeholder does
+// not stand in for the model that then answered.
+func TestTurnConditionsLand(t *testing.T) {
+	s := parseFixture(t, "testdata/turn_conditions.jsonl")
+	if len(s.Turns) != 4 {
+		t.Fatalf("Turns len: got %d, want 4", len(s.Turns))
+	}
+	want := []struct{ model, effort, version string }{
+		{"claude-opus-5", "high", "2.1.267"},
+		{"claude-sonnet-5", "low", "2.1.267"},
+		{"", "", ""},
+		{"claude-opus-5", "high", "2.1.267"},
+	}
+	for i, w := range want {
+		got := s.Turns[i]
+		if got.Model != w.model || got.Effort != w.effort || got.CLIVersion != w.version {
+			t.Errorf("Turn[%d]: got %q/%q/%q, want %q/%q/%q", i,
+				got.Model, got.Effort, got.CLIVersion, w.model, w.effort, w.version)
+		}
+	}
+}

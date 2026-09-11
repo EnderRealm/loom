@@ -74,6 +74,14 @@ type Turn struct {
 	StopReason       string
 	CompletionStatus CompletionStatus
 
+	// Model, Effort and CLIVersion are the values in force for this turn:
+	// on Claude the first the turn's assistant records carried, on Codex
+	// the turn_context's model and effort plus session_meta's CLI version.
+	// Empty when those carried none.
+	Model      string
+	Effort     string
+	CLIVersion string
+
 	InputTokens     int64
 	OutputTokens    int64
 	CacheReadTokens int64

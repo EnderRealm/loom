@@ -40,6 +40,7 @@ type turnContextPayload struct {
 	TurnID      string `json:"turn_id"`
 	Cwd         string `json:"cwd"`
 	Model       string `json:"model"`
+	Effort      string `json:"effort"`
 	Personality string `json:"personality"`
 }
 
