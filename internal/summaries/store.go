@@ -250,8 +250,9 @@ func writeTurns(ctx context.Context, tx *sql.Tx,
 		    reasoning_chars, stop_reason, completion_status,
 		    model, effort, cli_version,
 		    input_tokens, output_tokens, cache_read_tokens,
+		    cache_creation_tokens, cache_creation_1h_tokens, speed, usage_mixed,
 		    started_at, ended_at, wall_clock_ms
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -267,7 +268,8 @@ func writeTurns(ctx context.Context, tx *sql.Tx,
 			string(t.CompletionStatus),
 			strOrNull(t.Model), strOrNull(t.Effort), strOrNull(t.CLIVersion),
 			t.InputTokens, t.OutputTokens,
-			t.CacheReadTokens, isoOrNull(t.StartedAt),
+			t.CacheReadTokens, t.CacheCreationTokens, t.CacheCreation1hTokens,
+			strOrNull(t.Speed), boolToInt(t.Mixed), isoOrNull(t.StartedAt),
 			isoOrNull(t.EndedAt), ms,
 		); err != nil {
 			return fmt.Errorf("insert turn %d: %w", t.Idx, err)
@@ -439,8 +441,10 @@ func writeSubagents(ctx context.Context, tx *sql.Tx,
 	agent := string(sum.Agent)
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO subagents (agent, session_id, seq, parent_turn_idx,
-		    agent_type, prompt, result_summary, duration_ms, error_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		    agent_type, prompt, result_summary, duration_ms, error_count,
+		    model, speed, input_tokens, output_tokens, cache_read_tokens,
+		    cache_creation_tokens, cache_creation_1h_tokens, usage_mixed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -450,9 +454,23 @@ func writeSubagents(ctx context.Context, tx *sql.Tx,
 		if sa.DurationMs != nil {
 			dur = *sa.DurationMs
 		}
+		// All eight usage columns are NULL together when the dispatch had no
+		// transcript: a zero there would read as a free dispatch.
+		var model, speed, input, output, cacheRead, cacheCreation, cacheCreation1h, mixed any
+		if u := sa.Usage; u != nil {
+			model = strOrNull(u.Model)
+			speed = strOrNull(u.Speed)
+			input = u.InputTokens
+			output = u.OutputTokens
+			cacheRead = u.CacheReadTokens
+			cacheCreation = u.CacheCreationTokens
+			cacheCreation1h = u.CacheCreation1hTokens
+			mixed = boolToInt(u.Mixed)
+		}
 		if _, err := stmt.ExecContext(ctx,
 			agent, sum.SessionID, i, sa.ParentTurnIdx, sa.AgentType,
 			sa.Prompt, sa.ResultSummary, dur, sa.ErrorCount,
+			model, speed, input, output, cacheRead, cacheCreation, cacheCreation1h, mixed,
 		); err != nil {
 			return err
 		}

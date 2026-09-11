@@ -1,0 +1,18 @@
+{
+  "currency": "USD",
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "checked": "2026-09-11",
+  "note": "Rates are the vendor's published Claude API list prices per million tokens as read on the checked date, and are assumed to have held since each entry's effective date. cache_write_5m / cache_write_1h are the 5-minute and 1-hour TTL write rates; cache_read is the cache-hit rate. fast_input/fast_output are fast-mode rates and are absent where fast mode is not offered.",
+  "rates": [
+    {"model": "claude-fable-5-1", "effective": "2026-01-01", "input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 0.25},
+    {"model": "claude-fable-5", "effective": "2026-01-01", "input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 1},
+    {"model": "claude-opus-5", "effective": "2026-01-01", "input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "fast_input": 10, "fast_output": 50},
+    {"model": "claude-opus-4-8", "effective": "2026-01-01", "input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "fast_input": 10, "fast_output": 50},
+    {"model": "claude-opus-4-7", "effective": "2026-01-01", "input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5},
+    {"model": "claude-opus-4-6", "effective": "2026-01-01", "input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5},
+    {"model": "claude-sonnet-5", "effective": "2026-01-01", "input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 4, "cache_read": 0.2},
+    {"model": "claude-sonnet-4-6", "effective": "2026-01-01", "input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3},
+    {"model": "claude-haiku-4-5", "effective": "2026-01-01", "input": 1, "output": 5, "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.1},
+    {"model": "claude-haiku-4-5-20251001", "effective": "2026-01-01", "input": 1, "output": 5, "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.1}
+  ]
+}

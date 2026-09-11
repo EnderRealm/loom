@@ -85,6 +85,20 @@ type Turn struct {
 	InputTokens     int64
 	OutputTokens    int64
 	CacheReadTokens int64
+	// CacheCreationTokens is the prompt-cache write count; CacheCreation1hTokens
+	// is the part of it the transcript labelled 1-hour TTL, the remainder being
+	// 5-minute or unlabelled. Kept apart because the two TTLs are priced
+	// differently. Speed is usage.speed as recorded ("standard"/"fast"), empty
+	// when absent. Claude only; Codex carries none of these.
+	CacheCreationTokens   int64
+	CacheCreation1hTokens int64
+	Speed                 string
+	// Mixed is true when the turn's records did not all agree on model and
+	// speed: claudeparse sets it when a later assistant record carries a
+	// non-empty model different from Model (the "<synthetic>" placeholder is
+	// skipped, not a disagreement) or a non-empty speed different from
+	// Speed. Such a turn's tokens have no single rate, so it is unpriceable.
+	Mixed bool
 
 	StartedAt time.Time
 	EndedAt   time.Time
@@ -174,9 +188,34 @@ type Subagent struct {
 	// on acknowledgement, not completion.
 	DurationMs *int64
 	ErrorCount int
+	// Usage is the dispatch's own token usage and model, read from its own
+	// transcript. Nil when that transcript was not available or did not
+	// parse, so "not measured" stays distinct from zero — the same reasoning
+	// as DurationMs.
+	Usage *SubagentUsage
 	// ToolUseID is the dispatching tool_use id. Carried in-process for the
 	// parent-turn join and for debugging; not persisted.
 	ToolUseID string
+}
+
+// SubagentUsage is what one dispatch consumed, summed over its transcript's
+// turns. Model and Speed are those of the first token-carrying turn: a
+// dispatch is assumed to run at a single model and speed end to end. Mixed
+// is true when that assumption failed — any turn is itself Mixed, or a later
+// token-carrying turn disagrees with that pair (a turn with tokens but no
+// Model beside one that has a Model is a disagreement: those tokens have no
+// rate; a turn with no tokens never sets Model or Speed and counts neither
+// way) — and a mixed dispatch is unpriceable rather than priced at any one
+// pair.
+type SubagentUsage struct {
+	Model                 string
+	Speed                 string
+	Mixed                 bool
+	InputTokens           int64
+	OutputTokens          int64
+	CacheReadTokens       int64
+	CacheCreationTokens   int64
+	CacheCreation1hTokens int64
 }
 
 // UnknownRecord is the drift alarm. Any record whose discriminator is not in

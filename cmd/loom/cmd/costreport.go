@@ -24,7 +24,11 @@ func newCostReportCmd() *cobra.Command {
 			"subagent duration, whether it committed, and two measures of time — wall clock from " +
 			"invocation to commit, and active time (turn wall clock plus tool duration) inside the " +
 			"run's span — plus the conditions it ran under: the models, efforts and CLI versions " +
-			"its turns carried, its error count, and how many times the human interacted.\n\n" +
+			"its turns carried, its error count, and how many times the human interacted — and " +
+			"what it cost in dollars: cost_usd prices the run's own turns and subagent_cost_usd " +
+			"each dispatch's own transcript, at the rates in internal/pricing/rates.json in force " +
+			"at the invocation; either is null, with pricing_warnings naming the cause, when " +
+			"anything in it could not be priced.\n\n" +
 			"Cost is attributed to the run, not the session: a session that invoked /work three " +
 			"times holds three runs. A run that never committed reports a null wall clock rather " +
 			"than running its span to the session end. The output carries no generation timestamp: " +

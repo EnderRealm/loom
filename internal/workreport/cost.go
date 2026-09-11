@@ -7,13 +7,19 @@ import (
 	"os"
 	"sort"
 	"time"
+
+	"loom/internal/pricing"
 )
 
-// costSchemaVersion is the summaries.db schema that added per-turn model,
-// effort and cli_version to turns (schema 6; see the schemaVersion doc comment
-// in internal/summaries/schema.go). A database without them cannot say what
-// conditions a run ran under, so it cannot answer this report.
-const costSchemaVersion = 6
+// costSchemaVersion is the summaries.db schema that added the pricing columns:
+// per-turn cache-creation tokens and speed, and each subagent's own usage
+// (schema 7; see the schemaVersion doc comment in internal/summaries/schema.go).
+// A database without them cannot price a run, so it cannot answer this report.
+const costSchemaVersion = 7
+
+// fastSpeed is the usage.speed value Claude records for fast-mode requests,
+// which are priced at the model's fast rates.
+const fastSpeed = "fast"
 
 // unknownToolKind keys tool calls whose recorded kind is empty, so the per-kind
 // breakdown never emits an empty JSON key.
@@ -61,6 +67,21 @@ type CostRun struct {
 	// human acting — see humanInteraction for the rule. The invocation itself
 	// is a slash-command envelope and does not count. Zero is a real answer.
 	HumanInteractions int `json:"human_interactions"`
+	// CacheCreationTokens is the span's prompt-cache writes, beside the token
+	// counts above.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+	// CostUSD is the run's own turns priced at each turn's model and speed,
+	// at the rate in force at InvokedAt (internal/pricing/rates.json).
+	// SubagentCostUSD is the same for the span's dispatches, each priced from
+	// its own transcript's usage and model. Either is null when anything in
+	// it could not be priced — an unknown model, a date before the table, a
+	// dispatch with no transcript, an unknown invocation time — and
+	// PricingWarnings then names every cause. Null cost beside non-null
+	// warnings is the loud failure: nothing is ever priced at a default rate
+	// or at zero. A span with nothing to price costs 0, not null.
+	CostUSD         *float64 `json:"cost_usd"`
+	SubagentCostUSD *float64 `json:"subagent_cost_usd"`
+	PricingWarnings []string `json:"pricing_warnings"`
 }
 
 // CostReport is the whole document. Like Report it carries no generation
@@ -90,7 +111,12 @@ func LoadCost(dbPath string, since, until time.Time) (*CostReport, error) {
 	defer db.Close()
 
 	if v := schemaVersionOf(db); v < costSchemaVersion {
-		return nil, fmt.Errorf("summaries.db is at schema %d and predates per-turn run conditions (want %d) — run `loom summarize --rebuild`", v, costSchemaVersion)
+		return nil, fmt.Errorf("summaries.db is at schema %d and predates the pricing columns (want %d) — run `loom summarize --rebuild`", v, costSchemaVersion)
+	}
+
+	table, err := pricing.Default()
+	if err != nil {
+		return nil, err
 	}
 
 	invocations, err := loadInvocations(db)
@@ -133,7 +159,7 @@ func LoadCost(dbPath string, since, until time.Time) (*CostReport, error) {
 			// compliance parser would make of it: dropping the runs it calls
 			// unknown would bias the cost trend toward the runs that are
 			// easiest to classify.
-			rep.Runs = append(rep.Runs, measure(session[i], endIdx, endsAt, data))
+			rep.Runs = append(rep.Runs, measure(session[i], endIdx, endsAt, data, table))
 		}
 	}
 
@@ -155,10 +181,14 @@ type costTurnRow struct {
 	model           string
 	effort          string
 	cliVersion      string
+	speed           string
 	wallClockMs     int64
 	inputTokens     int64
 	outputTokens    int64
 	cacheReadTokens int64
+	cacheCreation   int64
+	cacheCreation1h int64
+	usageMixed      bool
 }
 
 type costCallRow struct {
@@ -168,8 +198,20 @@ type costCallRow struct {
 }
 
 type costSubagentRow struct {
+	seq           int
 	parentTurnIdx int
+	agentType     string
 	durationMs    sql.NullInt64
+	// The usage columns are NULL together when the dispatch had no
+	// transcript; inputTokens.Valid is the "usage recorded" marker.
+	model           sql.NullString
+	speed           sql.NullString
+	inputTokens     sql.NullInt64
+	outputTokens    sql.NullInt64
+	cacheReadTokens sql.NullInt64
+	cacheCreation   sql.NullInt64
+	cacheCreation1h sql.NullInt64
+	usageMixed      sql.NullBool
 }
 
 // costSessionData is everything one session contributes to its runs' cost. A
@@ -188,8 +230,9 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 	data := &costSessionData{}
 
 	turns, err := db.Query(`
-		SELECT idx, user_message, model, effort, cli_version,
-		       wall_clock_ms, input_tokens, output_tokens, cache_read_tokens
+		SELECT idx, user_message, model, effort, cli_version, speed,
+		       wall_clock_ms, input_tokens, output_tokens, cache_read_tokens,
+		       cache_creation_tokens, cache_creation_1h_tokens, usage_mixed
 		FROM turns WHERE agent = ? AND session_id = ? ORDER BY idx
 	`, agent, sessionID)
 	if err != nil {
@@ -198,21 +241,28 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 	defer turns.Close()
 	for turns.Next() {
 		var (
-			t                               costTurnRow
-			message, model, effort, version sql.NullString
-			wall, input, output, cache      sql.NullInt64
+			t                                      costTurnRow
+			message, model, effort, version, speed sql.NullString
+			wall, input, output, cache             sql.NullInt64
+			creation, creation1h                   sql.NullInt64
+			mixed                                  sql.NullBool
 		)
-		if err := turns.Scan(&t.idx, &message, &model, &effort, &version, &wall, &input, &output, &cache); err != nil {
+		if err := turns.Scan(&t.idx, &message, &model, &effort, &version, &speed,
+			&wall, &input, &output, &cache, &creation, &creation1h, &mixed); err != nil {
 			return nil, err
 		}
 		t.userMessage = message.String
 		t.model = model.String
 		t.effort = effort.String
 		t.cliVersion = version.String
+		t.speed = speed.String
 		t.wallClockMs = wall.Int64
 		t.inputTokens = input.Int64
 		t.outputTokens = output.Int64
 		t.cacheReadTokens = cache.Int64
+		t.cacheCreation = creation.Int64
+		t.cacheCreation1h = creation1h.Int64
+		t.usageMixed = mixed.Bool
 		data.turns = append(data.turns, t)
 	}
 	if err := turns.Err(); err != nil {
@@ -252,7 +302,9 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 	}
 
 	subagents, err := db.Query(`
-		SELECT parent_turn_idx, duration_ms
+		SELECT seq, parent_turn_idx, agent_type, duration_ms,
+		       model, speed, input_tokens, output_tokens, cache_read_tokens,
+		       cache_creation_tokens, cache_creation_1h_tokens, usage_mixed
 		FROM subagents WHERE agent = ? AND session_id = ? ORDER BY seq
 	`, agent, sessionID)
 	if err != nil {
@@ -261,10 +313,13 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 	defer subagents.Close()
 	for subagents.Next() {
 		var (
-			s       costSubagentRow
-			turnIdx sql.NullInt64
+			s         costSubagentRow
+			turnIdx   sql.NullInt64
+			agentType sql.NullString
 		)
-		if err := subagents.Scan(&turnIdx, &s.durationMs); err != nil {
+		if err := subagents.Scan(&s.seq, &turnIdx, &agentType, &s.durationMs,
+			&s.model, &s.speed, &s.inputTokens, &s.outputTokens, &s.cacheReadTokens,
+			&s.cacheCreation, &s.cacheCreation1h, &s.usageMixed); err != nil {
 			return nil, err
 		}
 		// Same reason as the tool calls above: unattributed is not turn 0.
@@ -272,6 +327,7 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 			continue
 		}
 		s.parentTurnIdx = int(turnIdx.Int64)
+		s.agentType = agentType.String
 		data.subagents = append(data.subagents, s)
 	}
 	if err := subagents.Err(); err != nil {
@@ -321,10 +377,87 @@ func appendDistinct(list []string, v string) []string {
 	return append(list, v)
 }
 
+// pricer prices one run's units at the rates in force at its invocation,
+// collecting the reason for every unit it could not price.
+type pricer struct {
+	table    *pricing.Table
+	at       time.Time
+	warnings []string
+}
+
+func (p *pricer) warn(msg string) {
+	p.warnings = appendDistinct(p.warnings, msg)
+}
+
+// price returns u's cost at model's rate, or false after recording why it
+// could not be priced. subject names the unit in the per-unit warnings; an
+// unpriced model is one warning however many units carried it. Every unit is
+// priced even after one fails, so the warnings name every cause in the span.
+func (p *pricer) price(subject, model, speed string, u pricing.Usage) (float64, bool) {
+	// No invocation time means no rate can be said to be in force, at any
+	// model; measure warns about that once rather than per unit.
+	if p.at.IsZero() {
+		return 0, false
+	}
+	if model == "" {
+		p.warn(subject + ": model not recorded")
+		return 0, false
+	}
+	rate, ok := p.table.Lookup(model, p.at)
+	if !ok {
+		p.warn(fmt.Sprintf("unpriced model %q at %s", model, p.at.Format(time.DateOnly)))
+		return 0, false
+	}
+	u.Fast = speed == fastSpeed
+	usd, err := rate.Price(u)
+	if err != nil {
+		p.warn(subject + ": " + err.Error())
+		return 0, false
+	}
+	return usd, true
+}
+
+// usageOf splits a cache write into its TTL buckets: the part the transcript
+// labelled 1h, and the remainder at the 5-minute rate — the API's default TTL,
+// so an unlabelled write is priced as one. False when the 1h share exceeds
+// the total: a negative 5m bucket would reduce the cost, so the unit is not
+// priceable.
+func usageOf(input, output, cacheRead, cacheCreation, cacheCreation1h int64) (pricing.Usage, bool) {
+	if cacheCreation1h > cacheCreation {
+		return pricing.Usage{}, false
+	}
+	return pricing.Usage{
+		Input:        input,
+		Output:       output,
+		CacheRead:    cacheRead,
+		CacheWrite5m: cacheCreation - cacheCreation1h,
+		CacheWrite1h: cacheCreation1h,
+	}, true
+}
+
+// breakdownExceedsTotal is the warning for a unit usageOf refused.
+const breakdownExceedsTotal = ": cache write breakdown exceeds total"
+
+// recordsDisagree is the warning for a unit whose records did not all carry
+// one model and speed: its tokens have no single rate.
+const recordsDisagree = ": records disagree on model or speed"
+
+func hasTokens(u pricing.Usage) bool {
+	return u.Input != 0 || u.Output != 0 || u.CacheRead != 0 || u.CacheWrite5m != 0 || u.CacheWrite1h != 0
+}
+
+// roundUSD rounds to the micro-dollar so two reports over the same range are
+// byte-identical rather than trailing float noise.
+func roundUSD(x float64) *float64 {
+	x = math.Round(x*1e6) / 1e6
+	return &x
+}
+
 // measure costs one run: the turns from its invocation through endIdx, the tool
 // calls and subagents those turns dispatched, the errors and human interactions
-// inside it, and the commit that ended it.
-func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionData) CostRun {
+// inside it, and the commit that ended it, and prices the turns and subagents
+// at table's rates in force at the invocation.
+func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionData, table *pricing.Table) CostRun {
 	run := CostRun{
 		Ticket:          inv.ticket,
 		SessionID:       inv.sessionID,
@@ -338,6 +471,14 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 
 	inSpan := func(idx int) bool { return idx >= inv.idx && idx <= endIdx }
 
+	p := &pricer{table: table, at: inv.startedAt}
+	priced := !inv.startedAt.IsZero()
+	subagentsPriced := priced
+	if !priced {
+		p.warn("invocation time unknown")
+	}
+
+	var cost float64
 	for _, t := range data.turns {
 		if !inSpan(t.idx) {
 			continue
@@ -346,6 +487,22 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		run.InputTokens += t.inputTokens
 		run.OutputTokens += t.outputTokens
 		run.CacheReadTokens += t.cacheReadTokens
+		run.CacheCreationTokens += t.cacheCreation
+		// A turn with no tokens costs nothing whatever its model, so it
+		// cannot make the run unpriceable.
+		subject := fmt.Sprintf("turn %d", t.idx)
+		u, ok := usageOf(t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreation, t.cacheCreation1h)
+		if !ok {
+			p.warn(subject + breakdownExceedsTotal)
+			priced = false
+		} else if t.usageMixed && hasTokens(u) {
+			p.warn(subject + recordsDisagree)
+			priced = false
+		} else if hasTokens(u) {
+			usd, ok := p.price(subject, t.model, t.speed, u)
+			cost += usd
+			priced = priced && ok
+		}
 		// A turn's wall clock is a subtraction of transcript timestamps, not a
 		// monotonic reading, so a negative span is representable. It is not a
 		// cost, and adding it would net out another turn's.
@@ -385,6 +542,7 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		}
 	}
 	var subagentMs int64
+	var subagentCost float64
 	measured := false
 	for _, s := range data.subagents {
 		if !inSpan(s.parentTurnIdx) {
@@ -395,12 +553,44 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 			subagentMs += s.durationMs.Int64
 			measured = true
 		}
+		subject := fmt.Sprintf("subagent %d", s.seq)
+		if s.agentType != "" {
+			subject += " (" + s.agentType + ")"
+		}
+		// A dispatch with no transcript has no usage to price; unlike an
+		// unmeasured duration it makes the whole figure null, since a sum
+		// missing a term is not the run's subagent cost.
+		if !s.inputTokens.Valid {
+			p.warn(subject + ": no transcript")
+			subagentsPriced = false
+			continue
+		}
+		u, ok := usageOf(s.inputTokens.Int64, s.outputTokens.Int64, s.cacheReadTokens.Int64,
+			s.cacheCreation.Int64, s.cacheCreation1h.Int64)
+		if !ok {
+			p.warn(subject + breakdownExceedsTotal)
+			subagentsPriced = false
+		} else if s.usageMixed.Bool {
+			p.warn(subject + recordsDisagree)
+			subagentsPriced = false
+		} else if hasTokens(u) {
+			usd, ok := p.price(subject, s.model.String, s.speed.String, u)
+			subagentCost += usd
+			subagentsPriced = subagentsPriced && ok
+		}
 	}
 	// Stays null when no dispatch carried a duration — "not measured" must not
 	// read as "returned instantly".
 	if measured {
 		run.SubagentDurationMs = &subagentMs
 	}
+	if priced {
+		run.CostUSD = roundUSD(cost)
+	}
+	if subagentsPriced {
+		run.SubagentCostUSD = roundUSD(subagentCost)
+	}
+	run.PricingWarnings = p.warnings
 
 	committedAt, ok := runCommit(inv, endsAt, data.commits)
 	run.Committed = ok

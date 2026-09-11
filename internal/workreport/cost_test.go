@@ -577,11 +577,11 @@ func TestHumanInteraction(t *testing.T) {
 	}
 }
 
-func TestCostReportRefusesAPreConditionsSchema(t *testing.T) {
+func TestCostReportRefusesAPrePricingSchema(t *testing.T) {
 	f := newFixture(t)
 	f.add(costSession())
-	// A v5 database holds runs but cannot say what conditions they ran under;
-	// the compliance report still reads it, the cost report must not.
+	// A v5 database holds runs but cannot price them; the compliance report
+	// still reads it, the cost report must not.
 	db, err := sql.Open("sqlite", "file:"+f.path)
 	if err != nil {
 		t.Fatal(err)
@@ -592,10 +592,309 @@ func TestCostReportRefusesAPreConditionsSchema(t *testing.T) {
 	db.Close()
 
 	_, err = LoadCost(f.path, time.Time{}, time.Time{})
-	if err == nil || !strings.Contains(err.Error(), "want 6") {
-		t.Fatalf("LoadCost on a v5 DB = %v, want an error naming schema 6", err)
+	if err == nil || !strings.Contains(err.Error(), "want 7") {
+		t.Fatalf("LoadCost on a v5 DB = %v, want an error naming schema 7", err)
 	}
 	if _, err := Load(f.path, time.Time{}, time.Time{}); err != nil {
 		t.Fatalf("Load on a v5 DB = %v, want the compliance report still served", err)
+	}
+}
+
+// pricedSession is one run on claude-opus-5 whose single turn carries a
+// hand-set usage split, invoked at base (2026-08-01), when the table's
+// 2026-01-01 rates are in force.
+func pricedSession(model string, turn summary.Turn) *summary.SessionSummary {
+	turn.Idx = 0
+	turn.UserMessage = workInvocation("loom/priced-1111")
+	turn.Model = model
+	turn.StartedAt = base
+	return &summary.SessionSummary{
+		SessionID: "priced-" + model,
+		Agent:     summary.AgentClaude,
+		StartTime: base,
+		EndTime:   base.Add(time.Hour),
+		Turns:     []summary.Turn{turn},
+	}
+}
+
+func TestCostIsPricedFromTheTable(t *testing.T) {
+	f := newFixture(t)
+	f.add(pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000, OutputTokens: 100_000}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	// opus-5: 1,000,000 input at $5/M = 5; 100,000 output at $25/M = 2.5.
+	if run.CostUSD == nil || *run.CostUSD != 7.5 {
+		t.Fatalf("cost_usd = %v, want 7.5", run.CostUSD)
+	}
+	if run.SubagentCostUSD == nil || *run.SubagentCostUSD != 0 {
+		t.Fatalf("subagent_cost_usd = %v, want 0: no dispatches", run.SubagentCostUSD)
+	}
+	if run.PricingWarnings != nil {
+		t.Fatalf("pricing_warnings = %v, want nil", run.PricingWarnings)
+	}
+}
+
+func TestCacheReadsArePricedAtTheirOwnRate(t *testing.T) {
+	f := newFixture(t)
+	f.add(pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000}))
+	cached := pricedSession("claude-opus-5", summary.Turn{CacheReadTokens: 1_000_000})
+	cached.SessionID = "priced-cached"
+	f.add(cached)
+
+	rep := f.loadCost(time.Time{}, time.Time{})
+	if len(rep.Runs) != 2 {
+		t.Fatalf("report holds %d runs, want 2", len(rep.Runs))
+	}
+	var input, cache *float64
+	for _, run := range rep.Runs {
+		if run.CostUSD == nil {
+			t.Fatalf("run %s: cost_usd = null, warnings %v", run.SessionID, run.PricingWarnings)
+		}
+		if run.SessionID == "priced-cached" {
+			cache = run.CostUSD
+		} else {
+			input = run.CostUSD
+		}
+	}
+	// Same token count; the cache-read run prices at $0.5/M against $5/M.
+	if *input != 5 || *cache != 0.5 {
+		t.Fatalf("input run = %v, cache-read run = %v, want 5 and 0.5", *input, *cache)
+	}
+	if *cache >= 0.2**input {
+		t.Fatalf("cache-read run %v is not materially cheaper than the input run %v", *cache, *input)
+	}
+}
+
+func TestCacheWritesArePricedByTTL(t *testing.T) {
+	f := newFixture(t)
+	// 1,000,000 written, 400,000 of them labelled 1h: 600,000 at $6.25/M =
+	// 3.75 plus 400,000 at $10/M = 4.
+	f.add(pricedSession("claude-opus-5", summary.Turn{CacheCreationTokens: 1_000_000, CacheCreation1hTokens: 400_000}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CacheCreationTokens != 1_000_000 {
+		t.Fatalf("cache_creation_tokens = %d, want 1000000", run.CacheCreationTokens)
+	}
+	if run.CostUSD == nil || *run.CostUSD != 7.75 {
+		t.Fatalf("cost_usd = %v, want 7.75", run.CostUSD)
+	}
+}
+
+func TestUnpricedModelReportsNullCostAndNamesTheModel(t *testing.T) {
+	f := newFixture(t)
+	f.add(pricedSession("gpt-5.6-sol", summary.Turn{InputTokens: 1_000_000, OutputTokens: 100_000}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null: an unknown model must not price at a default", *run.CostUSD)
+	}
+	if len(run.PricingWarnings) != 1 || !strings.Contains(run.PricingWarnings[0], `"gpt-5.6-sol"`) {
+		t.Fatalf("pricing_warnings = %v, want one line naming gpt-5.6-sol", run.PricingWarnings)
+	}
+	out, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"cost_usd":null`) {
+		t.Fatalf("json %s lacks \"cost_usd\":null", out)
+	}
+}
+
+func TestRunInvokedBeforeEveryRateIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	sum := pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000})
+	// Before the table's first effective date: today's rate must not be
+	// applied to history it does not cover.
+	early := time.Date(2025, 1, 1, 9, 0, 0, 0, time.UTC)
+	sum.StartTime = early
+	sum.EndTime = early.Add(time.Hour)
+	sum.Turns[0].StartedAt = early
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null before the first effective date", *run.CostUSD)
+	}
+	want := `unpriced model "claude-opus-5" at 2025-01-01`
+	if len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("pricing_warnings = %v, want [%s]", run.PricingWarnings, want)
+	}
+}
+
+func TestSubagentCostIsPricedFromEachDispatch(t *testing.T) {
+	f := newFixture(t)
+	sum := pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000})
+	sum.Subagents = []summary.Subagent{
+		{ParentTurnIdx: 0, AgentType: "reviewer", Usage: &summary.SubagentUsage{
+			Model: "claude-opus-5", InputTokens: 200_000, OutputTokens: 40_000, CacheReadTokens: 1_000_000,
+		}},
+		{ParentTurnIdx: 0, AgentType: "security", Usage: &summary.SubagentUsage{
+			Model: "claude-haiku-4-5", InputTokens: 500_000, OutputTokens: 100_000,
+		}},
+	}
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	// opus-5 dispatch: 1 + 1 + 0.5 = 2.5; haiku dispatch: 0.5 + 0.5 = 1.
+	if run.SubagentCostUSD == nil || *run.SubagentCostUSD != 3.5 {
+		t.Fatalf("subagent_cost_usd = %v, want 3.5", run.SubagentCostUSD)
+	}
+	// The run's own cost is its own turns only: 1,000,000 input at $5/M.
+	if run.CostUSD == nil || *run.CostUSD != 5 {
+		t.Fatalf("cost_usd = %v, want 5: subagent usage is not the parent's", run.CostUSD)
+	}
+	if run.PricingWarnings != nil {
+		t.Fatalf("pricing_warnings = %v, want nil", run.PricingWarnings)
+	}
+}
+
+func TestSubagentCostIsNullWhenADispatchHasNoTranscript(t *testing.T) {
+	f := newFixture(t)
+	sum := pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000})
+	sum.Subagents = []summary.Subagent{
+		{ParentTurnIdx: 0, AgentType: "reviewer", Usage: &summary.SubagentUsage{Model: "claude-opus-5", InputTokens: 200_000}},
+		{ParentTurnIdx: 0, AgentType: "security"},
+	}
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.SubagentCostUSD != nil {
+		t.Fatalf("subagent_cost_usd = %v, want null: a sum missing a term is not the cost", *run.SubagentCostUSD)
+	}
+	want := "subagent 1 (security): no transcript"
+	if len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("pricing_warnings = %v, want [%s]", run.PricingWarnings, want)
+	}
+	if run.CostUSD == nil || *run.CostUSD != 5 {
+		t.Fatalf("cost_usd = %v, want 5: the run's own cost is unaffected", run.CostUSD)
+	}
+}
+
+func TestFastModeIsPricedAtTheFastRates(t *testing.T) {
+	f := newFixture(t)
+	f.add(pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000, OutputTokens: 100_000, Speed: "fast"}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	// opus-5 fast: $10/M input, $50/M output.
+	if run.CostUSD == nil || *run.CostUSD != 15 {
+		t.Fatalf("cost_usd = %v, want 15", run.CostUSD)
+	}
+}
+
+func TestFastModeWithoutAFastRateIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	f.add(pricedSession("claude-opus-4-7", summary.Turn{InputTokens: 1_000_000, Speed: "fast"}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null: fast mode must not price at the standard rate", *run.CostUSD)
+	}
+	want := `turn 0: fast mode has no rate for "claude-opus-4-7"`
+	if len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("pricing_warnings = %v, want [%s]", run.PricingWarnings, want)
+	}
+}
+
+func TestRunWithNoTokensCostsZeroNotNull(t *testing.T) {
+	f := newFixture(t)
+	f.add(pricedSession("", summary.Turn{}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD == nil || *run.CostUSD != 0 {
+		t.Fatalf("cost_usd = %v, want 0: nothing to price is a real zero", run.CostUSD)
+	}
+	if run.PricingWarnings != nil {
+		t.Fatalf("pricing_warnings = %v, want nil", run.PricingWarnings)
+	}
+	out, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"pricing_warnings":null`) {
+		t.Fatalf("json %s lacks \"pricing_warnings\":null", out)
+	}
+}
+
+func TestTurnWithTokensButNoModelIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	// costSession's turns carry tokens and no model: nothing says what rate
+	// they ran at, and the warning names each turn.
+	f.add(costSession())
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null: a turn with no model cannot be priced", *run.CostUSD)
+	}
+	// The dispatch it made has no transcript either, so that is named too.
+	want := []string{"turn 0: model not recorded", "turn 1: model not recorded", "subagent 0 (contract-lens): no transcript"}
+	if !reflect.DeepEqual(run.PricingWarnings, want) {
+		t.Fatalf("pricing_warnings = %v, want %v", run.PricingWarnings, want)
+	}
+}
+
+func TestCacheWriteBreakdownExceedingTheTotalIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	// A 1h share larger than the write it is part of would leave a negative
+	// 5m bucket that reduces the cost; the unit is unpriceable instead.
+	sum := pricedSession("claude-opus-5", summary.Turn{CacheCreationTokens: 100_000, CacheCreation1hTokens: 200_000})
+	sum.Subagents = []summary.Subagent{
+		{ParentTurnIdx: 0, AgentType: "reviewer", Usage: &summary.SubagentUsage{
+			Model: "claude-opus-5", CacheCreationTokens: 10, CacheCreation1hTokens: 20,
+		}},
+	}
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null", *run.CostUSD)
+	}
+	if run.SubagentCostUSD != nil {
+		t.Fatalf("subagent_cost_usd = %v, want null", *run.SubagentCostUSD)
+	}
+	want := []string{
+		"turn 0: cache write breakdown exceeds total",
+		"subagent 0 (reviewer): cache write breakdown exceeds total",
+	}
+	if !reflect.DeepEqual(run.PricingWarnings, want) {
+		t.Fatalf("pricing_warnings = %v, want %v", run.PricingWarnings, want)
+	}
+}
+
+func TestTurnWhoseRecordsDisagreeIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	// A turn that switched model or speed mid-way has no single rate; its
+	// tokens are not priced at the first one.
+	f.add(pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000, Mixed: true}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null", *run.CostUSD)
+	}
+	want := []string{"turn 0: records disagree on model or speed"}
+	if !reflect.DeepEqual(run.PricingWarnings, want) {
+		t.Fatalf("pricing_warnings = %v, want %v", run.PricingWarnings, want)
+	}
+}
+
+func TestDispatchWhoseRecordsDisagreeIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	sum := pricedSession("claude-opus-5", summary.Turn{InputTokens: 1_000_000})
+	sum.Subagents = []summary.Subagent{
+		{ParentTurnIdx: 0, AgentType: "reviewer", Usage: &summary.SubagentUsage{
+			Model: "claude-opus-5", InputTokens: 200_000, Mixed: true,
+		}},
+	}
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.SubagentCostUSD != nil {
+		t.Fatalf("subagent_cost_usd = %v, want null", *run.SubagentCostUSD)
+	}
+	want := []string{"subagent 0 (reviewer): records disagree on model or speed"}
+	if !reflect.DeepEqual(run.PricingWarnings, want) {
+		t.Fatalf("pricing_warnings = %v, want %v", run.PricingWarnings, want)
+	}
+	if run.CostUSD == nil || *run.CostUSD != 5 {
+		t.Fatalf("cost_usd = %v, want 5: the run's own cost is unaffected", run.CostUSD)
 	}
 }

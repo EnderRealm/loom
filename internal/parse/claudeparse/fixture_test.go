@@ -114,3 +114,36 @@ func TestTurnConditionsLand(t *testing.T) {
 		}
 	}
 }
+
+// TestUsageBreakdownLands pins the pricing inputs off usage: the cache write
+// and its 1h-labelled share accumulate per turn — a record with no breakdown
+// contributes to the write but not to the 1h share — speed is the first the
+// turn's records carried, and a turn whose records then switched speed is
+// marked mixed.
+func TestUsageBreakdownLands(t *testing.T) {
+	s := parseFixture(t, "testdata/usage_breakdown.jsonl")
+	if len(s.Turns) != 2 {
+		t.Fatalf("Turns len: got %d, want 2", len(s.Turns))
+	}
+	first := s.Turns[0]
+	if first.InputTokens != 15 || first.OutputTokens != 27 || first.CacheReadTokens != 400 {
+		t.Errorf("Turn[0] tokens: got %d/%d/%d, want 15/27/400", first.InputTokens, first.OutputTokens, first.CacheReadTokens)
+	}
+	if first.CacheCreationTokens != 550 || first.CacheCreation1hTokens != 400 {
+		t.Errorf("Turn[0] cache creation: got %d (1h %d), want 550 (1h 400)", first.CacheCreationTokens, first.CacheCreation1hTokens)
+	}
+	if first.Speed != "fast" {
+		t.Errorf("Turn[0] Speed: got %q, want fast", first.Speed)
+	}
+	if !first.Mixed {
+		t.Error("Turn[0] Mixed: got false, want true: its records ran fast then standard")
+	}
+	second := s.Turns[1]
+	if second.Mixed {
+		t.Error("Turn[1] Mixed: got true, want false")
+	}
+	if second.CacheCreationTokens != 4 || second.CacheCreation1hTokens != 0 || second.Speed != "" {
+		t.Errorf("Turn[1]: got cache creation %d (1h %d) speed %q, want 4 (1h 0) and no speed",
+			second.CacheCreationTokens, second.CacheCreation1hTokens, second.Speed)
+	}
+}

@@ -4,6 +4,14 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 7: turns gains cache_creation_tokens, cache_creation_1h_tokens,
+// speed and usage_mixed; subagents gains model, speed, input_tokens,
+// output_tokens, cache_read_tokens, cache_creation_tokens,
+// cache_creation_1h_tokens and usage_mixed — the dispatch's own usage off its
+// own transcript, all NULL where no transcript was folded. Every v6 database has those columns absent, and the watch-mode
+// summarizer skips sessions whose file is unchanged, so v6 reads as outdated
+// until a `loom summarize --rebuild` folds the transcripts in.
+//
 // schemaVersion 6: turns gains model, effort and cli_version — the conditions
 // in force for each turn, NULL where the transcript carried none. Every v5
 // database has those columns absent, and the watch-mode summarizer skips
@@ -31,7 +39,7 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // commitsSchemaVersion is the version that introduced the commits table.
 // Deliberately pinned rather than tracked to schemaVersion: readers that need
@@ -96,6 +104,10 @@ CREATE TABLE IF NOT EXISTS turns (
     input_tokens      INTEGER,
     output_tokens     INTEGER,
     cache_read_tokens INTEGER,
+    cache_creation_tokens    INTEGER,
+    cache_creation_1h_tokens INTEGER,
+    speed             TEXT,
+    usage_mixed       INTEGER,
     started_at        TEXT,
     ended_at          TEXT,
     wall_clock_ms     INTEGER,
@@ -179,6 +191,14 @@ CREATE TABLE IF NOT EXISTS subagents (
     result_summary  TEXT,
     duration_ms     INTEGER,
     error_count     INTEGER,
+    model           TEXT,
+    speed           TEXT,
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    cache_read_tokens        INTEGER,
+    cache_creation_tokens    INTEGER,
+    cache_creation_1h_tokens INTEGER,
+    usage_mixed     INTEGER,
     PRIMARY KEY (agent, session_id, seq)
 );
 

@@ -67,6 +67,7 @@ func foldSubagents(st *state, subs []SubagentInput) {
 			f.sa.Prompt = truncate(firstUserMessage(sub.s), resultTextLimit)
 			f.sa.ResultSummary = truncate(sub.lastAssistantText, resultTextLimit)
 			f.sa.ErrorCount = len(sub.s.Errors)
+			f.sa.Usage = subagentUsage(sub.s)
 		}
 		out = append(out, f)
 	}
@@ -121,6 +122,39 @@ func parseSubagent(st *state, in SubagentInput) *state {
 	}
 	sub.finalize()
 	return sub
+}
+
+// subagentUsage sums a dispatch's own turns so it can be priced from its own
+// transcript — its model and usage split, not the parent's blended count. The
+// sum is only priceable at one rate, so Model and Speed are those of the
+// first token-carrying turn — the one baseline the Mixed check compares
+// against, so the pair the report prices at is the pair the tokens ran at —
+// and a later token-carrying turn that disagrees marks the dispatch Mixed
+// rather than priced at the first. A token-less turn contributes only its
+// own Mixed flag.
+func subagentUsage(s *summary.SessionSummary) *summary.SubagentUsage {
+	u := &summary.SubagentUsage{}
+	first := true
+	for _, t := range s.Turns {
+		if t.Mixed {
+			u.Mixed = true
+		}
+		u.InputTokens += t.InputTokens
+		u.OutputTokens += t.OutputTokens
+		u.CacheReadTokens += t.CacheReadTokens
+		u.CacheCreationTokens += t.CacheCreationTokens
+		u.CacheCreation1hTokens += t.CacheCreation1hTokens
+		if t.InputTokens == 0 && t.OutputTokens == 0 && t.CacheReadTokens == 0 && t.CacheCreationTokens == 0 {
+			continue
+		}
+		if first {
+			u.Model, u.Speed = t.Model, t.Speed
+			first = false
+		} else if t.Model != u.Model || t.Speed != u.Speed {
+			u.Mixed = true
+		}
+	}
+	return u
 }
 
 func firstUserMessage(s *summary.SessionSummary) string {

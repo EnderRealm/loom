@@ -269,8 +269,14 @@ func (st *state) handleAssistant(line []byte) error {
 	// An API error is recorded as a placeholder assistant message whose model
 	// is the literal "<synthetic>"; it names no model that ran, so the turn
 	// waits for a real record or stays empty.
-	if t.Model == "" && rec.Message.Model != syntheticModel {
-		t.Model = rec.Message.Model
+	if rec.Message.Model != syntheticModel {
+		if t.Model == "" {
+			t.Model = rec.Message.Model
+		} else if rec.Message.Model != "" && rec.Message.Model != t.Model {
+			// A turn with two models has no single rate: recorded as mixed
+			// rather than priced at the first.
+			t.Mixed = true
+		}
 	}
 	if t.CLIVersion == "" {
 		t.CLIVersion = rec.Version
@@ -333,6 +339,18 @@ func (st *state) handleAssistant(line []byte) error {
 		t.InputTokens += u.InputTokens
 		t.OutputTokens += u.OutputTokens
 		t.CacheReadTokens += u.CacheReadInputTokens
+		t.CacheCreationTokens += u.CacheCreationInputTokens
+		// The 1h-TTL share of a cache write is tracked on its own because it
+		// is priced 1.6× the 5m write; whatever the record left unlabelled
+		// stays in the 5m remainder.
+		if u.CacheCreation != nil {
+			t.CacheCreation1hTokens += u.CacheCreation.Ephemeral1h
+		}
+		if t.Speed == "" {
+			t.Speed = u.Speed
+		} else if u.Speed != "" && u.Speed != t.Speed {
+			t.Mixed = true
+		}
 		st.s.InputTokens += u.InputTokens
 		st.s.OutputTokens += u.OutputTokens
 		st.s.CacheReadTokens += u.CacheReadInputTokens

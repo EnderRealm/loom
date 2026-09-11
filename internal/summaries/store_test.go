@@ -27,8 +27,8 @@ func TestOpenFreshDB(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != "6" {
-		t.Errorf("schema_version: got %q, want %q", v, "6")
+	if v != "7" {
+		t.Errorf("schema_version: got %q, want %q", v, "7")
 	}
 }
 
@@ -219,5 +219,114 @@ func TestWriteTurnsStoresConditionsOrNull(t *testing.T) {
 	model, effort, version = read(1)
 	if model.Valid || effort.Valid || version.Valid {
 		t.Errorf("turn 1: got %v/%v/%v, want all NULL", model, effort, version)
+	}
+}
+
+// TestWriteTurnsStoresCacheCreationAndSpeed pins the pricing columns on turns:
+// the cache write, its 1h share and the mixed flag round-trip, and speed
+// lands NULL when the transcript carried none.
+func TestWriteTurnsStoresCacheCreationAndSpeed(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	s := &summary.SessionSummary{
+		SessionID: "pricing",
+		Agent:     summary.AgentClaude,
+		StartTime: now,
+		EndTime:   now.Add(time.Minute),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: "hi", CacheCreationTokens: 5000, CacheCreation1hTokens: 3000, Speed: "fast", Mixed: true},
+			{Idx: 1, UserMessage: "again"},
+		},
+	}
+	if err := st.WriteSummary(context.Background(), s, SourceInfo{Project: "p"}); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+
+	read := func(idx int) (creation, creation1h, mixed int64, speed sql.NullString) {
+		t.Helper()
+		err := st.DB().QueryRow(
+			`SELECT cache_creation_tokens, cache_creation_1h_tokens, usage_mixed, speed FROM turns WHERE session_id = 'pricing' AND idx = ?`, idx,
+		).Scan(&creation, &creation1h, &mixed, &speed)
+		if err != nil {
+			t.Fatalf("read turn %d: %v", idx, err)
+		}
+		return creation, creation1h, mixed, speed
+	}
+
+	creation, creation1h, mixed, speed := read(0)
+	if creation != 5000 || creation1h != 3000 || mixed != 1 || speed.String != "fast" {
+		t.Errorf("turn 0: got %d/%d/%d/%q, want 5000/3000/1/fast", creation, creation1h, mixed, speed.String)
+	}
+	creation, creation1h, mixed, speed = read(1)
+	if creation != 0 || creation1h != 0 || mixed != 0 || speed.Valid {
+		t.Errorf("turn 1: got %d/%d/%d/%v, want 0/0/0/NULL", creation, creation1h, mixed, speed)
+	}
+}
+
+// TestWriteSubagentsStoresUsageOrNull pins the per-dispatch usage columns: a
+// dispatch whose transcript was folded lands with its model and counts, and
+// one with no transcript lands NULL on every usage column rather than zero,
+// which would read as a free dispatch.
+func TestWriteSubagentsStoresUsageOrNull(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	s := &summary.SessionSummary{
+		SessionID: "subagent-usage",
+		Agent:     summary.AgentClaude,
+		StartTime: now,
+		EndTime:   now.Add(time.Minute),
+		Subagents: []summary.Subagent{
+			{ParentTurnIdx: 0, AgentType: "reviewer", Usage: &summary.SubagentUsage{
+				Model: "claude-haiku-4-5", InputTokens: 10, OutputTokens: 20, CacheReadTokens: 30,
+				CacheCreationTokens: 40, CacheCreation1hTokens: 15, Mixed: true,
+			}},
+			{ParentTurnIdx: 0, AgentType: "security"},
+		},
+	}
+	if err := st.WriteSummary(context.Background(), s, SourceInfo{Project: "p"}); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+
+	type usage struct {
+		model, speed                                             sql.NullString
+		input, output, cacheRead, cacheCreation, cacheCreation1h sql.NullInt64
+		mixed                                                    sql.NullInt64
+	}
+	read := func(seq int) usage {
+		t.Helper()
+		var u usage
+		err := st.DB().QueryRow(`
+			SELECT model, speed, input_tokens, output_tokens, cache_read_tokens,
+			       cache_creation_tokens, cache_creation_1h_tokens, usage_mixed
+			FROM subagents WHERE session_id = 'subagent-usage' AND seq = ?`, seq,
+		).Scan(&u.model, &u.speed, &u.input, &u.output, &u.cacheRead, &u.cacheCreation, &u.cacheCreation1h, &u.mixed)
+		if err != nil {
+			t.Fatalf("read subagent %d: %v", seq, err)
+		}
+		return u
+	}
+
+	u := read(0)
+	if u.model.String != "claude-haiku-4-5" || u.speed.Valid ||
+		u.input.Int64 != 10 || u.output.Int64 != 20 || u.cacheRead.Int64 != 30 ||
+		u.cacheCreation.Int64 != 40 || u.cacheCreation1h.Int64 != 15 || u.mixed.Int64 != 1 {
+		t.Errorf("subagent 0: got %+v, want claude-haiku-4-5/NULL/10/20/30/40/15/1", u)
+	}
+	u = read(1)
+	if u.model.Valid || u.speed.Valid || u.input.Valid || u.output.Valid ||
+		u.cacheRead.Valid || u.cacheCreation.Valid || u.cacheCreation1h.Valid || u.mixed.Valid {
+		t.Errorf("subagent 1: got %+v, want every usage column NULL", u)
 	}
 }

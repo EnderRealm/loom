@@ -83,10 +83,18 @@ type assistantContentBlock struct {
 }
 
 type assistantUsage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	InputTokens              int64                   `json:"input_tokens"`
+	OutputTokens             int64                   `json:"output_tokens"`
+	CacheReadInputTokens     int64                   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64                   `json:"cache_creation_input_tokens"`
+	CacheCreation            *cacheCreationBreakdown `json:"cache_creation"`
+	Speed                    string                  `json:"speed"`
+}
+
+// cacheCreationBreakdown splits cache_creation_input_tokens by TTL.
+type cacheCreationBreakdown struct {
+	Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
 }
 
 // systemRecord covers all system.* subtypes.
