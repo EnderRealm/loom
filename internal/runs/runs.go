@@ -113,6 +113,11 @@ type Run struct {
 	Root            *Node          `json:"root"`
 	Unresolved      []*Node        `json:"unresolved"`
 	Diagnostics     []Diagnostic   `json:"diagnostics"`
+	// Lenses is the run's review attempts (workreport.LensAttempt), read from
+	// its transcript's lens responses. Null for a run with no transcript, and
+	// for a recorded run whose session holds no /work invocation spanning
+	// its start.
+	Lenses []workreport.LensAttempt `json:"lenses"`
 }
 
 // ErrNotFound is returned by Load for a run id nothing declares or names.
@@ -126,7 +131,11 @@ func Load(db *sql.DB, runID string) (*Run, error) {
 		return nil, err
 	}
 	if row != nil {
-		return buildRecorded(db, *row)
+		invocations, err := workreport.Invocations(db)
+		if err != nil {
+			return nil, err
+		}
+		return buildRecorded(db, *row, invocations)
 	}
 	nodes, err := loadExecutions(db, runID)
 	if err != nil {
@@ -141,7 +150,11 @@ func Load(db *sql.DB, runID string) (*Run, error) {
 		attach(run, nodes)
 		return run, nil
 	}
-	historical, err := loadHistorical(db, time.Time{}, time.Time{})
+	invocations, err := workreport.Invocations(db)
+	if err != nil {
+		return nil, err
+	}
+	historical, err := loadHistorical(db, invocations, time.Time{}, time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -162,16 +175,20 @@ func List(db *sql.DB, since, until time.Time) ([]Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	invocations, err := workreport.Invocations(db)
+	if err != nil {
+		return nil, err
+	}
 	var out []Run
 	for _, row := range recorded {
-		run, err := buildRecorded(db, row)
+		run, err := buildRecorded(db, row, invocations)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *run)
 	}
 
-	historical, err := loadHistorical(db, since, until)
+	historical, err := loadHistorical(db, invocations, since, until)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +271,10 @@ func loadRunRow(db *sql.DB, runID string) (*runRow, error) {
 	return &row, nil
 }
 
-func buildRecorded(db *sql.DB, row runRow) (*Run, error) {
+// buildRecorded assembles a declared run. Its lens attempts come from the
+// /work invocation recognized in its transcript: the only one in the session,
+// or with several, the one whose span holds the run's start.
+func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) (*Run, error) {
 	run := &Run{
 		RunID:           row.runID,
 		Ticket:          row.ticket,
@@ -277,7 +297,37 @@ func buildRecorded(db *sql.DB, row runRow) (*Run, error) {
 		return nil, err
 	}
 	attach(run, nodes)
+	if inv, ok := spanningInvocation(invocations, row.agent, row.sessionID, parseTime(row.startedAt)); ok {
+		run.Lenses, err = workreport.Lenses(db, inv)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return run, nil
+}
+
+// spanningInvocation picks the invocation a recorded run's lens attempts are
+// read from. None matching is not a diagnostic: the run's transcript simply
+// holds no recognized /work invocation to read them under.
+func spanningInvocation(invocations []workreport.Invocation, agent, sessionID string, startedAt time.Time) (workreport.Invocation, bool) {
+	var inSession []workreport.Invocation
+	for _, inv := range invocations {
+		if inv.Agent == agent && inv.SessionID == sessionID {
+			inSession = append(inSession, inv)
+		}
+	}
+	if len(inSession) == 1 {
+		return inSession[0], true
+	}
+	for _, inv := range inSession {
+		if startedAt.IsZero() || inv.StartedAt.IsZero() || startedAt.Before(inv.StartedAt) {
+			continue
+		}
+		if inv.EndsAt.IsZero() || startedAt.Before(inv.EndsAt) {
+			return inv, true
+		}
+	}
+	return workreport.Invocation{}, false
 }
 
 // loadExecutions reads a run's executions in the order children are listed:
@@ -444,12 +494,8 @@ func loadDiagnostics(db *sql.DB, runID string) ([]Diagnostic, error) {
 // loadHistorical synthesizes a run for every transcript-recognized /work
 // invocation in range whose session no record has claimed. The root's id is
 // transcript:<agent>:<session_id>:<turn idx>, which is also the run's.
-func loadHistorical(db *sql.DB, since, until time.Time) ([]Run, error) {
+func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, until time.Time) ([]Run, error) {
 	recorded, err := recordedSessions(db)
-	if err != nil {
-		return nil, err
-	}
-	invocations, err := workreport.Invocations(db)
 	if err != nil {
 		return nil, err
 	}
@@ -489,6 +535,10 @@ func loadHistorical(db *sql.DB, since, until time.Time) ([]Run, error) {
 			return nil, err
 		}
 		if err := attachCodexChildren(db, &run, inv, perSession[ref]); err != nil {
+			return nil, err
+		}
+		run.Lenses, err = workreport.Lenses(db, inv)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, run)

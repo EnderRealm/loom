@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
 )
 
@@ -50,6 +52,7 @@ func parseStream(r io.Reader, sidechain bool) (*state, error) {
 			lineNo++
 			line = trimNewline(line)
 			if len(line) > 0 {
+				st.line = lineNo
 				if perr := st.feed(line); perr != nil {
 					return nil, fmt.Errorf("line %d: %w", lineNo, perr)
 				}
@@ -115,6 +118,10 @@ type state struct {
 	// sidechain lifts the isSidechain guards: the stream *is* a subagent
 	// transcript, so its turns, tools and errors are this parse's subject.
 	sidechain bool
+
+	// line is the 1-based line of the record being fed, so a lens response
+	// can point back at the record it was read from.
+	line int
 
 	// stamps counts records that contributed a parseable timestamp. A span
 	// needs two of them, and zero-length is a real answer only when both
@@ -220,8 +227,10 @@ func (st *state) handleUser(line []byte) error {
 	}
 
 	text := decodeUserContent(rec.Message.Content)
+	idx := -1
 	if rec.PromptID != "" {
-		idx, ok := st.turnByPromptID[rec.PromptID]
+		var ok bool
+		idx, ok = st.turnByPromptID[rec.PromptID]
 		if !ok {
 			idx = st.openTurn(rec.PromptID, ts)
 			st.turnByPromptID[rec.PromptID] = idx
@@ -234,10 +243,73 @@ func (st *state) handleUser(line []byte) error {
 			t.StartedAt = ts
 		}
 	} else if text != "" {
-		idx := st.openTurn("", ts)
+		idx = st.openTurn("", ts)
 		st.s.Turns[idx].UserMessage = text
 	}
+	// A background lens dispatch answers as a task notification on the user
+	// side, naming the tool_use that dispatched it. A compaction summary is
+	// never one, whatever it reproduces: a quoted notification carrying a
+	// live dispatch id would otherwise open a further attempt on that
+	// dispatch and supersede the real answer.
+	if !rec.IsCompactSummary && taskNotification(text) {
+		var dispatchID string
+		if m := toolUseIDRe.FindStringSubmatch(text); m != nil {
+			dispatchID = m[1]
+		}
+		st.recordLenses(text, summary.OriginTaskNotification, dispatchID, idx, ts)
+	} else {
+		st.recordLenses(text, summary.OriginUser, "", idx, ts)
+	}
 	return nil
+}
+
+// taskNotificationOpen opens the message the harness posts on the user side
+// when a background dispatch finishes; toolUseIDRe reads the dispatch it
+// answers. systemReminderOpen and systemReminderClose delimit the blocks the
+// harness can prepend to that message.
+const (
+	taskNotificationOpen = "<task-notification>"
+	systemReminderOpen   = "<system-reminder>"
+	systemReminderClose  = "</system-reminder>"
+)
+
+var toolUseIDRe = regexp.MustCompile(`<tool-use-id>([^<]*)</tool-use-id>`)
+
+// taskNotification reports whether text is the envelope the harness posts:
+// past any leading <system-reminder> blocks and whitespace, it opens with
+// the notification marker. Text that merely contains the marker — a pasted
+// note, a summary quoting a notification — is user text, not a notification.
+func taskNotification(text string) bool {
+	for {
+		text = strings.TrimSpace(text)
+		if !strings.HasPrefix(text, systemReminderOpen) {
+			return strings.HasPrefix(text, taskNotificationOpen)
+		}
+		end := strings.Index(text, systemReminderClose)
+		if end < 0 {
+			return false
+		}
+		text = text[end+len(systemReminderClose):]
+	}
+}
+
+// recordLenses stores every lens verdict block in text, whole. Not run over a
+// subagent transcript: the parent holds the same response as a notification
+// or a tool result, and a second copy would count twice.
+func (st *state) recordLenses(text, origin, dispatchID string, turnIdx int, ts time.Time) {
+	if st.sidechain || text == "" {
+		return
+	}
+	for _, b := range lens.Extract(text) {
+		st.s.LensResponses = append(st.s.LensResponses, summary.LensResponse{
+			TurnIdx:    turnIdx,
+			Origin:     origin,
+			DispatchID: dispatchID,
+			SourceLine: st.line,
+			At:         ts,
+			Block:      b,
+		})
+	}
 }
 
 func (st *state) handleAssistant(line []byte) error {
@@ -332,6 +404,7 @@ func (st *state) handleAssistant(line []byte) error {
 
 	if msgText != "" {
 		st.lastAssistantText = msgText
+		st.recordLenses(msgText, summary.OriginAssistant, "", turnIdx, ts)
 	}
 
 	if rec.Message.Usage != nil {
@@ -411,7 +484,8 @@ func (st *state) handleAttachment(line []byte) error {
 	var probe struct {
 		header
 		Attachment struct {
-			Type string `json:"type"`
+			Type   string `json:"type"`
+			Prompt string `json:"prompt"`
 		} `json:"attachment"`
 	}
 	if err := json.Unmarshal(line, &probe); err != nil {
@@ -421,10 +495,22 @@ func (st *state) handleAttachment(line []byte) error {
 	st.touchTimeRange(parseTime(probe.Timestamp))
 
 	switch probe.Attachment.Type {
+	case "queued_command":
+		// A task notification that lands while the assistant is mid-turn is
+		// queued and injected as this attachment's prompt, never as a user
+		// record: a background lens's verdict often arrives this way.
+		if taskNotification(probe.Attachment.Prompt) {
+			var dispatchID string
+			if m := toolUseIDRe.FindStringSubmatch(probe.Attachment.Prompt); m != nil {
+				dispatchID = m[1]
+			}
+			st.recordLenses(probe.Attachment.Prompt, summary.OriginTaskNotification, dispatchID,
+				st.currentTurnIdx, parseTime(probe.Timestamp))
+		}
 	case "deferred_tools_delta", "skill_listing", "diagnostics",
 		"plan_mode", "edited_text_file", "task_reminder",
 		"companion_intro", "date_change",
-		"command_permissions", "hook_success", "queued_command":
+		"command_permissions", "hook_success":
 		// All recognized; no-op at summary level for now. Could be wired
 		// up later (e.g. plan_mode transitions are interesting).
 	default:
@@ -593,7 +679,11 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 		}
 		tc := &st.s.ToolCalls[idx]
 		tc.IsError = b.IsError
-		tc.ResultSummary = truncate(decodeToolResultContent(b.Content), resultTextLimit)
+		// Read whole before the cut: a lens verdict returned as a tool result
+		// is usually longer than resultTextLimit.
+		content := decodeToolResultContent(b.Content)
+		st.recordLenses(content, summary.OriginToolResult, b.ToolUseID, tc.TurnIdx, ts)
+		tc.ResultSummary = truncate(content, resultTextLimit)
 		if !ts.IsZero() && !tc.StartedAt.IsZero() {
 			tc.DurationMs = ts.Sub(tc.StartedAt).Milliseconds()
 		}

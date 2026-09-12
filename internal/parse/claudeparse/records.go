@@ -39,6 +39,7 @@ type userRecord struct {
 	Message                 userMessage     `json:"message"`
 	ToolUseResult           json.RawMessage `json:"toolUseResult"`
 	IsMeta                  *bool           `json:"isMeta"`
+	IsCompactSummary        bool            `json:"isCompactSummary"`
 	SourceToolAssistantUUID string          `json:"sourceToolAssistantUUID"`
 }
 

@@ -1,11 +1,11 @@
 package workreport
 
 import (
-	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
 )
 
@@ -217,8 +217,9 @@ func stripReminders(s string) string {
 // `dispatching (loom/foo-1234 round 2): contract, quality, security`. The
 // parenthesized part is captured whole because it varies in the wild — the
 // ticket id is sometimes absent and the final round carries a `, final` suffix.
-// Case-insensitive: the same line at the start of a sentence is capitalized.
-var dispatchLineRe = regexp.MustCompile(`(?i)dispatching \(([^)\n]*)\)\s*:`)
+// The rest of the line is the lenses the run committed to. Case-insensitive:
+// the same line at the start of a sentence is capitalized.
+var dispatchLineRe = regexp.MustCompile(`(?i)dispatching \(([^)\n]*)\)\s*:([^\n]*)`)
 
 // roundRe pulls the round number out of a commitment line's parenthetical.
 var roundRe = regexp.MustCompile(`(?i)round (\d+)`)
@@ -252,141 +253,46 @@ func (d *dispatchLines) scan(text string) {
 	}
 }
 
-// verdict is one lens's structured answer, as parsed out of a fenced json block.
-// parsed is false when the block was truncated (a lens verdict reaching us
-// through a tool result is cut at 800 chars) and only the leading fields could
-// be recovered.
-type verdict struct {
-	lens     string
-	summary  string
-	criteria []criterion
-	parsed   bool
+// commitment is one commitment line as the attempt model reads it: the round
+// it named, the lenses it committed to, and where it sits in its text. A line
+// whose round cannot be read places nothing and is skipped there; the
+// compliance side already fails closed on it through dispatchLines.unparseable.
+type commitment struct {
+	round  int
+	lenses []string
+	offset int
 }
 
-type criterion struct {
-	Status string `json:"status"`
-}
-
-type verdictJSON struct {
-	Lens     string      `json:"lens"`
-	Verdict  string      `json:"verdict"`
-	Summary  string      `json:"summary"`
-	Criteria []criterion `json:"criteria"`
-}
-
-const (
-	lensContract  = "contract"
-	lensQuality   = "quality"
-	lensSecurity  = "security"
-	statusUnverif = "unverified"
-	jsonFence     = "```json"
-	fence         = "```"
-)
-
-// knownLenses and knownVerdicts are the values a real lens answer carries. A
-// fenced block that misses them is not counted — as a metric or as fan-out
-// evidence — because a transcript can hold anything: a quoted verdict template,
-// a junk block, prose about this report. Evidence a transcript's own content can
-// forge is not evidence.
-var (
-	knownLenses   = map[string]bool{lensContract: true, lensQuality: true, lensSecurity: true}
-	knownVerdicts = map[string]bool{"satisfied": true, "findings": true}
-)
-
-var (
-	lensFieldRe    = regexp.MustCompile(`"lens"\s*:\s*"([^"]*)"`)
-	summaryFieldRe = regexp.MustCompile(`"summary"\s*:\s*"((?:[^"\\]|\\.)*)"`)
-)
-
-// parseVerdicts pulls every lens verdict out of one piece of transcript text.
-// The same block shape appears in three places — a Claude task notification, a
-// codex-lens tool result, and a Codex inlined pass — so one lenient parser
-// serves all three. Blocks that do not parse to a plausible verdict are dropped
-// rather than returned: see knownLenses.
-func parseVerdicts(text string) []verdict {
-	var out []verdict
-	rest := text
-	for {
-		i := strings.Index(rest, jsonFence)
-		if i < 0 {
-			return out
-		}
-		body := rest[i+len(jsonFence):]
-		if end := strings.Index(body, fence); end >= 0 {
-			rest = body[end+len(fence):]
-			body = body[:end]
-		} else {
-			// No closing fence: the text was truncated mid-block. Parse what
-			// is here and stop.
-			rest = ""
-		}
-		if !strings.Contains(body, `"lens"`) {
-			if rest == "" {
-				return out
-			}
+// commitments reads every commitment line in one piece of assistant text, in
+// order, dropping the ones naming no parseable round.
+func commitments(text string) []commitment {
+	var out []commitment
+	for _, m := range dispatchLineRe.FindAllStringSubmatchIndex(text, -1) {
+		r := roundRe.FindStringSubmatch(text[m[2]:m[3]])
+		if r == nil {
 			continue
 		}
-		if v, ok := parseVerdictBody(body); ok {
-			out = append(out, v)
+		n, err := strconv.Atoi(r[1])
+		if err != nil {
+			continue
 		}
-		if rest == "" {
-			return out
+		c := commitment{round: n, offset: m[0]}
+		tail := strings.ToLower(text[m[4]:m[5]])
+		for _, name := range lensOrder {
+			if strings.Contains(tail, name) {
+				c.lenses = append(c.lenses, name)
+			}
 		}
+		out = append(out, c)
 	}
+	return out
 }
 
-// parseVerdictBody reads one fenced block, reporting whether it is a verdict at
-// all. A whole block has to name a known lens and a known verdict; a truncated
-// one is cut before its criteria and often before its verdict, so the lens alone
-// stands for it.
-func parseVerdictBody(body string) (verdict, bool) {
-	var vj verdictJSON
-	if err := json.Unmarshal([]byte(body), &vj); err == nil {
-		if !knownLenses[vj.Lens] || !knownVerdicts[vj.Verdict] {
-			return verdict{}, false
-		}
-		return verdict{lens: vj.Lens, summary: vj.Summary, criteria: vj.Criteria, parsed: true}, true
-	}
-	// Truncated block: recover the fields that precede the cut. Criteria are
-	// deliberately not recovered — a partial list would under-count unverified
-	// criteria, and a wrong count is worse than none.
-	v := verdict{}
-	if m := lensFieldRe.FindStringSubmatch(body); m != nil {
-		v.lens = m[1]
-	}
-	if !knownLenses[v.lens] {
-		return verdict{}, false
-	}
-	if m := summaryFieldRe.FindStringSubmatch(body); m != nil {
-		if s, err := strconv.Unquote(`"` + m[1] + `"`); err == nil {
-			v.summary = s
-		} else {
-			v.summary = m[1]
-		}
-	}
-	return v, true
-}
+// lensOrder is the order lenses are reported in, which is the order a run
+// dispatches them.
+var lensOrder = []string{lens.Contract, lens.Quality, lens.Security}
 
-// contaminationRe matches a lens summary that reports contaminated review
-// context. Matched against parsed verdict summaries only: the merge text a run
-// writes says "no contamination reports" routinely, and matching raw transcript
-// would count every one of those.
-var contaminationRe = regexp.MustCompile(`(?i)contaminat|forbidden input|shared context|context was shared`)
-
-// contaminationNegatedRe matches the phrasings a clean lens uses — "no
-// contamination", "not contaminated", "no shared context". They carry the same
-// stems as a real report, so they are excluded rather than counted.
-//
-// The gap is bounded at clause punctuation as well as at the sentence end: a
-// negation of something else — "no must_fix findings, but the context was
-// shared" — must not swallow the report in the next clause.
-var contaminationNegatedRe = regexp.MustCompile(`(?i)\b(?:no|not|never|without|zero)\b[^.;,:]{0,40}?(?:contaminat|forbidden input|shared context|context was shared)`)
-
-// reportsContamination reports whether one lens summary says the review context
-// was contaminated.
-func reportsContamination(s string) bool {
-	return contaminationRe.MatchString(s) && !contaminationNegatedRe.MatchString(s)
-}
+const statusUnverif = "unverified"
 
 // subjectNamesTicket reports whether a commit subject's leading `[<id>]` marker
 // names this run's ticket. The run's id may be bare where the commit's is

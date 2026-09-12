@@ -4,6 +4,14 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 9: adds lens_responses, lens_criteria and lens_findings — every
+// review-lens verdict block a session's records carried, whole, keyed by the
+// record it was read from (docs/lens-responses.md). response_id is a hash of
+// that position, so a re-fold reproduces it. Every v8 database has the tables
+// absent, and the watch-mode summarizer skips sessions whose file is
+// unchanged, so v8 reads as outdated until a `loom summarize --rebuild` folds
+// the transcripts in.
+//
 // schemaVersion 8: sessions gains parent_session_id and spawn_depth — the
 // spawning thread a Codex subagent transcript names in session_meta, NULL for
 // a top-level session and for every Claude session — and four tables for the
@@ -48,13 +56,17 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 8
+const schemaVersion = 9
 
 // commitsSchemaVersion is the version that introduced the commits table.
 // Deliberately pinned rather than tracked to schemaVersion: readers that need
 // commits gate on this, so bumping schemaVersion must not start rejecting
 // databases that already hold every commit those readers query.
 const commitsSchemaVersion = 4
+
+// lensSchemaVersion is the version that introduced the lens_responses tables,
+// pinned for the same reason as commitsSchemaVersion.
+const lensSchemaVersion = 9
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -239,6 +251,56 @@ CREATE TABLE IF NOT EXISTS commits (
     PRIMARY KEY (agent, session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_commits_committed ON commits(committed_at);
+
+CREATE TABLE IF NOT EXISTS lens_responses (
+    agent            TEXT NOT NULL,
+    session_id       TEXT NOT NULL,
+    seq              INTEGER NOT NULL,
+    response_id      TEXT NOT NULL UNIQUE,
+    turn_idx         INTEGER,
+    origin           TEXT NOT NULL,
+    dispatch_id      TEXT,
+    source_path      TEXT,
+    source_line      INTEGER,
+    ordinal          INTEGER NOT NULL,
+    at               TEXT,
+    lens             TEXT,
+    verdict          TEXT,
+    summary          TEXT,
+    status           TEXT NOT NULL,
+    malformed_reason TEXT,
+    context_kind     TEXT NOT NULL,
+    context_state    TEXT,
+    context_received TEXT,
+    criteria_json    TEXT,
+    findings_json    TEXT,
+    raw              TEXT NOT NULL,
+    PRIMARY KEY (agent, session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_lens_responses_dispatch ON lens_responses(dispatch_id);
+
+CREATE TABLE IF NOT EXISTS lens_criteria (
+    response_id TEXT NOT NULL,
+    ordinal     INTEGER NOT NULL,
+    id          TEXT,
+    text        TEXT,
+    status      TEXT,
+    evidence    TEXT,
+    PRIMARY KEY (response_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS lens_findings (
+    response_id TEXT NOT NULL,
+    ordinal     INTEGER NOT NULL,
+    file        TEXT,
+    line        INTEGER,
+    severity    TEXT,
+    category    TEXT,
+    criterion   TEXT,
+    description TEXT,
+    fix         TEXT,
+    PRIMARY KEY (response_id, ordinal)
+);
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id           TEXT PRIMARY KEY,

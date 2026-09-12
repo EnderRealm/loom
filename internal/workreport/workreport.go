@@ -17,6 +17,7 @@ package workreport
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -28,6 +29,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
 )
 
@@ -54,6 +56,15 @@ var codexLensCallRe = regexp.MustCompile(regexp.QuoteMeta(codexLensScript) + `\b
 // Matched on the kind rather than the tool name: the same dispatch is recorded
 // as "Task" or as "Agent" depending on the client, and both normalize here.
 const subagentKind = string(summary.KindTask)
+
+// lensSubagent reports whether a subagent row reads as a lens dispatch: its
+// key argument, the dispatch's description, names a lens or a review. The one
+// test for both the fan-out count and the attempt model, so a coder dispatch
+// described as fixing a lens's findings is a lens dispatch to neither.
+func lensSubagent(c callRow) bool {
+	key := strings.ToLower(c.keyArg)
+	return c.toolKind == subagentKind && (strings.Contains(key, "lens") || strings.Contains(key, "review"))
+}
 
 // ticketEditTool is the tk MCP call that moves a ticket's status. Matched as a
 // substring: the same tool is registered under several plugin prefixes.
@@ -90,13 +101,17 @@ type Run struct {
 	// ReviewIterations is the highest round the run's fan-out commitment lines
 	// named, and is null when it wrote none — a run counted compliant on tool
 	// evidence alone reports null rather than a self-contradictory zero rounds.
-	ReviewIterations     *int `json:"review_iterations"`
-	ContaminationReports int  `json:"contamination_reports"`
+	ReviewIterations *int `json:"review_iterations"`
+	// ContaminationReports counts the parsed lens responses that reported a
+	// contaminated review context — the structured context state where the
+	// verdict carried one, the summary's prose where it did not — once per
+	// response, superseded or not.
+	ContaminationReports int `json:"contamination_reports"`
 	// CriteriaUnverified counts the unverified criteria in the run's last
-	// contract verdict, and is null when no contract verdict parsed whole — it
-	// never means "zero unverified". Nulls are routine: a verdict that came
-	// back as a tool result rather than as a task notification is stored cut at
-	// 800 chars, and the cut usually lands inside the criteria list.
+	// successful contract attempt (see LensAttempt.Successful), and is null
+	// when there is none — it never means "zero unverified". Read off the
+	// whole stored response, so a verdict that came back as a tool result
+	// counts the same as one that came back as a notification.
 	CriteriaUnverified *int `json:"criteria_unverified"`
 	// OpenToDoneMs is the span from the run's first ticket edit to its last.
 	// The report reads that the ticket was edited, never which status an edit
@@ -143,6 +158,9 @@ func Load(dbPath string, since, until time.Time) (*Report, error) {
 
 	if v := schemaVersionOf(db); v < requiredSchemaVersion {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, requiredSchemaVersion)
+	}
+	if v := schemaVersionOf(db); v < lensSchemaVersion {
+		return nil, fmt.Errorf("summaries.db is at schema %d and predates the lens_responses table (want %d) — run `loom summarize --rebuild`", v, lensSchemaVersion)
 	}
 
 	invocations, err := loadInvocations(db)
@@ -278,11 +296,13 @@ type turnRow struct {
 }
 
 type callRow struct {
-	toolKind      string
-	toolName      string
-	keyArg        string
-	startedAt     time.Time
-	resultSummary string
+	callID    string
+	toolKind  string
+	toolName  string
+	keyArg    string
+	startedAt time.Time
+	exitCode  *int
+	isError   bool
 }
 
 type commitRow struct {
@@ -295,6 +315,12 @@ type sessionData struct {
 	turns       []turnRow
 	callsByTurn map[int][]callRow
 	commits     []commitRow
+	// lenses is every lens response in the session in stored order, indexed
+	// by turn, by the tool call it answers, and by id.
+	lenses       []lensRow
+	lensesByTurn map[int][]lensRow
+	lensesByCall map[string][]lensRow
+	lensByID     map[string]lensRow
 }
 
 // loadInvocations scans the turns table for /work invocations. The SQL narrows
@@ -358,7 +384,12 @@ func groupBySession(invocations []invocationRow) [][]invocationRow {
 }
 
 func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
-	data := &sessionData{callsByTurn: map[int][]callRow{}}
+	data := &sessionData{
+		callsByTurn:  map[int][]callRow{},
+		lensesByTurn: map[int][]lensRow{},
+		lensesByCall: map[string][]lensRow{},
+		lensByID:     map[string]lensRow{},
+	}
 
 	turns, err := db.Query(`
 		SELECT idx, user_message, assistant_text
@@ -385,7 +416,7 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 	}
 
 	calls, err := db.Query(`
-		SELECT turn_idx, tool_kind, tool_name, key_arg, started_at, result_summary
+		SELECT turn_idx, call_id, tool_kind, tool_name, key_arg, started_at, exit_code, is_error
 		FROM tool_calls WHERE agent = ? AND session_id = ? ORDER BY seq
 	`, agent, sessionID)
 	if err != nil {
@@ -394,19 +425,24 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 	defer calls.Close()
 	for calls.Next() {
 		var (
-			c                             callRow
-			turnIdx                       sql.NullInt64
-			kind, name, keyArg, startedAt sql.NullString
-			result                        sql.NullString
+			c                                     callRow
+			turnIdx, exitCode                     sql.NullInt64
+			callID, kind, name, keyArg, startedAt sql.NullString
+			isError                               sql.NullBool
 		)
-		if err := calls.Scan(&turnIdx, &kind, &name, &keyArg, &startedAt, &result); err != nil {
+		if err := calls.Scan(&turnIdx, &callID, &kind, &name, &keyArg, &startedAt, &exitCode, &isError); err != nil {
 			return nil, err
 		}
+		c.callID = callID.String
 		c.toolKind = kind.String
 		c.toolName = name.String
 		c.keyArg = keyArg.String
 		c.startedAt = parseTime(startedAt)
-		c.resultSummary = result.String
+		if exitCode.Valid {
+			code := int(exitCode.Int64)
+			c.exitCode = &code
+		}
+		c.isError = isError.Bool
 		idx := int(turnIdx.Int64)
 		data.callsByTurn[idx] = append(data.callsByTurn[idx], c)
 	}
@@ -414,11 +450,55 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 		return nil, err
 	}
 
+	if err := loadLenses(db, agent, sessionID, data); err != nil {
+		return nil, err
+	}
 	data.commits, err = loadCommits(db, agent, sessionID)
 	if err != nil {
 		return nil, err
 	}
 	return data, nil
+}
+
+// loadLenses reads one session's lens responses in stored order and indexes
+// them for the walk.
+func loadLenses(db *sql.DB, agent, sessionID string, data *sessionData) error {
+	rows, err := db.Query(`
+		SELECT response_id, turn_idx, origin, dispatch_id, source_path, source_line,
+		       lens, verdict, summary, status, malformed_reason,
+		       context_kind, context_state, criteria_json
+		FROM lens_responses WHERE agent = ? AND session_id = ? ORDER BY seq
+	`, agent, sessionID)
+	if err != nil {
+		return fmt.Errorf("query lens responses: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			r                                           lensRow
+			turnIdx, sourceLine                         sql.NullInt64
+			dispatchID, sourcePath, lensName, verdict   sql.NullString
+			summaryText, reason, contextState, criteria sql.NullString
+		)
+		if err := rows.Scan(&r.responseID, &turnIdx, &r.origin, &dispatchID, &sourcePath, &sourceLine,
+			&lensName, &verdict, &summaryText, &r.status, &reason,
+			&r.contextKind, &contextState, &criteria); err != nil {
+			return err
+		}
+		r.turnIdx = int(turnIdx.Int64)
+		r.dispatchID = dispatchID.String
+		r.sourcePath = sourcePath.String
+		r.sourceLine = int(sourceLine.Int64)
+		r.lens, r.verdict, r.summary = lensName.String, verdict.String, summaryText.String
+		r.reason, r.contextState, r.criteriaJSON = reason.String, contextState.String, criteria.String
+		data.lenses = append(data.lenses, r)
+		data.lensesByTurn[r.turnIdx] = append(data.lensesByTurn[r.turnIdx], r)
+		if r.origin == summary.OriginToolResult && r.dispatchID != "" {
+			data.lensesByCall[r.dispatchID] = append(data.lensesByCall[r.dispatchID], r)
+		}
+		data.lensByID[r.responseID] = r
+	}
+	return rows.Err()
 }
 
 // loadCommits reads one session's commit rows. Shared by both loaders: the
@@ -461,8 +541,7 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 	}
 
 	var (
-		lines    dispatchLines
-		verdicts []verdict
+		lines dispatchLines
 		// Lenses the assistant answered as itself (Codex's fan-out shape), kept
 		// as a set: two blocks are a fan-out only when they are two lenses.
 		inlinedLenses = map[string]bool{}
@@ -472,49 +551,39 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 		activity      bool
 	)
 
-	// Walked in turn order so "the last contract verdict" means the last one
-	// the run actually saw, wherever it arrived from.
 	for _, t := range data.turns {
 		if t.idx < inv.idx || t.idx > endIdx {
 			continue
 		}
 		lines.scan(t.assistantText)
-		// A Claude lens verdict dispatched asynchronously arrives as a task
-		// notification on the user side; a Codex one is written inline by the
-		// assistant. The third path — a synchronous dispatch, whose verdict is
-		// the subagent call's own result — is read off the tool rows below.
-		verdicts = append(verdicts, parseVerdicts(t.userMessage)...)
-		own := parseVerdicts(t.assistantText)
-		for _, v := range own {
-			// Only a whole block counts as an inlined pass: a truncated one
+		for _, r := range data.lensesByTurn[t.idx] {
+			// Only a whole block counts as an inlined pass: a malformed one
 			// stands on its lens field alone, which is the one field a quoted
 			// template also carries.
-			if v.parsed {
-				inlinedLenses[v.lens] = true
+			if r.origin == summary.OriginAssistant && r.status == lens.StatusParsed {
+				inlinedLenses[r.lens] = true
 			}
 		}
-		verdicts = append(verdicts, own...)
 		if strings.TrimSpace(t.assistantText) != "" {
 			activity = true
 		}
 
 		for _, c := range data.callsByTurn[t.idx] {
 			activity = true
-			key := strings.ToLower(c.keyArg)
-			if c.toolKind == subagentKind && (strings.Contains(key, "lens") || strings.Contains(key, "review")) {
+			if lensSubagent(c) {
 				agentLens++
-				verdicts = append(verdicts, parseVerdicts(c.resultSummary)...)
 			}
-			if codexLensCallRe.MatchString(key) {
+			if codexLensCallRe.MatchString(strings.ToLower(c.keyArg)) {
 				// The command alone is still transcript content: an `echo` of
 				// the router's own invocation matches it. A real call's
 				// recorded output carries the verdict of the lens it routed,
 				// which an echo cannot produce.
-				routed := parseVerdicts(c.resultSummary)
-				if len(routed) > 0 {
-					lensRouter++
+				for _, r := range data.lensesByCall[c.callID] {
+					if lens.KnownLenses[r.lens] {
+						lensRouter++
+						break
+					}
 				}
-				verdicts = append(verdicts, routed...)
 			}
 			if strings.Contains(c.toolName, ticketEditTool) && !c.startedAt.IsZero() {
 				editTimes = append(editTimes, c.startedAt)
@@ -526,34 +595,35 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 		rounds := lines.maxRound
 		run.ReviewIterations = &rounds
 	}
-	// One block reaches us more than once — as a subagent's result and again as
-	// the notification for the same dispatch, or re-quoted by the merge — so a
-	// report is counted once per distinct (lens, summary).
-	counted := map[[2]string]bool{}
-	for _, v := range verdicts {
-		key := [2]string{v.lens, v.summary}
-		if counted[key] {
-			continue
-		}
-		counted[key] = true
-		if reportsContamination(v.summary) {
+	// One response reaches the model more than once — a task can notify
+	// twice, a run can re-quote a verdict — so a report is counted once per
+	// response id, and a superseded attempt's response still counts: it was
+	// reported.
+	counted := map[string]bool{}
+	var lastContract string
+	for _, a := range lensAttempts(run.Runtime, inv.idx, endIdx, data) {
+		if a.Status == AttemptParsed && a.Contaminated && !counted[a.ResponseID] {
+			counted[a.ResponseID] = true
 			run.ContaminationReports++
 		}
+		if a.Lens == lens.Contract && a.Successful() {
+			lastContract = a.ResponseID
+		}
 	}
-	// The last contract verdict is the one that stands, and only a block that
-	// parsed whole can be counted: a truncated one would under-report its
-	// unverified criteria.
-	for _, v := range verdicts {
-		if v.lens != lensContract || !v.parsed {
-			continue
+	// The last successful contract attempt is the one that stands.
+	if lastContract != "" {
+		var criteria []struct {
+			Status string `json:"status"`
 		}
-		n := 0
-		for _, c := range v.criteria {
-			if c.Status == statusUnverif {
-				n++
+		if json.Unmarshal([]byte(data.lensByID[lastContract].criteriaJSON), &criteria) == nil {
+			n := 0
+			for _, c := range criteria {
+				if c.Status == statusUnverif {
+					n++
+				}
 			}
+			run.CriteriaUnverified = &n
 		}
-		run.CriteriaUnverified = &n
 	}
 	// Spanned from the extremes rather than the ends: tool rows are ordered by
 	// the sequence they were recorded in, which is not always timestamp order,
@@ -590,7 +660,7 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 	// and quality among them: those two are the passes that runtime runs in its
 	// own context, and requiring both distinct is what a transcript quoting one
 	// block twice, or a verdict template, cannot produce.
-	inlinedEvidence := inlinesLenses(run.Runtime) && inlinedLenses[lensContract] && inlinedLenses[lensQuality]
+	inlinedEvidence := inlinesLenses(run.Runtime) && inlinedLenses[lens.Contract] && inlinedLenses[lens.Quality]
 	evidence := toolEvidence || inlinedEvidence
 	run.FanOutDispatched = evidence
 	run.Classification = classify(run.Runtime, lines, evidence, toolEvidence, activity, run.Committed)

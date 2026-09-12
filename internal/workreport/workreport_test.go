@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
 	"loom/internal/summaries"
 )
@@ -30,6 +32,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) add(sum *summary.SessionSummary) {
 	f.t.Helper()
+	extractLenses(sum)
 	st, err := summaries.Open(f.path)
 	if err != nil {
 		f.t.Fatal(err)
@@ -37,6 +40,50 @@ func (f *fixture) add(sum *summary.SessionSummary) {
 	defer st.Close()
 	if err := st.WriteSummary(context.Background(), sum, summaries.SourceInfo{Project: "loom"}); err != nil {
 		f.t.Fatal(err)
+	}
+}
+
+// toolUseIDRe reads the dispatch a task notification answers, as the Claude
+// parser does.
+var toolUseIDRe = regexp.MustCompile(`<tool-use-id>([^<]*)</tool-use-id>`)
+
+// extractLenses fills LensResponses the way the parsers do — every lens block
+// in a turn's user message and assistant text and in each tool call's result —
+// numbering records as a transcript would: the user message, the assistant
+// text, then the turn's tool results, one line each. A tool call with no id is
+// given one, since a result pairs with its dispatch by id; a task
+// notification's dispatch id is read off its `<tool-use-id>`.
+func extractLenses(sum *summary.SessionSummary) {
+	line := 0
+	record := func(text, origin, dispatchID string, turnIdx int, at time.Time) {
+		line++
+		for _, b := range lens.Extract(text) {
+			sum.LensResponses = append(sum.LensResponses, summary.LensResponse{
+				TurnIdx: turnIdx, Origin: origin, DispatchID: dispatchID,
+				SourceLine: line, At: at, Block: b,
+			})
+		}
+	}
+	for _, t := range sum.Turns {
+		origin, dispatchID := summary.OriginUser, ""
+		if strings.Contains(t.UserMessage, "<task-notification>") {
+			origin = summary.OriginTaskNotification
+			if m := toolUseIDRe.FindStringSubmatch(t.UserMessage); m != nil {
+				dispatchID = m[1]
+			}
+		}
+		record(t.UserMessage, origin, dispatchID, t.Idx, t.StartedAt)
+		record(t.AssistantText, summary.OriginAssistant, "", t.Idx, t.StartedAt)
+		for i := range sum.ToolCalls {
+			tc := &sum.ToolCalls[i]
+			if tc.TurnIdx != t.Idx {
+				continue
+			}
+			if tc.CallID == "" {
+				tc.CallID = fmt.Sprintf("call-%d-%d", t.Idx, i)
+			}
+			record(tc.ResultSummary, summary.OriginToolResult, tc.CallID, t.Idx, tc.StartedAt)
+		}
 	}
 }
 
@@ -83,9 +130,10 @@ func skillInvocation(ticket string) string {
 }
 
 // notification is the shape a Claude lens verdict comes back in: a task
-// completion message on the user side of the transcript.
-func notification(body string) string {
-	return "<task-notification><result>" + fenced(body) + "</result></task-notification>"
+// completion message on the user side of the transcript, naming the tool
+// use that dispatched it.
+func notification(dispatchID, body string) string {
+	return "<task-notification><tool-use-id>" + dispatchID + "</tool-use-id><result>" + fenced(body) + "</result></task-notification>"
 }
 
 // commitResult is git's confirmation line, which is where summaries.db's
@@ -96,8 +144,9 @@ func commitResult(subject string) string {
 
 // compliantSession is a Claude run that did the whole thing: two review rounds,
 // lens subagents plus the routed security lens, a contract verdict leaving one
-// criterion unverified, two ticket status edits, and a commit. Its verdicts
-// arrive the asynchronous way, as task notifications on a later turn;
+// criterion unverified, two ticket status edits, and a commit. Its subagent
+// verdicts arrive the asynchronous way, as task notifications on a later turn
+// naming their dispatch, and the routed lens answers in its own result;
 // syncLensSession covers the other delivery shape.
 func compliantSession() *summary.SessionSummary {
 	return &summary.SessionSummary{
@@ -114,16 +163,15 @@ func compliantSession() *summary.SessionSummary {
 			},
 			{
 				Idx: 1,
-				UserMessage: notification(`{"lens": "contract", "verdict": "findings", "summary": "Two criteria not met.",
+				UserMessage: notification("toolu_c1", `{"lens": "contract", "verdict": "findings", "summary": "Two criteria not met.",
 					"criteria": [{"id": "AC1", "status": "pass"}, {"id": "AC2", "status": "fail"}]}`),
 				AssistantText: "Round 2 diff is ready.\ndispatching (loom/compliant-1111 round 2): contract, quality, security",
 				StartedAt:     base.Add(10 * time.Minute),
 			},
 			{
 				Idx: 2,
-				UserMessage: notification(`{"lens": "contract", "verdict": "satisfied", "summary": "All criteria met.",
-					"criteria": [{"id": "AC1", "status": "pass"}, {"id": "AC2", "status": "unverified"}]}`) +
-					notification(`{"lens": "security", "verdict": "satisfied", "summary": "No injection or authz exposure found."}`),
+				UserMessage: notification("toolu_c2", `{"lens": "contract", "verdict": "satisfied", "summary": "All criteria met.",
+					"criteria": [{"id": "AC1", "status": "pass"}, {"id": "AC2", "status": "unverified"}]}`),
 				// The merge text says this routinely; it must not be read as a
 				// contamination report.
 				AssistantText: "All three lenses returned, no contamination reports. Committing.",
@@ -132,11 +180,12 @@ func compliantSession() *summary.SessionSummary {
 		},
 		ToolCalls: []summary.ToolCall{
 			{TurnIdx: 0, Kind: summary.KindMCP, ToolName: "mcp__tk__ticket_edit", KeyArg: "loom/compliant-1111", StartedAt: base.Add(time.Minute)},
-			{TurnIdx: 0, Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens review", StartedAt: base.Add(2 * time.Minute)},
-			{TurnIdx: 0, Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens review", StartedAt: base.Add(2 * time.Minute)},
-			{TurnIdx: 0, Kind: summary.KindBash, ToolName: "Bash", KeyArg: "~/.claude/codex-lens.sh --lens security --payload /tmp/p", StartedAt: base.Add(3 * time.Minute)},
-			{TurnIdx: 1, Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 2", StartedAt: base.Add(12 * time.Minute)},
-			{TurnIdx: 1, Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens round 2", StartedAt: base.Add(12 * time.Minute)},
+			{TurnIdx: 0, CallID: "toolu_c1", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens review", StartedAt: base.Add(2 * time.Minute)},
+			{TurnIdx: 0, CallID: "toolu_q1", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens review", StartedAt: base.Add(2 * time.Minute)},
+			{TurnIdx: 0, Kind: summary.KindBash, ToolName: "Bash", KeyArg: "~/.claude/codex-lens.sh --lens security --payload /tmp/p", StartedAt: base.Add(3 * time.Minute),
+				ResultSummary: fenced(`{"lens": "security", "verdict": "satisfied", "summary": "No injection or authz exposure found."}`)},
+			{TurnIdx: 1, CallID: "toolu_c2", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 2", StartedAt: base.Add(12 * time.Minute)},
+			{TurnIdx: 1, CallID: "toolu_q2", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens round 2", StartedAt: base.Add(12 * time.Minute)},
 			{TurnIdx: 2, Kind: summary.KindBash, ToolName: "Bash", KeyArg: "git commit", StartedAt: base.Add(40 * time.Minute),
 				ResultSummary: commitResult("[loom/compliant-1111] Do the thing")},
 			{TurnIdx: 2, Kind: summary.KindMCP, ToolName: "mcp__tk__ticket_edit", KeyArg: "loom/compliant-1111", StartedAt: base.Add(31 * time.Minute)},
@@ -203,14 +252,11 @@ func TestSubagentRowsNamedTaskAreDispatchEvidence(t *testing.T) {
 	}
 }
 
-// toolResultLimit mirrors the 800-char cut claudeparse applies to a tool
-// result, which is what truncates a verdict that came back synchronously.
-const toolResultLimit = 800
-
-// truncatedContractVerdict is a contract verdict as it survives that cut: the
-// criteria list runs past 800 chars, so only the leading fields are
-// recoverable. The ellipsis is the one claudeparse appends after the cut.
-func truncatedContractVerdict() string {
+// contractVerdictWithManyCriteria is a contract verdict whose criteria list
+// runs well past the 800 chars a tool result's summary keeps. The response
+// row holds it whole, so it counts the same as one that came back as a
+// notification.
+func contractVerdictWithManyCriteria() string {
 	var b strings.Builder
 	b.WriteString(`{"lens": "contract", "verdict": "findings", ` +
 		`"summary": "The lens was handed the coder's transcript, so its context was shared.", "criteria": [`)
@@ -218,7 +264,7 @@ func truncatedContractVerdict() string {
 		fmt.Fprintf(&b, `{"id": "AC%d", "status": "unverified"}, `, i)
 	}
 	b.WriteString(`{"id": "AC41", "status": "pass"}]}`)
-	return fenced(b.String())[:toolResultLimit] + "…"
+	return fenced(b.String())
 }
 
 // syncLensSession is the other Claude delivery shape: the lens subagents were
@@ -238,7 +284,7 @@ func syncLensSession() *summary.SessionSummary {
 		}},
 		ToolCalls: []summary.ToolCall{
 			{TurnIdx: 0, Kind: summary.KindTask, ToolName: "Task", KeyArg: "Contract lens review", StartedAt: base.Add(2 * time.Minute),
-				ResultSummary: truncatedContractVerdict()},
+				ResultSummary: contractVerdictWithManyCriteria()},
 			{TurnIdx: 0, Kind: summary.KindTask, ToolName: "Task", KeyArg: "Quality lens review", StartedAt: base.Add(2 * time.Minute),
 				ResultSummary: fenced(`{"lens": "quality", "verdict": "satisfied",
 					"summary": "No contamination: the lens saw the diff and the ticket only."}`)},
@@ -256,15 +302,33 @@ func TestSyncLensVerdictsAreReadOffToolResults(t *testing.T) {
 	if run.Classification != ClassCompliant {
 		t.Fatalf("classification = %q, want compliant", run.Classification)
 	}
-	// Recovered from the truncated block's summary field; the clean lens's
-	// negated phrasing must not add a second.
+	// Read off the contract verdict's prose, this one predating the
+	// structured context field; the clean lens's negated phrasing must not add
+	// a second.
 	if run.ContaminationReports != 1 {
 		t.Fatalf("contamination_reports = %d, want 1", run.ContaminationReports)
 	}
-	// The cut landed inside criteria[], so there is no whole contract verdict
-	// to count. Null, never an undercount.
+	// The whole verdict is stored, however long, so its criteria count.
+	if run.CriteriaUnverified == nil || *run.CriteriaUnverified != 40 {
+		t.Fatalf("criteria_unverified = %v, want 40", run.CriteriaUnverified)
+	}
+}
+
+func TestMalformedVerdictIsNotCounted(t *testing.T) {
+	f := newFixture(t)
+	sum := syncLensSession()
+	sum.SessionID = "cut-verdict"
+	// The lens's output was cut mid-block: no closing fence, no whole
+	// criteria list. It is kept as evidence and counted as nothing.
+	sum.ToolCalls[0].ResultSummary = contractVerdictWithManyCriteria()[:800]
+	f.add(sum)
+
+	run := only(t, f.load(time.Time{}, time.Time{}))
+	if run.ContaminationReports != 0 {
+		t.Fatalf("contamination_reports = %d, want 0: a malformed response is not a parsed report", run.ContaminationReports)
+	}
 	if run.CriteriaUnverified != nil {
-		t.Fatalf("criteria_unverified = %d, want null: a truncated block must not be counted", *run.CriteriaUnverified)
+		t.Fatalf("criteria_unverified = %d, want null: a malformed block must not be counted", *run.CriteriaUnverified)
 	}
 }
 

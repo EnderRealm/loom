@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"loom/internal/parse/claudeparse"
 	"loom/internal/parse/summary"
 	"loom/internal/summaries"
+	"loom/internal/workreport"
 )
 
 // fixtureRun is the run docs/execution-records.md and testdata/executions.jsonl
@@ -973,4 +975,63 @@ func TestExecutionRunIDIsImmutable(t *testing.T) {
 	// Full replay of the same file: still one diagnostic, no new rows.
 	importFile(t, st, path)
 	check("after replay")
+}
+
+// A run's review attempts are read from its transcript's lens responses:
+// a transcript-recognized run under its own invocation, and a recorded run
+// under the invocation its session holds. A recorded run with no transcript
+// carries none.
+func TestRunsCarryLensAttempts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "summaries.db")
+	st := openStore(t, path)
+	defer st.Close()
+
+	f, err := os.Open(filepath.Join("..", "parse", "claudeparse", "testdata", "lens_responses.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sum, err := claudeparse.Parse(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSession(t, st, sum)
+
+	runs, err := List(st.DB(), time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical := runByID(t, runs, "transcript:claude-code:lens-fixture:0")
+	if len(historical.Lenses) != 7 {
+		t.Fatalf("historical run lenses = %+v, want the fixture's 7 attempts", historical.Lenses)
+	}
+	if got := historical.Lenses[0]; got.Lens != "contract" || got.Round != 1 || got.Status != workreport.AttemptParsed {
+		t.Errorf("first attempt = %+v, want contract round 1 parsed", got)
+	}
+
+	// A record claiming the session takes the same invocation's attempts.
+	records := filepath.Join(t.TempDir(), "executions.jsonl")
+	if err := os.WriteFile(records, []byte(
+		`{"v":1,"kind":"run","run_id":"run-lens","ticket":"loom/lens-1234","runtime":"claude-code","agent":"claude-code","session_id":"lens-fixture","started_at":"2026-09-01T10:00:01Z"}`+"\n"+
+			`{"v":1,"kind":"run","run_id":"run-bare","ticket":"loom/bare-0001","runtime":"weft","started_at":"2026-09-01T12:00:00Z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importFile(t, st, records)
+	recorded, err := Load(st.DB(), "run-lens")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded.Lenses) != 7 || recorded.Lenses[6].Status != workreport.AttemptMissing {
+		t.Errorf("recorded run lenses = %+v, want the same 7 attempts ending in the missing security lens", recorded.Lenses)
+	}
+	bare, err := Load(st.DB(), "run-bare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.Lenses != nil {
+		t.Errorf("bare run lenses = %+v, want none: it has no transcript", bare.Lenses)
+	}
+	if _, err := json.Marshal(recorded); err != nil {
+		t.Fatal(err)
+	}
 }

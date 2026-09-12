@@ -4,7 +4,11 @@
 // extractors) only sees this shape.
 package summary
 
-import "time"
+import (
+	"time"
+
+	"loom/internal/parse/lens"
+)
 
 // Agent identifies the producer that generated a session.
 type Agent string
@@ -56,7 +60,12 @@ type SessionSummary struct {
 	TokenCounts  []TokenCount
 	FilesTouched []FileTouch
 	Subagents    []Subagent
-	Unknown      []UnknownRecord
+	// LensResponses is every review-lens verdict block the session's own
+	// records carried, whole. Read off the full record text before the
+	// per-field truncation the other tables apply, so a verdict longer than a
+	// result summary survives here.
+	LensResponses []LensResponse
+	Unknown       []UnknownRecord
 }
 
 // CompletionStatus normalizes how a turn ended across producers.
@@ -205,6 +214,32 @@ type Subagent struct {
 	// ToolUseID is the dispatching tool_use id. Carried in-process for the
 	// parent-turn join and for debugging; not persisted.
 	ToolUseID string
+}
+
+// Origin values of a LensResponse: where in the transcript the block landed.
+const (
+	OriginTaskNotification = "task_notification"
+	OriginToolResult       = "tool_result"
+	OriginAssistant        = "assistant"
+	OriginUser             = "user"
+)
+
+// LensResponse is one lens verdict block and where it was read from. Both
+// parsers fill it from the full record text, never from a truncated column.
+// Subagent transcripts are not read for these: the parent already holds the
+// same response as a notification or a tool result, and a second copy would
+// count twice.
+type LensResponse struct {
+	TurnIdx int
+	Origin  string
+	// DispatchID is the tool call the response answers — Claude's tool_use_id
+	// or Codex's call_id for a tool result, the <tool-use-id> of a task
+	// notification — and empty where the text names none.
+	DispatchID string
+	// SourceLine is the 1-based line of the record in the transcript file.
+	SourceLine int
+	At         time.Time
+	lens.Block
 }
 
 // SubagentUsage is what one dispatch consumed, summed over its transcript's

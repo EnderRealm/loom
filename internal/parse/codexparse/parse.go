@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
 )
 
@@ -24,11 +25,14 @@ func Parse(r io.Reader) (*summary.SessionSummary, error) {
 	st := newState(s)
 
 	br := bufio.NewReader(r)
+	lineNo := 0
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
+			lineNo++
 			line = trimNewline(line)
 			if len(line) > 0 {
+				st.line = lineNo
 				st.feed(line)
 			}
 		}
@@ -61,6 +65,16 @@ type state struct {
 
 	toolCallByID map[string]int
 
+	// line is the 1-based line of the record being fed, so a lens response
+	// can point back at the record it was read from.
+	line int
+
+	// lensRead marks the call ids whose output has been read for lens
+	// responses. A call's output can arrive twice — as an exec_command_end
+	// event and again as a function_call_output item — and the same block
+	// must not be stored twice.
+	lensRead map[string]bool
+
 	unknown map[string]*summary.UnknownRecord
 }
 
@@ -69,9 +83,37 @@ func newState(s *summary.SessionSummary) *state {
 		s:              s,
 		turnByID:       map[string]int{},
 		toolCallByID:   map[string]int{},
+		lensRead:       map[string]bool{},
 		unknown:        map[string]*summary.UnknownRecord{},
 		currentTurnIdx: -1,
 	}
+}
+
+// recordLenses stores every lens verdict block in text, whole.
+func (st *state) recordLenses(text, origin, dispatchID string, turnIdx int, ts time.Time) {
+	if text == "" {
+		return
+	}
+	for _, b := range lens.Extract(text) {
+		st.s.LensResponses = append(st.s.LensResponses, summary.LensResponse{
+			TurnIdx:    turnIdx,
+			Origin:     origin,
+			DispatchID: dispatchID,
+			SourceLine: st.line,
+			At:         ts,
+			Block:      b,
+		})
+	}
+}
+
+// recordCallLenses reads a tool call's full output for lens responses, once
+// per call whichever record delivers it first.
+func (st *state) recordCallLenses(callID, output string, turnIdx int, ts time.Time) {
+	if st.lensRead[callID] {
+		return
+	}
+	st.lensRead[callID] = true
+	st.recordLenses(output, summary.OriginToolResult, callID, turnIdx, ts)
 }
 
 // MalformedLineMarker is bumped into Unknown when a single line fails to
@@ -258,6 +300,10 @@ func (st *state) handleResponseItem(env envelope, ts time.Time) error {
 			}
 			t.AssistantText += text
 			t.EndedAt = ts
+			// An inlined lens pass is written here, as the assistant's own
+			// text. The agent_message event repeats this item where it
+			// appears at all, so it is not read for lens responses.
+			st.recordLenses(text, summary.OriginAssistant, "", turnIdx, ts)
 		case "developer":
 			// Developer-role messages are system prompts / instructions
 			// injected by the harness — not user intent.
@@ -334,8 +380,11 @@ func (st *state) handleEventMsg(env envelope, ts time.Time) error {
 	case "agent_message":
 		if turnIdx >= 0 {
 			t := &st.s.Turns[turnIdx]
+			// Only where no message item carried the text: then the event
+			// is the one record of it, inlined lens passes included.
 			if t.AssistantText == "" {
 				t.AssistantText = p.Message
+				st.recordLenses(p.Message, summary.OriginAssistant, "", turnIdx, ts)
 			}
 			t.EndedAt = ts
 		}
@@ -346,8 +395,11 @@ func (st *state) handleEventMsg(env envelope, ts time.Time) error {
 			t := &st.s.Turns[turnIdx]
 			t.CompletionStatus = summary.CompletionTaskComplete
 			t.EndedAt = ts
+			// Same as agent_message: the text is read for inlined lens
+			// passes only where this is the one record of it.
 			if t.AssistantText == "" {
 				t.AssistantText = p.LastAgentMessage
+				st.recordLenses(p.LastAgentMessage, summary.OriginAssistant, "", turnIdx, ts)
 			}
 		}
 	case "turn_aborted":
@@ -413,6 +465,9 @@ func (st *state) applyExecCommandEnd(p eventMsgPayload, ts time.Time,
 	tc.ExitCode = p.ExitCode
 	tc.IsError = p.ExitCode != nil && *p.ExitCode != 0
 	tc.DurationMs = parseDurationMs(p.Duration)
+	// Read whole before the cut: a routed lens verdict on stdout is longer
+	// than the summary keeps.
+	st.recordCallLenses(p.CallID, p.Stdout+"\n"+p.Stderr, tc.TurnIdx, ts)
 	tc.ResultSummary = truncate(execResultSummary(p), 800)
 	if tc.IsError {
 		st.s.Errors = append(st.s.Errors, summary.ErrorEvent{
@@ -516,6 +571,7 @@ func (st *state) applyToolOutput(callID string, output json.RawMessage,
 		return
 	}
 	tc := &st.s.ToolCalls[idx]
+	st.recordCallLenses(callID, decodeFunctionOutput(output), tc.TurnIdx, ts)
 	if tc.ResultSummary == "" {
 		tc.ResultSummary = truncate(decodeFunctionOutput(output), 800)
 	}

@@ -1,6 +1,9 @@
 package workreport
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestInvocationRecognizesBothRuntimeForms(t *testing.T) {
 	cases := []struct {
@@ -120,71 +123,22 @@ func TestDispatchLineWithoutARoundIsUnparseable(t *testing.T) {
 	}
 }
 
-func TestParseVerdictsReadsBlocksAndToleratesTruncation(t *testing.T) {
-	text := "Here is the contract lens.\n" +
-		fenced(`{"lens": "contract", "verdict": "findings", "summary": "One criterion untested.",
-			"criteria": [{"id": "AC1", "status": "pass"}, {"id": "AC2", "status": "unverified"}]}`) +
-		"\nand the security lens, cut off mid-flight:\n" +
-		"```json\n{\n  \"lens\": \"security\",\n  \"verdict\": \"findings\",\n  \"summary\": \"The payload carried a forbidden input.\",\n  \"criteria\": ["
-
-	got := parseVerdicts(text)
+func TestCommitmentsReadRoundAndLenses(t *testing.T) {
+	text := "Plan is clear.\ndispatching (loom/foo-1234 round 1): contract, quality, security\n" +
+		"dispatching (loom/foo-1234 round N): contract\n" +
+		"Round 2 diff is ready.\n\nDispatching (loom/foo-1234 Round 2, final): Contract, Security"
+	got := commitments(text)
 	if len(got) != 2 {
-		t.Fatalf("parsed %d verdicts, want 2", len(got))
+		t.Fatalf("commitments = %+v, want 2 (the unparseable round is skipped)", got)
 	}
-	if !got[0].parsed || got[0].lens != lensContract || len(got[0].criteria) != 2 {
-		t.Fatalf("contract verdict = %+v, want a fully parsed block with 2 criteria", got[0])
+	if got[0].round != 1 || strings.Join(got[0].lenses, ",") != "contract,quality,security" {
+		t.Fatalf("commitments[0] = %+v, want round 1 naming all three", got[0])
 	}
-	if got[1].parsed {
-		t.Fatal("truncated block reported as fully parsed")
+	if got[1].round != 2 || strings.Join(got[1].lenses, ",") != "contract,security" {
+		t.Fatalf("commitments[1] = %+v, want round 2 naming contract and security", got[1])
 	}
-	if got[1].lens != "security" || got[1].summary != "The payload carried a forbidden input." {
-		t.Fatalf("truncated verdict = %+v, want lens and summary recovered", got[1])
-	}
-	if !contaminationRe.MatchString(got[1].summary) {
-		t.Fatal("contamination not detected in a recovered summary")
-	}
-}
-
-func TestParseVerdictsRejectsBlocksThatAreNotVerdicts(t *testing.T) {
-	// Every one of these carries a "lens" field, and a transcript can hold any
-	// of them: a quoted verdict template, a lens nobody dispatches, a block with
-	// no verdict at all, and a truncated block naming no known lens.
-	text := fenced(`{"lens": "<contract|quality|security>", "verdict": "<satisfied|findings>"}`) +
-		fenced(`{"lens": "performance", "verdict": "satisfied", "summary": "Fast enough."}`) +
-		fenced(`{"lens": "contract", "summary": "No verdict field here."}`) +
-		"```json\n{\n  \"lens\": \"whatever\",\n  \"summary\": \"cut off\","
-	if got := parseVerdicts(text); len(got) != 0 {
-		t.Fatalf("parsed %d verdicts, want 0: %+v", len(got), got)
-	}
-}
-
-func TestReportsContamination(t *testing.T) {
-	cases := map[string]bool{
-		"The lens saw the coder's transcript, so its context was contaminated.": true,
-		// Word order varies; both readings are the same report.
-		"The lens was handed the coder's transcript, so its context was shared.": true,
-		"A shared context put the coder's reasoning in front of the lens.":       true,
-		"The payload carried a forbidden input.":                                 true,
-		// The negation belongs to the clause before it, not to the report.
-		"No must_fix findings, but the context was shared.": true,
-		// Negated phrasings carry the same stems and are not reports.
-		"No contamination: the lens saw the diff and the ticket only.": false,
-		"The review context was not contaminated.":                     false,
-		"No shared context, no forbidden inputs.":                      false,
-		"All acceptance criteria are met.":                             false,
-	}
-	for s, want := range cases {
-		if got := reportsContamination(s); got != want {
-			t.Fatalf("reportsContamination(%q) = %v, want %v", s, got, want)
-		}
-	}
-}
-
-func TestContaminationIgnoresNonVerdictProse(t *testing.T) {
-	// The merge text a run writes says this routinely; only verdict summaries
-	// are matched, so it never reaches the counter.
-	if len(parseVerdicts("All three lenses returned, no contamination reports.")) != 0 {
-		t.Fatal("prose read as a verdict block")
+	if got[0].offset >= got[1].offset || got[0].offset != strings.Index(text, "dispatching") {
+		t.Fatalf("offsets = %d/%d, want the lines' positions in the text", got[0].offset, got[1].offset)
 	}
 }
 

@@ -156,6 +156,9 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 			return fmt.Errorf("clear %s: %w", table, err)
 		}
 	}
+	if err := clearLenses(ctx, tx, agent, sum.SessionID); err != nil {
+		return err
+	}
 
 	durationMs := int64(0)
 	if !sum.StartTime.IsZero() && !sum.EndTime.IsZero() {
@@ -230,6 +233,9 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		return err
 	}
 	if err := writeSubagents(ctx, tx, sum); err != nil {
+		return err
+	}
+	if err := writeLenses(ctx, tx, sum, source); err != nil {
 		return err
 	}
 	if err := writeUnknown(ctx, tx, sum); err != nil {

@@ -503,8 +503,8 @@ func TestHumanInteractionsAreZeroForAHarnessOnlySpan(t *testing.T) {
 		EndTime:   base.Add(time.Hour),
 		Turns: []summary.Turn{
 			{Idx: 0, UserMessage: workInvocation("loom/harness-1111"), AssistantText: "Dispatching.", StartedAt: base},
-			{Idx: 1, UserMessage: notification(`{"lens": "contract", "verdict": "satisfied", "summary": "ok"}`), StartedAt: base.Add(time.Minute)},
-			{Idx: 2, UserMessage: notification(`{"lens": "quality", "verdict": "satisfied", "summary": "ok"}`), StartedAt: base.Add(2 * time.Minute)},
+			{Idx: 1, UserMessage: notification("toolu_c1", `{"lens": "contract", "verdict": "satisfied", "summary": "ok"}`), StartedAt: base.Add(time.Minute)},
+			{Idx: 2, UserMessage: notification("toolu_q1", `{"lens": "quality", "verdict": "satisfied", "summary": "ok"}`), StartedAt: base.Add(2 * time.Minute)},
 			{Idx: 3, UserMessage: "<local-command-stdout>On branch main</local-command-stdout>", StartedAt: base.Add(3 * time.Minute)},
 		},
 		ToolCalls: []summary.ToolCall{
@@ -554,7 +554,7 @@ func TestHumanInteraction(t *testing.T) {
 		{"typed behind a reminder", "<system-reminder>x</system-reminder>\nyes", true},
 		{"command-name first", "<command-name>/clear</command-name>", false},
 		{"command-message first", workInvocation("loom/x-1111"), false},
-		{"task notification", notification(`{"lens": "contract"}`), false},
+		{"task notification", notification("toolu_c1", `{"lens": "contract"}`), false},
 		{"local command stdout", "<local-command-stdout>ok</local-command-stdout>", false},
 		{"local command caveat", "<local-command-caveat>Caveat: ...</local-command-caveat>", false},
 		{"bash stdout", "<bash-stdout>ok</bash-stdout>", false},
@@ -580,8 +580,8 @@ func TestHumanInteraction(t *testing.T) {
 func TestCostReportRefusesAPrePricingSchema(t *testing.T) {
 	f := newFixture(t)
 	f.add(costSession())
-	// A v5 database holds runs but cannot price them; the compliance report
-	// still reads it, the cost report must not.
+	// A v5 database holds runs but cannot price them, and holds no lens
+	// responses; each report names the schema it needs.
 	db, err := sql.Open("sqlite", "file:"+f.path)
 	if err != nil {
 		t.Fatal(err)
@@ -595,8 +595,9 @@ func TestCostReportRefusesAPrePricingSchema(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "want 7") {
 		t.Fatalf("LoadCost on a v5 DB = %v, want an error naming schema 7", err)
 	}
-	if _, err := Load(f.path, time.Time{}, time.Time{}); err != nil {
-		t.Fatalf("Load on a v5 DB = %v, want the compliance report still served", err)
+	_, err = Load(f.path, time.Time{}, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "want 9") {
+		t.Fatalf("Load on a v5 DB = %v, want an error naming schema 9", err)
 	}
 }
 

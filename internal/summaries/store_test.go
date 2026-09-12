@@ -28,8 +28,8 @@ func TestOpenFreshDB(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != "8" {
-		t.Errorf("schema_version: got %q, want %q", v, "8")
+	if v != "9" {
+		t.Errorf("schema_version: got %q, want %q", v, "9")
 	}
 }
 

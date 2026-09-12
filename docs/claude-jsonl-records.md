@@ -102,7 +102,7 @@ Structured payloads that accompany the conversation but aren't model messages. T
 | `edited_text_file` | Record of an externally-edited file |
 | `hook_success` | Hook execution succeeded (newer CLI) |
 | `plan_mode` | Plan-mode state change |
-| `queued_command` | Command queued for later execution (newer CLI) |
+| `queued_command` | Command queued for later execution (newer CLI). Carries the queued text in `prompt`; a task notification that lands mid-turn is delivered this way rather than as a `user` record, and is where a background lens verdict often arrives (`docs/lens-responses.md`) |
 | `skill_listing` | Available skills listing |
 | `task_reminder` | Task-tracker reminder injection |
 
