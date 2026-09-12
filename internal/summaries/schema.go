@@ -4,6 +4,15 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 8: sessions gains parent_session_id and spawn_depth — the
+// spawning thread a Codex subagent transcript names in session_meta, NULL for
+// a top-level session and for every Claude session — and four tables for the
+// execution records docs/execution-records.md describes: runs, executions,
+// execution_diagnostics and execution_imports. Every v7 database has the
+// columns absent and the tables empty, and the watch-mode summarizer skips
+// sessions whose file is unchanged, so v7 reads as outdated until a
+// `loom summarize --rebuild` folds the transcripts and records in.
+//
 // schemaVersion 7: turns gains cache_creation_tokens, cache_creation_1h_tokens,
 // speed and usage_mixed; subagents gains model, speed, input_tokens,
 // output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -39,7 +48,7 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // commitsSchemaVersion is the version that introduced the commits table.
 // Deliberately pinned rather than tracked to schemaVersion: readers that need
@@ -82,11 +91,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     source_size       INTEGER,
     source_mtime      TEXT,
     summarized_at     TEXT,
+    parent_session_id TEXT,
+    spawn_depth       INTEGER,
     PRIMARY KEY (agent, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time);
 CREATE INDEX IF NOT EXISTS idx_sessions_git_remote ON sessions(git_remote);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 
 CREATE TABLE IF NOT EXISTS turns (
     agent             TEXT NOT NULL,
@@ -227,4 +239,68 @@ CREATE TABLE IF NOT EXISTS commits (
     PRIMARY KEY (agent, session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_commits_committed ON commits(committed_at);
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id           TEXT PRIMARY KEY,
+    ticket           TEXT,
+    runtime          TEXT,
+    agent            TEXT,
+    session_id       TEXT,
+    producer         TEXT,
+    started_at       TEXT,
+    ended_at         TEXT,
+    outcome          TEXT,
+    reporting_cutoff TEXT,
+    recorded_at      TEXT,
+    source_path      TEXT NOT NULL,
+    source_line      INTEGER NOT NULL,
+    first_seen       TEXT NOT NULL,
+    last_seen        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(agent, session_id);
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
+
+CREATE TABLE IF NOT EXISTS executions (
+    execution_id        TEXT PRIMARY KEY,
+    run_id              TEXT NOT NULL,
+    parent_execution_id TEXT,
+    execution_kind      TEXT,
+    agent               TEXT,
+    session_id          TEXT,
+    dispatch_id         TEXT,
+    stage               TEXT,
+    stage_occurrence    INTEGER,
+    lens                TEXT,
+    round               INTEGER,
+    attempt             INTEGER,
+    started_at          TEXT,
+    ended_at            TEXT,
+    outcome             TEXT,
+    producer            TEXT,
+    recorded_at         TEXT,
+    source_path         TEXT NOT NULL,
+    source_line         INTEGER NOT NULL,
+    first_seen          TEXT NOT NULL,
+    last_seen           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_executions_run ON executions(run_id);
+CREATE INDEX IF NOT EXISTS idx_executions_session ON executions(agent, session_id);
+
+CREATE TABLE IF NOT EXISTS execution_diagnostics (
+    source_path  TEXT NOT NULL,
+    source_line  INTEGER NOT NULL,
+    code         TEXT NOT NULL,
+    run_id       TEXT,
+    execution_id TEXT,
+    detail       TEXT,
+    PRIMARY KEY (source_path, source_line, code)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_diagnostics_run ON execution_diagnostics(run_id);
+
+CREATE TABLE IF NOT EXISTS execution_imports (
+    source_path TEXT PRIMARY KEY,
+    size        INTEGER,
+    mtime       TEXT,
+    imported_at TEXT
+);
 `

@@ -22,8 +22,8 @@ type sessionMetaPayload struct {
 	CLIVersion       string `json:"cli_version"`
 	// Source is a string for a top-level session but an object describing the
 	// spawn (parent thread, depth, agent path) when codex-cli >= 0.153.4 runs
-	// the session as a subagent. Kept raw: nothing reads it yet, and a typed
-	// string here discarded every subagent transcript.
+	// the session as a subagent. Kept raw because a typed string here
+	// discarded every subagent transcript; parentSpawn reads the object form.
 	Source           json.RawMessage `json:"source"`
 	ModelProvider    string `json:"model_provider"`
 	BaseInstructions json.RawMessage `json:"base_instructions"`
@@ -32,6 +32,31 @@ type sessionMetaPayload struct {
 		CommitHash     string `json:"commit_hash"`
 		RepositoryURL  string `json:"repository_url"`
 	} `json:"git"`
+}
+
+// spawnSource is the object form of session_meta.source: the parent thread
+// that spawned this session as a subagent and how deep it sits.
+type spawnSource struct {
+	Subagent struct {
+		ThreadSpawn struct {
+			ParentThreadID string `json:"parent_thread_id"`
+			Depth          int    `json:"depth"`
+		} `json:"thread_spawn"`
+	} `json:"subagent"`
+}
+
+// parentSpawn returns the parent thread id and depth when source carries the
+// object form, and "" for the string form, an absent field, or anything
+// else: the spawn is optional metadata and must never fail the session.
+func parentSpawn(source json.RawMessage) (string, int) {
+	if len(source) == 0 || source[0] != '{' {
+		return "", 0
+	}
+	var s spawnSource
+	if err := json.Unmarshal(source, &s); err != nil {
+		return "", 0
+	}
+	return s.Subagent.ThreadSpawn.ParentThreadID, s.Subagent.ThreadSpawn.Depth
 }
 
 // turnContextPayload starts a new model turn. Only the fields we currently

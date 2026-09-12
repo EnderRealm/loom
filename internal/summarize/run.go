@@ -98,8 +98,61 @@ func sweep(ctx context.Context, st *summaries.Store, receivedDir string,
 		filepath.Join(receivedDir, "claude-code"), force, verbose, &r)
 	walkAgent(ctx, st, summary.AgentCodex,
 		filepath.Join(receivedDir, "codex-cli"), force, verbose, &r)
+	walkExecutions(ctx, st, filepath.Join(receivedDir, summaries.ExecutionsAgent), force, &r)
 	r.duration = time.Since(start)
 	return r
+}
+
+// walkExecutions folds every shipped execution-record registry
+// (received/loom-executions/<host>/*.jsonl) into the runs tables. The same
+// currency rule as sessions: a file whose size and mtime are unchanged since
+// its last import is skipped. Log lines carry counts and the path only —
+// never a record body.
+func walkExecutions(ctx context.Context, st *summaries.Store, root string,
+	force bool, r *sweepResult) {
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return
+	}
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		r.seen++
+		info, err := d.Info()
+		if err != nil {
+			r.errored++
+			return nil
+		}
+		if !force {
+			current, err := st.ExecutionImportCurrent(path, info.Size(), info.ModTime())
+			if err != nil {
+				log.Printf("check %s: %v", path, err)
+			} else if current {
+				r.skipped++
+				return nil
+			}
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			log.Printf("executions %s: %v", path, err)
+			r.errored++
+			return nil
+		}
+		defer f.Close()
+		counts, err := st.ImportExecutions(ctx, path, f, info.Size(), info.ModTime())
+		if err != nil {
+			log.Printf("executions %s: %v", path, err)
+			r.errored++
+			return nil
+		}
+		log.Printf("executions %s runs=%d executions=%d diagnostics=%d",
+			path, counts.Runs, counts.Executions, counts.Diagnostics)
+		r.parsed++
+		return nil
+	})
 }
 
 func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,

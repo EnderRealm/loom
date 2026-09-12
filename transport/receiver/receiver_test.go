@@ -256,3 +256,35 @@ func TestIngestSessionPathUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// The execution-record registry ships under its own agent with the host as
+// the project and no identity or subagent metadata; the receiver is generic
+// over the agent segment, so it lands like any transcript.
+func TestIngestExecutionRegistryLandsUnderItsAgent(t *testing.T) {
+	storage := t.TempDir()
+	srv := &server{storage: storage}
+
+	line := `{"v":1,"kind":"run","run_id":"r1"}`
+	w := ingest(t, srv, wire.IngestRequest{
+		Agent:      "loom-executions",
+		Project:    "steves-mbp_local",
+		SessionID:  "executions",
+		FromOffset: 0,
+		ToOffset:   int64(len(line) + 1),
+		Lines:      []string{line},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %q", w.Code, w.Body.String())
+	}
+	dir := filepath.Join(storage, "loom-executions", "steves-mbp_local")
+	data, err := os.ReadFile(filepath.Join(dir, "executions.jsonl"))
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	if string(data) != line+"\n" {
+		t.Errorf("registry = %q, want %q", data, line+"\n")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "executions.meta.json")); !os.IsNotExist(err) {
+		t.Errorf("identity sidecar written for a registry with no project identity: %v", err)
+	}
+}

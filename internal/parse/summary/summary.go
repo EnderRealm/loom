@@ -34,6 +34,15 @@ type SessionSummary struct {
 	StartTime time.Time
 	EndTime   time.Time
 
+	// ParentSessionID names the session that spawned this one, when the
+	// transcript itself says so: Codex records it in
+	// session_meta.source.subagent.thread_spawn. Empty for a top-level
+	// session and for every Claude session, whose subagents are folded into
+	// the parent's Subagents instead. SpawnDepth is the depth the same record
+	// carries and is meaningful only when ParentSessionID is set.
+	ParentSessionID string
+	SpawnDepth      int
+
 	InputTokens     int64
 	OutputTokens    int64
 	CacheReadTokens int64

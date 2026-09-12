@@ -1,0 +1,2 @@
+{"v":1,"kind":"run","run_id":"run-late","ticket":"loom/late-3333","runtime":"claude-code","agent":"claude-code","session_id":"sess-late","producer":"warp/work@1.4.0","started_at":"2026-09-10T14:00:00Z","recorded_at":"2026-09-10T14:00:00Z"}
+{"v":1,"kind":"execution","execution_id":"root-late","run_id":"run-late","execution_kind":"root","agent":"claude-code","session_id":"sess-late","started_at":"2026-09-10T14:00:00Z","recorded_at":"2026-09-10T14:00:00Z"}

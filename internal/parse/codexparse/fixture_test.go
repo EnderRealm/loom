@@ -109,6 +109,10 @@ func TestSessionMetaSourceShapes(t *testing.T) {
 	if sub.CLIVersion != "0.153.4" {
 		t.Errorf("CLIVersion: got %q, want %q", sub.CLIVersion, "0.153.4")
 	}
+	if sub.ParentSessionID != "sess-parent" || sub.SpawnDepth != 1 {
+		t.Errorf("spawn: got %q depth %d, want sess-parent depth 1",
+			sub.ParentSessionID, sub.SpawnDepth)
+	}
 
 	// The drifted line (a numeric call_id) sits mid-file: the lines after it
 	// still land, and the record itself is counted rather than silent.
@@ -149,6 +153,10 @@ func TestSessionMetaSourceShapes(t *testing.T) {
 	}
 	if top.CLIVersion != "0.153.4" {
 		t.Errorf("CLIVersion: got %q, want %q", top.CLIVersion, "0.153.4")
+	}
+	if top.ParentSessionID != "" || top.SpawnDepth != 0 {
+		t.Errorf("spawn: got %q depth %d, want none for the string source",
+			top.ParentSessionID, top.SpawnDepth)
 	}
 	if len(top.Unknown) != 0 {
 		t.Errorf("Unknown len: got %d, want 0", len(top.Unknown))

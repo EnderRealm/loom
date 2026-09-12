@@ -180,6 +180,9 @@ func (st *state) handleSessionMeta(env envelope, ts time.Time) error {
 	if st.s.GitBranch == "" {
 		st.s.GitBranch = p.Git.Branch
 	}
+	if st.s.ParentSessionID == "" {
+		st.s.ParentSessionID, st.s.SpawnDepth = parentSpawn(p.Source)
+	}
 	if st.s.StartTime.IsZero() {
 		st.s.StartTime = parseTime(p.Timestamp)
 		if st.s.StartTime.IsZero() {

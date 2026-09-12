@@ -1,0 +1,13 @@
+{"v":2,"kind":"run","run_id":"run-future","ticket":"loom/future-0001","started_at":"2026-09-10T12:00:00Z"}
+{"v":1,"kind":"banana","run_id":"run-banana","execution_id":"exec-banana"}
+{"v":1,"kind":"execution","run_id":"run-noid","execution_kind":"root","agent":"claude-code","session_id":"sess-noid"}
+{"v":1,"kind":"run","run_id":"run-bad-outcome","ticket":"loom/bad-0002","outcome":"exploded","started_at":"2026-09-10T12:00:00Z"}
+{"v":1,"kind":"run","run_id":"run-bad-time","ticket":"loom/bad-0003","started_at":"yesterday afternoon"}
+{not json at all
+{"v":1,"kind":"execution","execution_id":"exec-orphan","run_id":"run-undeclared","execution_kind":"root","agent":"claude-code","session_id":"sess-orphan","started_at":"2026-09-10T12:05:00Z"}
+{"v":1,"kind":"run","run_id":"run-ok","ticket":"loom/ok-0004","runtime":"claude-code","agent":"claude-code","session_id":"sess-ok","started_at":"2026-09-10T12:10:00Z"}
+{"v":1,"kind":"execution","execution_id":"exec-ok-root","run_id":"run-ok","execution_kind":"root","agent":"claude-code","session_id":"sess-ok","started_at":"2026-09-10T12:10:00Z"}
+{"v":1,"kind":"execution","execution_id":"exec-ok-stray","run_id":"run-ok","parent_execution_id":"exec-never-declared","execution_kind":"lens","lens":"quality","round":1,"attempt":1,"started_at":"2026-09-10T12:12:00Z"}
+{"v":1,"kind":"run","run_id":"run-other","ticket":"loom/other-0005","runtime":"claude-code","agent":"claude-code","session_id":"sess-other","started_at":"2026-09-10T12:20:00Z"}
+{"v":1,"kind":"execution","execution_id":"exec-other-root","run_id":"run-other","execution_kind":"root","agent":"claude-code","session_id":"sess-other","started_at":"2026-09-10T12:20:00Z"}
+{"v":1,"kind":"execution","execution_id":"exec-other-crossed","run_id":"run-other","parent_execution_id":"exec-ok-root","execution_kind":"subagent","agent":"claude-code","session_id":"sess-other-child","started_at":"2026-09-10T12:22:00Z"}

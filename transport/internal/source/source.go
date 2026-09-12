@@ -80,7 +80,7 @@ type Adapter interface {
 // source dir → empty slice), so the set is static. Per-adapter opt-out is a
 // later concern.
 func Adapters() []Adapter {
-	return []Adapter{claudeAdapter{}, codexAdapter{}}
+	return []Adapter{claudeAdapter{}, codexAdapter{}, executionsAdapter{}}
 }
 
 // ReadDeltaBytes returns the raw complete-line byte range [from, toOffset) of

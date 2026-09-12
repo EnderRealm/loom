@@ -214,6 +214,52 @@ func Load(dbPath string, since, until time.Time) (*Report, error) {
 	return rep, nil
 }
 
+// Invocation is one recognized /work invocation and the span it owns: the
+// turns from TurnIdx through EndIdx, and the time from StartedAt to EndsAt.
+// A run ends at the next invocation in the same session, else at the end of
+// the session; EndIdx is math.MaxInt and EndsAt the session end for the last.
+type Invocation struct {
+	Agent     string
+	SessionID string
+	TurnIdx   int
+	EndIdx    int
+	Ticket    string
+	StartedAt time.Time
+	EndsAt    time.Time
+}
+
+// Invocations returns every /work invocation recognized from transcript
+// content, under the same span rule Load and LoadCost apply. Exported for
+// internal/runs, which synthesizes historical runs from it rather than
+// carrying a second copy of the recognition.
+func Invocations(db *sql.DB) ([]Invocation, error) {
+	invocations, err := loadInvocations(db)
+	if err != nil {
+		return nil, err
+	}
+	var out []Invocation
+	for _, session := range groupBySession(invocations) {
+		for i, inv := range session {
+			endIdx := math.MaxInt
+			endsAt := inv.sessionEnd
+			if i+1 < len(session) {
+				endIdx = session[i+1].idx - 1
+				endsAt = session[i+1].startedAt
+			}
+			out = append(out, Invocation{
+				Agent:     inv.agent,
+				SessionID: inv.sessionID,
+				TurnIdx:   inv.idx,
+				EndIdx:    endIdx,
+				Ticket:    inv.ticket,
+				StartedAt: inv.startedAt,
+				EndsAt:    endsAt,
+			})
+		}
+	}
+	return out, nil
+}
+
 // invocationRow is one /work invocation turn plus the identity it belongs to.
 type invocationRow struct {
 	agent        string

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -39,7 +40,10 @@ type Store struct {
 // if it doesn't exist. Concurrent writers from the same process share one
 // *Store; cross-process writers should still avoid stepping on each other.
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)" +
+	// A file: URI reads '#' and '?' as fragment and query delimiters, so a
+	// path carrying either would be cut short and the database opened
+	// somewhere else; the escaped form is decoded by SQLite's URI parser.
+	dsn := "file:" + (&url.URL{Path: path}).EscapedPath() + "?_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)" +
 		"&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
@@ -158,6 +162,12 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		durationMs = sum.EndTime.Sub(sum.StartTime).Milliseconds()
 	}
 	errCount := len(sum.Errors)
+	// Both NULL together for a session nothing spawned: a depth of 0 there
+	// would read as a recorded top-level placement rather than as unknown.
+	var spawnDepth any
+	if sum.ParentSessionID != "" {
+		spawnDepth = sum.SpawnDepth
+	}
 
 	// The DELETE-first loop above already cleared (agent, session_id) from
 	// every table including sessions, so a plain INSERT is sufficient and
@@ -170,7 +180,7 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		    pr_url, start_time, end_time, duration_ms, turn_count,
 		    tool_call_count, error_count, compacted, input_tokens,
 		    output_tokens, cache_read_tokens, source_path, source_size,
-		    source_mtime, summarized_at
+		    source_mtime, summarized_at, parent_session_id, spawn_depth
 		) VALUES (
 		    ?, ?, ?, ?, ?, ?,
 		    ?, ?,
@@ -178,7 +188,7 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		    ?, ?, ?, ?, ?,
 		    ?, ?, ?, ?,
 		    ?, ?, ?, ?,
-		    ?, ?
+		    ?, ?, ?, ?
 		)
 	`,
 		agent, sum.SessionID, source.Project, sum.Cwd, source.CwdRaw, source.GitRemote,
@@ -192,6 +202,7 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		sum.OutputTokens, sum.CacheReadTokens,
 		source.Path, source.Size,
 		isoOrNull(source.Mtime), time.Now().UTC().Format(time.RFC3339Nano),
+		strOrNull(sum.ParentSessionID), spawnDepth,
 	)
 	if err != nil {
 		return fmt.Errorf("insert sessions: %w", err)

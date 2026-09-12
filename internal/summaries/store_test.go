@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,8 +28,8 @@ func TestOpenFreshDB(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != "7" {
-		t.Errorf("schema_version: got %q, want %q", v, "7")
+	if v != "8" {
+		t.Errorf("schema_version: got %q, want %q", v, "8")
 	}
 }
 
@@ -328,5 +329,67 @@ func TestWriteSubagentsStoresUsageOrNull(t *testing.T) {
 	if u.model.Valid || u.speed.Valid || u.input.Valid || u.output.Valid ||
 		u.cacheRead.Valid || u.cacheCreation.Valid || u.cacheCreation1h.Valid || u.mixed.Valid {
 		t.Errorf("subagent 1: got %+v, want every usage column NULL", u)
+	}
+}
+
+// TestWriteSessionStoresSpawnOrNull pins parent_session_id and spawn_depth:
+// a Codex subagent session lands with both, and a session nothing spawned
+// lands NULL in both so a depth of 0 never reads as a recorded placement.
+func TestWriteSessionStoresSpawnOrNull(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	for _, s := range []*summary.SessionSummary{
+		{SessionID: "spawned", Agent: summary.AgentCodex, StartTime: now, ParentSessionID: "sess-parent", SpawnDepth: 1},
+		{SessionID: "top", Agent: summary.AgentCodex, StartTime: now},
+		{SessionID: "claude", Agent: summary.AgentClaude, StartTime: now},
+	} {
+		if err := st.WriteSummary(context.Background(), s, SourceInfo{Project: "p"}); err != nil {
+			t.Fatalf("WriteSummary %s: %v", s.SessionID, err)
+		}
+	}
+
+	read := func(sessionID string) (sql.NullString, sql.NullInt64) {
+		t.Helper()
+		var parent sql.NullString
+		var depth sql.NullInt64
+		if err := st.DB().QueryRow(`SELECT parent_session_id, spawn_depth FROM sessions WHERE session_id = ?`,
+			sessionID).Scan(&parent, &depth); err != nil {
+			t.Fatalf("read %s: %v", sessionID, err)
+		}
+		return parent, depth
+	}
+	parent, depth := read("spawned")
+	if parent.String != "sess-parent" || !depth.Valid || depth.Int64 != 1 {
+		t.Errorf("spawned: parent = %v depth = %v, want sess-parent 1", parent, depth)
+	}
+	for _, id := range []string{"top", "claude"} {
+		parent, depth := read(id)
+		if parent.Valid || depth.Valid {
+			t.Errorf("%s: parent = %v depth = %v, want both NULL", id, parent, depth)
+		}
+	}
+}
+
+// TestOpenEscapesURIDelimiters pins the DSN: a path carrying '#' or '?' is
+// opened where it says, not cut at the fragment or query delimiter.
+func TestOpenEscapesURIDelimiters(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "loom #1? x")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "summaries.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	st.Close()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database not at %s: %v", path, err)
 	}
 }
