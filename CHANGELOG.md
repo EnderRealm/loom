@@ -6,6 +6,8 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-09-12 — Session metrics baseline
+
 ### Added
 
 - Attribution stamps: a producer that runs an agent in a throwaway
@@ -25,8 +27,201 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   storage slug still names the directory the agent ran in; identity is
   the seam that moves. Producer contract in
   `docs/attribution-stamps.md`.
+- `scripts/repair-attribution.py` re-applies attribution stamps to the
+  Codex identity sidecars already on disk. The capture pass writes identity
+  only alongside new transcript bytes, so a session captured before stamps
+  existed keeps the throwaway cwd in its `.meta.json` and nothing revisits
+  it. The script walks `transport/staging/codex-cli` and
+  `received/codex-cli`, applies `attribution.go`'s rule as written —
+  ephemeral cwd, newest stamp at or before the session's `session_meta`
+  timestamp, newest stamp when that is unknown, nothing when every stamp
+  postdates the session — and rewrites each matched sidecar with the
+  stamped checkout and its resolved remote, in the same field order and
+  omitempty shape as `wire.ProjectIdentity`. Dry run by default; `--apply`
+  writes, atomically and 0600, and exits non-zero if any write failed. It
+  touches nothing else: not transcripts, cursors, offsets or the summary
+  DB.
+- `loom cost-report` reports what each `/work` run in `summaries.db` cost,
+  as JSON over the same `--since`/`--until`/`--db` flags as `work-report`:
+  wall clock from the invocation to the run's own commit, active time (turn
+  wall clock plus tool duration inside the span), turns, tokens, tool calls
+  by kind, subagents dispatched and their summed duration. Session duration
+  cannot stand in for ticket cost — a third of the sessions that commit a
+  ticket commit two or more — so cost is an intra-session span, and
+  `work-report` already recognizes those spans from transcript content, so
+  the anchor needs no new instrumentation and covers history nobody
+  instrumented. Null means unmeasurable throughout: an abandoned run never
+  runs its span to the session end. Whether a run committed and when are
+  answered separately on purpose — a ticket-named commit anywhere proves
+  the run committed, but only a commit inside the run's own window can time
+  it, or `/work` re-invoked on one ticket would charge the first run with
+  the second's span.
+- Each cost-report run carries the conditions it was measured under: every
+  distinct model, reasoning effort and CLI version its turns recorded, the
+  errors inside its span, and how many times the human interacted. A cost
+  trend is unactionable without them — output tokens that grew between two
+  windows say nothing if the model or the effort changed, or the human
+  simply intervened more. The transcripts already carry the first three per
+  record (Claude on every assistant record, Codex on every `turn_context`)
+  but the summary DB kept them per session, so `turns` gains `model`,
+  `effort` and `cli_version` (schema 6, NULL where the transcript carried
+  none). Claude's API-error placeholder stamps `<synthetic>` as its model
+  and is skipped rather than reported as a model that ran. A human
+  interaction is a rule rather than a field: a turn counts when its stored
+  user message, after any leading system-reminder blocks, is non-empty and
+  is neither a harness envelope — slash-command tags, task notifications,
+  local command output, Codex's expanded skill body or preamble — nor a
+  `/work` invocation in any form. Tool results and Claude's meta skill body
+  never open a turn, so they never reach the rule. One function over the
+  shared `user_message` column, so Claude and Codex turns are judged
+  identically.
+- Each cost-report run is priced. Transcripts carry tokens and never cost,
+  so `cost_usd` and `subagent_cost_usd` are computed from
+  `internal/pricing/rates.json`, keyed by model and effective date and
+  looked up at the run's invocation time so an old window is never repriced
+  at today's rate. Cache reads and writes price at their own rates; a write
+  is split by TTL from the `usage.cache_creation` breakdown, and a turn at
+  `speed: fast` prices at the fast rates with the cache multipliers stacked
+  on them. Anything that cannot be priced nulls the figure and names the
+  cause in `pricing_warnings` — an unknown model or date, a turn with no
+  model, a turn or dispatch whose records disagree on model or speed, fast
+  mode without a fast rate, a dispatch with no transcript — rather than
+  falling back to a default or to zero; a span with nothing to price costs
+  0. Subagent cost is exact, not estimated: each dispatch's own transcript
+  carries a full usage split and model, so the parser sums them into a
+  per-dispatch usage record the store persists. That and the per-turn
+  cache-creation and speed columns are schema 7, and `cost-report` refuses
+  an older DB until `loom summarize --rebuild`. The table's five standard
+  rates are required: they decode as pointers and a missing, misspelled or
+  null one is rejected naming the entry and the field, where a plain
+  float64 decode had turned it into 0 and priced that bucket free with no
+  warning. An explicit 0 still parses.
+- Execution records, the v1 contract in `docs/execution-records.md`: a
+  producer appends a `run` record per `/work` or Weft invocation and an
+  `execution` record per unit of work to `$LOOM_HOME/executions.jsonl`, and
+  they ship through the existing capture path under the agent
+  `loom-executions`. One `/work` run is more than one transcript — the
+  orchestrating session dispatches Claude subagents, those dispatch Codex
+  children, the security lens is routed into a throwaway directory — and
+  nothing in the transcripts says which run any of them belongs to. Schema
+  8 adds `runs`, `executions`, `execution_diagnostics` and
+  `execution_imports`, plus `sessions.parent_session_id` and `spawn_depth`
+  read from Codex `session_meta`. The importer merges by id, keeps an
+  execution's run immutable, and writes a diagnostic for every record it
+  rejects or cannot associate, carrying ids only. `internal/runs` reads the
+  hierarchy back, synthesizing transcript-recognized runs for history with
+  children drawn only from explicit evidence. The `summaries.db` path is
+  now escaped in the `file:` DSN, since a `#` in a temp dir truncated it
+  and opened the wrong database during tests.
+- Review-lens verdicts are kept whole. A `/work` run fans out to three
+  lenses and each answers with one fenced `json` block, which reached the
+  summary tables only through the 800-character tool-result cut that lands
+  inside most verdicts' criteria lists. Both parsers now read every fenced
+  lens block off the full record before the cut, and schema 9 adds
+  `lens_responses` (raw block, decoded fields, structured context, criteria
+  and findings JSON, source path and line) plus normalized `lens_criteria`
+  and `lens_findings`; `response_id` is a hash of the transcript position,
+  so a re-fold rewrites the same rows rather than duplicating them.
+  `internal/parse/lens` is the one extractor: a block is parsed only when
+  it is a JSON object naming a known lens and verdict whose context,
+  criteria and findings fit the schema, and anything else is kept as
+  malformed evidence with a reason. `workreport.Lenses` reads a run back as
+  attempts keyed by lens, round and attempt — missing, dispatched, failed,
+  responded or parsed, with superseded and late flags. A response places
+  only through provenance: a dispatch id, a router call that ran alone, or
+  an exclusive `cat` of the router's own redirect path. Quoted blocks in
+  user text, compaction summaries, file reads and compound shell commands
+  are stored but never answer an attempt. The compliance report's
+  contamination and unverified-criteria metrics now come from those rows,
+  and `runs.Run` carries the attempts for its transcript. See
+  `docs/lens-responses.md`.
+
+### Changed
+
+- `summaries.db` moves from schema 4, which 1.6.0 wrote, to schema 9:
+  a populated `subagents` table (5), per-turn `model`/`effort`/`cli_version`
+  (6), per-turn cache-creation tokens and speed plus per-dispatch usage
+  (7), the execution-record tables and `sessions.parent_session_id`/
+  `spawn_depth` (8), and the lens-response tables (9). Each step leaves an
+  existing database with columns absent or tables empty, and the watch-mode
+  summarizer skips sessions whose file is unchanged, so `Open` returns
+  `ErrSchemaOutdated` and **`loom summarize --rebuild` is required after
+  upgrading**. The summary DB is disposable; the rebuild re-folds it from
+  `~/.loom/received/`.
+- The truth extractor asks for reusable claims instead of volume. The
+  prompt instructed the model to over-extract — a 3–6 floor, "if you find
+  fewer than 2 you are being too conservative", "the human reviewer
+  filters" — and production ran at the instructed rate: 5.4 candidates per
+  session, 1,201 active candidates from 222 sessions, none stating a
+  reusable pattern, 849 of 965 lexical clusters singletons, and the
+  reviewer that was supposed to filter had promoted 16 artifacts in total.
+  The floor is replaced with a soft ceiling of two and zero stated as the
+  normal output, tied to the existing `NO_TRUTHS` path. The Reusable
+  criterion gains a reader test — a claim whose only reader is someone
+  already editing that file fails it — plus a file-local-facts exclusion,
+  and the reframe rule gains a class-elevation step, so a mechanism is
+  either raised to the rule it instances or dropped, guarded against
+  widening a class the input never evidenced. The two `INPUT_GUIDANCE`
+  constants carried the same pressure and are substituted into both
+  extractors, since `build_prompt` selects them by input format rather than
+  extraction type; they are reduced to type-neutral navigation hints so the
+  decision prompt is not left carrying a damper against its own yield
+  floor. Measured over the five sessions in `extractors/eval-data/`: 21
+  candidates before, 6 after, and all six survivors state their reach
+  explicitly rather than describing one file.
 
 ### Fixed
+
+- Subagent durations are measured from the dispatch's own transcript. The
+  `subagents` table has been in the schema since v2 and held 0 rows across
+  2,185 sessions: the parser tracked sidechain messages and never wrote the
+  record, and the only fallback, `tool_calls.duration_ms` for
+  `tool_kind='task'`, stopped measuring the work when the harness moved to
+  background agents — the call returns on dispatch, so the recorded value
+  was the acknowledgement. Each shipped subagent transcript is now folded
+  into its parent's summary and the duration taken from that transcript's
+  own first-to-last record span; the join to the dispatch is the sidecar's
+  `tool_use_id` against the parent's Task call, which also gives
+  `parent_turn_idx`, and `agent_type` comes from the sidecar rather than
+  the description, which `tool_calls.key_arg` already holds. Rows are one
+  per dispatch, not per transcript: a Task call no transcript claimed still
+  gets a row with a null duration, so "not measured" stays distinguishable
+  from "returned instantly" — the distinction the whole measurement turns
+  on. A transcript that fails to parse is bumped onto the parent's Unknown
+  under a named marker rather than silently producing another NULL.
+  Currency tracks the newer of the parent's mtime and its subagent
+  transcripts', since a background dispatch outlives the parent's last
+  record by construction and keying on the parent alone left a truncated
+  span until the next rebuild. Measured over the live corpus rebuilt into
+  an isolated `LOOM_HOME`: September's share of subagent durations under 5
+  seconds falls from 865 of 906 (95%, the acknowledgement) to 4 of 918
+  (0.4%, the work); mean reviewer 223s, mean coder 2579s. Schema 5.
+
+- Extracted candidates are filed under the scope they declare. The model
+  already names the project a truth is *about* in the candidate's `scope:`,
+  and it is routinely not the project the session ran in — a loom session
+  that debugs tk discovers a tk truth — but nothing read that value:
+  `emit_candidates` wrote unconditionally to `base_dir / args.scope`,
+  leaving ~200 candidates in a directory their own frontmatter disagreed
+  with, which `truths/_schema.md` requires to match. `route_candidate_scope`
+  files each candidate by its declaration, gated on `truths/<declared>/`
+  existing — the same gate `scopeInStore` applies on the Go side, because
+  the store's write path creates parent directories and an ungated route
+  would onboard scopes nobody opted into. A declaration that is unusable,
+  unonboarded, or that the filesystem cannot answer for keeps the candidate
+  under `--scope` carrying `scope_mismatch:`, the one reviewer channel that
+  needs no Go change since the TUI renders a candidate's body verbatim
+  while `Artifact.Scope` comes from the directory. The declaration is model
+  output steered by a transcript loom did not author, so it clears
+  `NAME_PATTERN` and `SCOPE_NAME_LIMIT` before it is joined to a path — an
+  unbounded name makes the lookup raise `ENAMETOOLONG` rather than report
+  absence, which pathlib does not swallow — and every echo of it is
+  redacted before it is truncated. A model-emitted `scope_mismatch:` is
+  stripped so the key in a stored file is always loom's own verdict. The
+  run's `log.md` entry and commit subject now name every scope a run filed
+  under, and both extractor templates stop asking for "the session's
+  project field", the wording that made the value ambiguous now that it
+  routes. See `docs/knowledge-scopes.md`.
 
 - Claude Code subagent transcripts never shipped. The Claude adapter
   listed only the `.jsonl` files sitting directly in a project

@@ -32,7 +32,7 @@ extractors/results/
 extractors/results-raw/
 extractors/results-summarizer/
 extractors/results-twostage/
-extractors/__pycache__/
+__pycache__/
 
 # Obsidian vault: per-user / churny state
 knowledge/.obsidian/workspace.json
