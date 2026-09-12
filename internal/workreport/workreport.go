@@ -11,7 +11,7 @@
 // The same run spans answer a second question — see LoadCost, which reports what
 // each run cost in turns, tokens, tools, subagents and time, and under what
 // conditions: model, effort, CLI version, errors and human interactions. What
-// counts as a human interaction is defined once, in humanInteraction, and
+// counts as a human interaction is defined once, in HumanInteraction, and
 // applied to Claude and Codex turns alike.
 package workreport
 
@@ -156,10 +156,10 @@ func Load(dbPath string, since, until time.Time) (*Report, error) {
 	}
 	defer db.Close()
 
-	if v := schemaVersionOf(db); v < requiredSchemaVersion {
+	if v := SchemaVersionOf(db); v < requiredSchemaVersion {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, requiredSchemaVersion)
 	}
-	if v := schemaVersionOf(db); v < lensSchemaVersion {
+	if v := SchemaVersionOf(db); v < lensSchemaVersion {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the lens_responses table (want %d) — run `loom summarize --rebuild`", v, lensSchemaVersion)
 	}
 
@@ -789,10 +789,10 @@ func parseTime(s sql.NullString) time.Time {
 	return t
 }
 
-// schemaVersionOf reads the DB's schema marker. A local copy of the summaries
+// SchemaVersionOf reads the DB's schema marker. A local copy of the summaries
 // package's own reader: this package opens the database read-only for itself
 // and needs nothing else from that package's internals.
-func schemaVersionOf(db *sql.DB) int {
+func SchemaVersionOf(db *sql.DB) int {
 	var v sql.NullString
 	if err := db.QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		return 0

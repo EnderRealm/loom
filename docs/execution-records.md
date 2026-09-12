@@ -102,6 +102,15 @@ holds more than one recognized run is listed unresolved under each of them
 with an `ambiguous_parent` diagnostic rather than placed by time. A session
 with a `run` record is not re-recognized: the record wins.
 
+`loom run-report --run <id>` is the read surface over that tree: one JSON
+document with the run's tree, unresolved executions and diagnostics as
+`internal/runs` reads them, and parent-only, descendant and total metrics
+metered from each execution's transcript — every transcript counted once,
+outcome taken from the record alone, and whatever the evidence does not cover
+(a session not folded, an execution still pending, a dispatch with no usage or no measured duration)
+named as a telemetry gap rather than reported as zero. It takes a declared
+`run_id` or a synthesized `transcript:<agent>:<session>:<turn>` id.
+
 **Rejected records.** A record with an unknown `v`, an unknown `kind`, a
 missing required id, a value outside an enum, or a timestamp that is not RFC
 3339 is skipped and a diagnostic written to `execution_diagnostics` with the

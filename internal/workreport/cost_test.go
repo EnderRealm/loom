@@ -570,8 +570,8 @@ func TestHumanInteraction(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := humanInteraction(c.msg); got != c.want {
-				t.Fatalf("humanInteraction(%q) = %v, want %v", c.msg, got, c.want)
+			if got := HumanInteraction(c.msg); got != c.want {
+				t.Fatalf("HumanInteraction(%q) = %v, want %v", c.msg, got, c.want)
 			}
 		})
 	}

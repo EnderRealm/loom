@@ -6,6 +6,29 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `loom run-report --run <id>` and `internal/runreport`: one JSON document
+  per run measuring everything attributable to it. `cost-report` meters the
+  parent span and the subagent rows it can see; this reads the execution tree
+  `internal/runs` assembles and meters every execution's transcript once —
+  nested children, routed lenses, Weft stage retries — into parent-only,
+  descendant and total scopes, with per-execution, per-stage, per-lens and
+  per-attempt breakdowns and the tree, unresolved list and diagnostics
+  rendered in the output. Tokens stay per runtime under a `cache_semantics`
+  label so a Codex cache read, recorded inside its input, is never counted
+  twice; failures are classed by source (`tool`, `api`, `process`, `other`)
+  apart from `stop_hook` signals; wall clock, summed execution time, tool time
+  and `cost-report`'s `active_ms` are reported as four named measures, the
+  last with its overlap semantics beside it. Outcome comes from the run record
+  alone (`completed`, `failed`, `stopped`, `running`, `unknown`) and telemetry
+  completeness is reported separately, with `gaps` naming each session not
+  folded, execution still pending or dispatch with no usage rather than
+  reporting zero. A model with no rate leaves cost null and every other
+  metric standing. `workreport` exports the pricing helpers and
+  `HumanInteraction`, and `runs` exports `SpanningInvocation`, so the report
+  shares those rules rather than copying them.
+
 ## [1.7.0] — 2026-09-12 — Session metrics baseline
 
 ### Added

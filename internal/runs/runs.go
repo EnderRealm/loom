@@ -297,7 +297,7 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 		return nil, err
 	}
 	attach(run, nodes)
-	if inv, ok := spanningInvocation(invocations, row.agent, row.sessionID, parseTime(row.startedAt)); ok {
+	if inv, ok := SpanningInvocation(invocations, row.agent, row.sessionID, parseTime(row.startedAt)); ok {
 		run.Lenses, err = workreport.Lenses(db, inv)
 		if err != nil {
 			return nil, err
@@ -306,10 +306,12 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 	return run, nil
 }
 
-// spanningInvocation picks the invocation a recorded run's lens attempts are
-// read from. None matching is not a diagnostic: the run's transcript simply
-// holds no recognized /work invocation to read them under.
-func spanningInvocation(invocations []workreport.Invocation, agent, sessionID string, startedAt time.Time) (workreport.Invocation, bool) {
+// SpanningInvocation picks the invocation a recorded run's lens attempts are
+// read from: the only one in the session, or with several, the one whose span
+// holds startedAt. None matching is not a diagnostic: the run's transcript
+// simply holds no recognized /work invocation to read them under. Exported
+// for internal/runreport, whose parent-only span is the same invocation.
+func SpanningInvocation(invocations []workreport.Invocation, agent, sessionID string, startedAt time.Time) (workreport.Invocation, bool) {
 	var inSession []workreport.Invocation
 	for _, inv := range invocations {
 		if inv.Agent == agent && inv.SessionID == sessionID {

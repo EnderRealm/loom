@@ -85,7 +85,7 @@ func (a LensAttempt) Successful() bool {
 // Lenses returns the attempt model of one run: every lens attempt in the
 // invocation's span, in (round, lens, attempt) order.
 func Lenses(db *sql.DB, inv Invocation) ([]LensAttempt, error) {
-	if v := schemaVersionOf(db); v < lensSchemaVersion {
+	if v := SchemaVersionOf(db); v < lensSchemaVersion {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the lens_responses table (want %d) — run `loom summarize --rebuild`", v, lensSchemaVersion)
 	}
 	data, err := loadSession(db, inv.Agent, inv.SessionID)

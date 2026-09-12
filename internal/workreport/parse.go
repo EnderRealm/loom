@@ -157,7 +157,7 @@ var harnessEnvelopeTags = []string{
 	"<recommended_plugins>", "<environment_context>",
 }
 
-// humanInteraction reports whether a turn's stored user message is the human
+// HumanInteraction reports whether a turn's stored user message is the human
 // acting, as opposed to the harness writing on the user side of the transcript.
 // It is judged on the turns table's user_message column, which both parsers
 // fill the same way, so the rule is identical for Claude and Codex by
@@ -181,7 +181,7 @@ var harnessEnvelopeTags = []string{
 // rule: a tool result never opens a turn in either parser (it attaches to the
 // tool call it answers), and Claude's injected skill body is an isMeta user
 // record the parser drops. What is left for text to decide is decided here.
-func humanInteraction(userMessage string) bool {
+func HumanInteraction(userMessage string) bool {
 	msg := strings.TrimSpace(stripReminders(userMessage))
 	if msg == "" {
 		return false

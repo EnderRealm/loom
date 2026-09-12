@@ -64,7 +64,7 @@ type CostRun struct {
 	// is a real answer: no error was recorded.
 	Errors int `json:"errors"`
 	// HumanInteractions is the turns in the span whose user message is the
-	// human acting — see humanInteraction for the rule. The invocation itself
+	// human acting — see HumanInteraction for the rule. The invocation itself
 	// is a slash-command envelope and does not count. Zero is a real answer.
 	HumanInteractions int `json:"human_interactions"`
 	// CacheCreationTokens is the span's prompt-cache writes, beside the token
@@ -110,7 +110,7 @@ func LoadCost(dbPath string, since, until time.Time) (*CostReport, error) {
 	}
 	defer db.Close()
 
-	if v := schemaVersionOf(db); v < costSchemaVersion {
+	if v := SchemaVersionOf(db); v < costSchemaVersion {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the pricing columns (want %d) — run `loom summarize --rebuild`", v, costSchemaVersion)
 	}
 
@@ -377,52 +377,66 @@ func appendDistinct(list []string, v string) []string {
 	return append(list, v)
 }
 
-// pricer prices one run's units at the rates in force at its invocation,
-// collecting the reason for every unit it could not price.
-type pricer struct {
+// Pricer prices one run's units at the rates in force at its invocation,
+// collecting the reason for every unit it could not price. Exported for
+// internal/runreport, which prices a run's execution tree under the same
+// rules rather than carrying a second copy of them.
+type Pricer struct {
 	table    *pricing.Table
 	at       time.Time
 	warnings []string
 }
 
-func (p *pricer) warn(msg string) {
+// NewPricer prices at the rates in force at `at`; a zero time prices nothing.
+func NewPricer(table *pricing.Table, at time.Time) *Pricer {
+	return &Pricer{table: table, at: at}
+}
+
+// Warn records one reason a unit could not be priced, once however many
+// units share it.
+func (p *Pricer) Warn(msg string) {
 	p.warnings = appendDistinct(p.warnings, msg)
+}
+
+// Warnings is every reason recorded so far, in first-seen order.
+func (p *Pricer) Warnings() []string {
+	return p.warnings
 }
 
 // price returns u's cost at model's rate, or false after recording why it
 // could not be priced. subject names the unit in the per-unit warnings; an
 // unpriced model is one warning however many units carried it. Every unit is
 // priced even after one fails, so the warnings name every cause in the span.
-func (p *pricer) price(subject, model, speed string, u pricing.Usage) (float64, bool) {
+func (p *Pricer) Price(subject, model, speed string, u pricing.Usage) (float64, bool) {
 	// No invocation time means no rate can be said to be in force, at any
 	// model; measure warns about that once rather than per unit.
 	if p.at.IsZero() {
 		return 0, false
 	}
 	if model == "" {
-		p.warn(subject + ": model not recorded")
+		p.Warn(subject + ": model not recorded")
 		return 0, false
 	}
 	rate, ok := p.table.Lookup(model, p.at)
 	if !ok {
-		p.warn(fmt.Sprintf("unpriced model %q at %s", model, p.at.Format(time.DateOnly)))
+		p.Warn(fmt.Sprintf("unpriced model %q at %s", model, p.at.Format(time.DateOnly)))
 		return 0, false
 	}
 	u.Fast = speed == fastSpeed
 	usd, err := rate.Price(u)
 	if err != nil {
-		p.warn(subject + ": " + err.Error())
+		p.Warn(subject + ": " + err.Error())
 		return 0, false
 	}
 	return usd, true
 }
 
-// usageOf splits a cache write into its TTL buckets: the part the transcript
+// UsageOf splits a cache write into its TTL buckets: the part the transcript
 // labelled 1h, and the remainder at the 5-minute rate — the API's default TTL,
 // so an unlabelled write is priced as one. False when the 1h share exceeds
 // the total: a negative 5m bucket would reduce the cost, so the unit is not
 // priceable.
-func usageOf(input, output, cacheRead, cacheCreation, cacheCreation1h int64) (pricing.Usage, bool) {
+func UsageOf(input, output, cacheRead, cacheCreation, cacheCreation1h int64) (pricing.Usage, bool) {
 	if cacheCreation1h > cacheCreation {
 		return pricing.Usage{}, false
 	}
@@ -435,20 +449,21 @@ func usageOf(input, output, cacheRead, cacheCreation, cacheCreation1h int64) (pr
 	}, true
 }
 
-// breakdownExceedsTotal is the warning for a unit usageOf refused.
-const breakdownExceedsTotal = ": cache write breakdown exceeds total"
+// BreakdownExceedsTotal is the warning for a unit UsageOf refused.
+const BreakdownExceedsTotal = ": cache write breakdown exceeds total"
 
-// recordsDisagree is the warning for a unit whose records did not all carry
+// RecordsDisagree is the warning for a unit whose records did not all carry
 // one model and speed: its tokens have no single rate.
-const recordsDisagree = ": records disagree on model or speed"
+const RecordsDisagree = ": records disagree on model or speed"
 
-func hasTokens(u pricing.Usage) bool {
+// HasTokens reports whether u carries any token at all.
+func HasTokens(u pricing.Usage) bool {
 	return u.Input != 0 || u.Output != 0 || u.CacheRead != 0 || u.CacheWrite5m != 0 || u.CacheWrite1h != 0
 }
 
-// roundUSD rounds to the micro-dollar so two reports over the same range are
+// RoundUSD rounds to the micro-dollar so two reports over the same range are
 // byte-identical rather than trailing float noise.
-func roundUSD(x float64) *float64 {
+func RoundUSD(x float64) *float64 {
 	x = math.Round(x*1e6) / 1e6
 	return &x
 }
@@ -471,11 +486,11 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 
 	inSpan := func(idx int) bool { return idx >= inv.idx && idx <= endIdx }
 
-	p := &pricer{table: table, at: inv.startedAt}
+	p := NewPricer(table, inv.startedAt)
 	priced := !inv.startedAt.IsZero()
 	subagentsPriced := priced
 	if !priced {
-		p.warn("invocation time unknown")
+		p.Warn("invocation time unknown")
 	}
 
 	var cost float64
@@ -491,15 +506,15 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		// A turn with no tokens costs nothing whatever its model, so it
 		// cannot make the run unpriceable.
 		subject := fmt.Sprintf("turn %d", t.idx)
-		u, ok := usageOf(t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreation, t.cacheCreation1h)
+		u, ok := UsageOf(t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreation, t.cacheCreation1h)
 		if !ok {
-			p.warn(subject + breakdownExceedsTotal)
+			p.Warn(subject + BreakdownExceedsTotal)
 			priced = false
-		} else if t.usageMixed && hasTokens(u) {
-			p.warn(subject + recordsDisagree)
+		} else if t.usageMixed && HasTokens(u) {
+			p.Warn(subject + RecordsDisagree)
 			priced = false
-		} else if hasTokens(u) {
-			usd, ok := p.price(subject, t.model, t.speed, u)
+		} else if HasTokens(u) {
+			usd, ok := p.Price(subject, t.model, t.speed, u)
 			cost += usd
 			priced = priced && ok
 		}
@@ -512,7 +527,7 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		run.Models = appendDistinct(run.Models, t.model)
 		run.Efforts = appendDistinct(run.Efforts, t.effort)
 		run.CLIVersions = appendDistinct(run.CLIVersions, t.cliVersion)
-		if humanInteraction(t.userMessage) {
+		if HumanInteraction(t.userMessage) {
 			run.HumanInteractions++
 		}
 	}
@@ -561,20 +576,20 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		// unmeasured duration it makes the whole figure null, since a sum
 		// missing a term is not the run's subagent cost.
 		if !s.inputTokens.Valid {
-			p.warn(subject + ": no transcript")
+			p.Warn(subject + ": no transcript")
 			subagentsPriced = false
 			continue
 		}
-		u, ok := usageOf(s.inputTokens.Int64, s.outputTokens.Int64, s.cacheReadTokens.Int64,
+		u, ok := UsageOf(s.inputTokens.Int64, s.outputTokens.Int64, s.cacheReadTokens.Int64,
 			s.cacheCreation.Int64, s.cacheCreation1h.Int64)
 		if !ok {
-			p.warn(subject + breakdownExceedsTotal)
+			p.Warn(subject + BreakdownExceedsTotal)
 			subagentsPriced = false
 		} else if s.usageMixed.Bool {
-			p.warn(subject + recordsDisagree)
+			p.Warn(subject + RecordsDisagree)
 			subagentsPriced = false
-		} else if hasTokens(u) {
-			usd, ok := p.price(subject, s.model.String, s.speed.String, u)
+		} else if HasTokens(u) {
+			usd, ok := p.Price(subject, s.model.String, s.speed.String, u)
 			subagentCost += usd
 			subagentsPriced = subagentsPriced && ok
 		}
@@ -585,10 +600,10 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		run.SubagentDurationMs = &subagentMs
 	}
 	if priced {
-		run.CostUSD = roundUSD(cost)
+		run.CostUSD = RoundUSD(cost)
 	}
 	if subagentsPriced {
-		run.SubagentCostUSD = roundUSD(subagentCost)
+		run.SubagentCostUSD = RoundUSD(subagentCost)
 	}
 	run.PricingWarnings = p.warnings
 
