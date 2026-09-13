@@ -28,8 +28,8 @@ func TestOpenFreshDB(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != "9" {
-		t.Errorf("schema_version: got %q, want %q", v, "9")
+	if v != "10" {
+		t.Errorf("schema_version: got %q, want %q", v, "10")
 	}
 }
 
@@ -373,6 +373,68 @@ func TestWriteSessionStoresSpawnOrNull(t *testing.T) {
 		if parent.Valid || depth.Valid {
 			t.Errorf("%s: parent = %v depth = %v, want both NULL", id, parent, depth)
 		}
+	}
+}
+
+// TestWriteFrictionStampsRepoAndReplaces pins the friction rows: a session
+// from a scope nothing has onboarded (warp) still lands every event with its
+// repo stamped, and a re-write replaces the rows rather than adding to them.
+func TestWriteFrictionStampsRepoAndReplaces(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Date(2026, 9, 8, 0, 49, 49, 200_000_000, time.UTC)
+	s := &summary.SessionSummary{
+		SessionID: "friction-sess",
+		Agent:     summary.AgentClaude,
+		Cwd:       "/Users/steve/code/warp",
+		StartTime: now,
+		Friction: []summary.FrictionEvent{
+			{TurnIdx: 0, Time: now, Kind: "hook.ask", Signature: "PreToolUse:Bash: rm-gate: variable target", Tool: "Bash", Detail: "rm-gate: variable target"},
+			{TurnIdx: 0, Time: now.Add(time.Second), Kind: "tool.error", Signature: "Grep: ripgrep not found on PATH", Tool: "Grep", Detail: "ripgrep not found on PATH", AgentType: "reviewer"},
+		},
+	}
+	src := SourceInfo{Project: "warp", GitRemote: "git@github.com:EnderRealm/warp.git"}
+	for i := 0; i < 2; i++ {
+		if err := st.WriteSummary(context.Background(), s, src); err != nil {
+			t.Fatalf("WriteSummary #%d: %v", i, err)
+		}
+	}
+
+	rows, err := st.DB().Query(`SELECT seq, ts, project, git_remote, cwd, kind, signature, tool, agent_type
+		FROM friction WHERE agent = ? AND session_id = ? ORDER BY seq`, "claude-code", "friction-sess")
+	if err != nil {
+		t.Fatalf("query friction: %v", err)
+	}
+	defer rows.Close()
+	var n int
+	for rows.Next() {
+		var seq int
+		var ts, project, remote, cwd, kind, signature, tool, agentType sql.NullString
+		if err := rows.Scan(&seq, &ts, &project, &remote, &cwd, &kind, &signature, &tool, &agentType); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if seq != n || project.String != "warp" || remote.String != src.GitRemote || cwd.String != s.Cwd {
+			t.Errorf("row %d: seq %d project %v remote %v cwd %v", n, seq, project, remote, cwd)
+		}
+		switch n {
+		case 0:
+			if ts.String != "2026-09-08T00:49:49.2Z" || kind.String != "hook.ask" || tool.String != "Bash" || agentType.Valid {
+				t.Errorf("row 0: ts %v kind %v tool %v agent_type %v", ts, kind, tool, agentType)
+			}
+		case 1:
+			if kind.String != "tool.error" || signature.String != "Grep: ripgrep not found on PATH" || agentType.String != "reviewer" {
+				t.Errorf("row 1: kind %v signature %v agent_type %v", kind, signature, agentType)
+			}
+		}
+		n++
+	}
+	if n != 2 {
+		t.Fatalf("friction rows = %d, want 2 after two writes", n)
 	}
 }
 

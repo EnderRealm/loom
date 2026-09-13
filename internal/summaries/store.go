@@ -179,7 +179,8 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 	agent := string(sum.Agent)
 	for _, table := range []string{
 		"sessions", "turns", "tool_calls", "commits", "errors", "compactions",
-		"token_counts", "files_touched", "subagents", "unknown_records",
+		"token_counts", "files_touched", "subagents", "friction",
+		"unknown_records",
 	} {
 		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM "+table+" WHERE agent = ? AND session_id = ?",
@@ -267,6 +268,9 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		return err
 	}
 	if err := writeLenses(ctx, tx, sum, source); err != nil {
+		return err
+	}
+	if err := writeFriction(ctx, tx, sum, source); err != nil {
 		return err
 	}
 	if err := writeUnknown(ctx, tx, sum); err != nil {
@@ -521,6 +525,33 @@ func writeSubagents(ctx context.Context, tx *sql.Tx,
 			model, speed, input, output, cacheRead, cacheCreation, cacheCreation1h, mixed,
 		); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// writeFriction stamps project, git_remote and cwd on every row so the
+// friction view can name the repo a session stood in without a join, the
+// fix for a signature usually living somewhere else entirely.
+func writeFriction(ctx context.Context, tx *sql.Tx,
+	sum *summary.SessionSummary, source SourceInfo) error {
+	agent := string(sum.Agent)
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO friction (agent, session_id, seq, turn_idx, ts, project,
+		    git_remote, cwd, kind, signature, tool, detail, agent_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i, f := range sum.Friction {
+		if _, err := stmt.ExecContext(ctx,
+			agent, sum.SessionID, i, f.TurnIdx, isoOrNull(f.Time),
+			strOrNull(source.Project), strOrNull(source.GitRemote), strOrNull(sum.Cwd),
+			f.Kind, f.Signature, strOrNull(f.Tool), strOrNull(f.Detail),
+			strOrNull(f.AgentType),
+		); err != nil {
+			return fmt.Errorf("insert friction %d: %w", i, err)
 		}
 	}
 	return nil

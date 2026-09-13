@@ -68,6 +68,14 @@ func foldSubagents(st *state, subs []SubagentInput) {
 			f.sa.ResultSummary = truncate(sub.lastAssistantText, resultTextLimit)
 			f.sa.ErrorCount = len(sub.s.Errors)
 			f.sa.Usage = subagentUsage(sub.s)
+			// The row lives in the parent's session, so its turn is the
+			// dispatching turn, as on the subagents row; the transcript's
+			// own turn numbering means nothing there.
+			for _, fe := range sub.s.Friction {
+				fe.TurnIdx = f.sa.ParentTurnIdx
+				fe.AgentType = in.AgentType
+				st.s.Friction = append(st.s.Friction, fe)
+			}
 		}
 		out = append(out, f)
 	}

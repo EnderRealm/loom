@@ -122,6 +122,27 @@ type attachmentPayload struct {
 	Raw          json.RawMessage `json:"-"`
 }
 
+// hookSuccessPayload is the hook_success attachment: what a hook wrote and
+// how it exited. A PreToolUse hook's ask or deny is JSON in stdout.
+type hookSuccessPayload struct {
+	HookName string `json:"hookName"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
+}
+
+// hookDecision is the JSON a hook writes to stdout to ask or deny:
+// hookSpecificOutput.permissionDecision in the current form, a top-level
+// decision of "block" with its reason in the older one.
+type hookDecision struct {
+	Decision           string `json:"decision"`
+	Reason             string `json:"reason"`
+	HookSpecificOutput struct {
+		PermissionDecision       string `json:"permissionDecision"`
+		PermissionDecisionReason string `json:"permissionDecisionReason"`
+	} `json:"hookSpecificOutput"`
+}
+
 // progressRecord streams output from a long-running tool.
 type progressRecord struct {
 	header

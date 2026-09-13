@@ -65,7 +65,10 @@ type SessionSummary struct {
 	// per-field truncation the other tables apply, so a verdict longer than a
 	// result summary survives here.
 	LensResponses []LensResponse
-	Unknown       []UnknownRecord
+	// Friction is every harness-friction event the transcript carried,
+	// including those folded in from dispatched subagent transcripts.
+	Friction []FrictionEvent
+	Unknown  []UnknownRecord
 }
 
 // CompletionStatus normalizes how a turn ended across producers.
@@ -260,6 +263,20 @@ type SubagentUsage struct {
 	CacheReadTokens       int64
 	CacheCreationTokens   int64
 	CacheCreation1hTokens int64
+}
+
+// FrictionEvent is one harness-friction occurrence: a hook that asked or
+// denied, a permission the user or the auto-mode classifier refused, a tool
+// call the harness reported as an error, or a user interrupt. Signature is
+// the normalized message the friction CLI groups by.
+type FrictionEvent struct {
+	TurnIdx   int
+	Time      time.Time
+	Kind      string // one of parse/friction.Kinds
+	Signature string // normalized
+	Tool      string // tool name where one applies, else ""
+	Detail    string // raw message, truncated to resultTextLimit
+	AgentType string // subagent type when the event came from a dispatched subagent transcript, else ""
 }
 
 // UnknownRecord is the drift alarm. Any record whose discriminator is not in

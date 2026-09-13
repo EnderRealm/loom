@@ -100,7 +100,7 @@ Structured payloads that accompany the conversation but aren't model messages. T
 | `deferred_tools_delta` | Deferred-tool availability changes (`addedNames`, `removedNames`) |
 | `diagnostics` | LSP / build diagnostics snapshot |
 | `edited_text_file` | Record of an externally-edited file |
-| `hook_success` | Hook execution succeeded (newer CLI) |
+| `hook_success` | Hook execution succeeded (newer CLI). Carries `hookName`, `stdout`, `stderr` and `exitCode`; a PreToolUse hook's ask or deny is JSON in `stdout` and is read into the `friction` table (`docs/friction.md`) |
 | `plan_mode` | Plan-mode state change |
 | `queued_command` | Command queued for later execution (newer CLI). Carries the queued text in `prompt`; a task notification that lands mid-turn is delivered this way rather than as a `user` record, and is where a background lens verdict often arrives (`docs/lens-responses.md`) |
 | `skill_listing` | Available skills listing |

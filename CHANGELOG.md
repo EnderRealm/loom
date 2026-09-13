@@ -6,6 +6,29 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Harness friction is counted. `summaries.db` schema v10 adds a `friction`
+  table: one row per event the summarizer reads out of a session's
+  transcript and its dispatched subagent transcripts, carrying the session
+  id, timestamp, project, git remote, cwd, kind, normalized signature, tool,
+  raw detail and subagent type. The kinds are exactly `hook.ask`,
+  `hook.deny`, `permission.denied_by_user`, `permission.classifier_denied`,
+  `tool.error` and `user.interrupt`; there is no `bash.repeat`, measured at
+  2,073 events of `echo idle` and `git status` polling and left out. A
+  signature is the message's first line with uuids, pids, absolute and `~/`
+  paths and runs of three or more digits replaced by placeholders, so the
+  96 recorded rm-gate variable-target asks group as one. Rows are written
+  for every session with no knowledge-scope gate: a session from a scope
+  nothing has onboarded lands its rows like any other. `loom friction`
+  prints signatures ranked by events per active day — total events, first
+  and last seen, active days, sessions affected — with `--top`, `--since`
+  (a date or RFC3339 timestamp, the same form as the reports) and
+  `--sessions` to name the session ids carrying each so a knowledge pass
+  can be pointed at them (docs/friction.md). Deliberately human-pull:
+  no threshold, no extraction trigger, no model call anywhere in the path.
+  A v9 database reads as outdated until `loom summarize --rebuild`.
+
 ### Fixed
 
 - A Codex `/work` run's report no longer omits its parent session. The

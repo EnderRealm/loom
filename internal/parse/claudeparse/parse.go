@@ -226,7 +226,8 @@ func (st *state) handleUser(line []byte) error {
 		return nil
 	}
 
-	text := decodeUserContent(rec.Message.Content)
+	text, blocks := decodeUserContent(rec.Message.Content)
+	st.recordInterrupts(blocks, ts)
 	idx := -1
 	if rec.PromptID != "" {
 		var ok bool
@@ -507,10 +508,23 @@ func (st *state) handleAttachment(line []byte) error {
 			st.recordLenses(probe.Attachment.Prompt, summary.OriginTaskNotification, dispatchID,
 				st.currentTurnIdx, parseTime(probe.Timestamp))
 		}
+	case "hook_success":
+		// A subagent's hooks fire in its own transcript, which is folded
+		// separately; the inline sidechain copy would count them twice.
+		if probe.IsSidechain && !st.sidechain {
+			return nil
+		}
+		var rec struct {
+			Attachment hookSuccessPayload `json:"attachment"`
+		}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return err
+		}
+		st.recordHookFriction(rec.Attachment, parseTime(probe.Timestamp))
 	case "deferred_tools_delta", "skill_listing", "diagnostics",
 		"plan_mode", "edited_text_file", "task_reminder",
 		"companion_intro", "date_change",
-		"command_permissions", "hook_success":
+		"command_permissions":
 		// All recognized; no-op at summary level for now. Could be wired
 		// up later (e.g. plan_mode transitions are interesting).
 	default:
@@ -694,7 +708,13 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 				Message: tc.ResultSummary,
 				Time:    ts,
 			})
+			st.recordToolResultFriction(tc, content, ts)
 		}
+	}
+	// A rejected tool use lands as a carrier with the interrupt text beside
+	// the denied result, so interrupts are read here as well as off prompts.
+	if !rec.IsSidechain || st.sidechain {
+		st.recordInterrupts(blocks, ts)
 	}
 }
 
@@ -765,13 +785,15 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func decodeUserContent(raw json.RawMessage) string {
+// decodeUserContent returns a user record's text and, when the content was
+// an array, its blocks, so a caller that reads the blocks decodes them once.
+func decodeUserContent(raw json.RawMessage) (string, []userContentBlock) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		return s, nil
 	}
 	var blocks []userContentBlock
 	if err := json.Unmarshal(raw, &blocks); err == nil {
@@ -781,9 +803,9 @@ func decodeUserContent(raw json.RawMessage) string {
 				parts = append(parts, b.Text)
 			}
 		}
-		return strings.Join(parts, "\n")
+		return strings.Join(parts, "\n"), blocks
 	}
-	return ""
+	return "", nil
 }
 
 func decodeToolResultContent(raw json.RawMessage) string {

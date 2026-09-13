@@ -4,6 +4,15 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 10: adds friction — one row per harness-friction event a
+// session's transcript or its dispatched subagent transcripts carried: a hook
+// ask or deny, a permission the user or the auto-mode classifier refused, a
+// tool result the harness flagged as an error, a user interrupt
+// (docs/friction.md). Written for every session, with no knowledge-scope
+// gate. Every v9 database has the table absent, and the watch-mode summarizer
+// skips sessions whose file is unchanged, so v9 reads as outdated until a
+// `loom summarize --rebuild` folds the transcripts in.
+//
 // schemaVersion 9: adds lens_responses, lens_criteria and lens_findings — every
 // review-lens verdict block a session's records carried, whole, keyed by the
 // record it was read from (docs/lens-responses.md). response_id is a hash of
@@ -56,7 +65,7 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // commitsSchemaVersion is the version that introduced the commits table.
 // Deliberately pinned rather than tracked to schemaVersion: readers that need
@@ -301,6 +310,25 @@ CREATE TABLE IF NOT EXISTS lens_findings (
     fix         TEXT,
     PRIMARY KEY (response_id, ordinal)
 );
+
+CREATE TABLE IF NOT EXISTS friction (
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    turn_idx   INTEGER,
+    ts         TEXT,
+    project    TEXT,
+    git_remote TEXT,
+    cwd        TEXT,
+    kind       TEXT NOT NULL,
+    signature  TEXT NOT NULL,
+    tool       TEXT,
+    detail     TEXT,
+    agent_type TEXT,
+    PRIMARY KEY (agent, session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_friction_signature ON friction(kind, signature);
+CREATE INDEX IF NOT EXISTS idx_friction_ts ON friction(ts);
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id           TEXT PRIMARY KEY,
