@@ -6,6 +6,8 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-09-12 — Run visibility
+
 ### Added
 
 - Thirty-second visibility into an active run. `config.json` takes
