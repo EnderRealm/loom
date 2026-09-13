@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"loom/internal/parse/drift"
 	"loom/internal/parse/summary"
 )
 
@@ -131,7 +132,7 @@ func TestSessionMetaSourceShapes(t *testing.T) {
 		t.Fatalf("Unknown len: got %d, want 1", len(sub.Unknown))
 	}
 	u := sub.Unknown[0]
-	wantSub := UnmodeledPayloadMarker + ":call_id"
+	wantSub := drift.UnmodeledPayloadMarker + ":call_id"
 	if u.Type != "response_item" || u.Subtype != wantSub {
 		t.Errorf("Unknown entry: got %s::%s, want response_item::%s",
 			u.Type, u.Subtype, wantSub)
@@ -203,9 +204,9 @@ func TestSessionMetaPayloadDriftDegrades(t *testing.T) {
 	// Fieldless fallback, sorted first: the payload is valid JSON but not an
 	// object, so the type error carries no field path.
 	bare := s.Unknown[0]
-	if bare.Type != "session_meta" || bare.Subtype != UnmodeledPayloadMarker {
+	if bare.Type != "session_meta" || bare.Subtype != drift.UnmodeledPayloadMarker {
 		t.Errorf("Unknown entry: got %s::%s, want session_meta::%s",
-			bare.Type, bare.Subtype, UnmodeledPayloadMarker)
+			bare.Type, bare.Subtype, drift.UnmodeledPayloadMarker)
 	}
 	if bare.Count != 1 {
 		t.Errorf("Unknown Count: got %d, want 1", bare.Count)
@@ -214,7 +215,7 @@ func TestSessionMetaPayloadDriftDegrades(t *testing.T) {
 	// Two records drift on cwd; they collapse to one row carrying the field
 	// name and the count, with FirstSeen from the earlier of them.
 	u := s.Unknown[1]
-	wantSub := UnmodeledPayloadMarker + ":cwd"
+	wantSub := drift.UnmodeledPayloadMarker + ":cwd"
 	if u.Type != "session_meta" || u.Subtype != wantSub {
 		t.Errorf("Unknown entry: got %s::%s, want session_meta::%s",
 			u.Type, u.Subtype, wantSub)

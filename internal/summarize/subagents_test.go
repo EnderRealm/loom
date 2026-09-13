@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"loom/internal/parse/claudeparse"
+	"loom/internal/parse/drift"
 	"loom/internal/summaries"
 )
 
@@ -376,10 +376,11 @@ func TestGrowingSubagentTranscriptRefoldsTheParent(t *testing.T) {
 	}
 }
 
-// TestSubagentParseFailureSurfacesAsDrift keeps a NULL duration caused by a
-// transcript whose shape drifted distinguishable from one caused by a
-// transcript with no measurable span.
-func TestSubagentParseFailureSurfacesAsDrift(t *testing.T) {
+// TestSubagentPayloadDriftSurfacesOnTheParent keeps a NULL duration caused by
+// a transcript whose shape drifted distinguishable from one caused by a
+// transcript with no measurable span: the drifted record is counted on the
+// parent's unknown_records under its own type, naming the field that moved.
+func TestSubagentPayloadDriftSurfacesOnTheParent(t *testing.T) {
 	st := summarizeTree(t, buildReceivedTree(t))
 	rows := readSubagents(t, st, "sess-drift")
 
@@ -387,30 +388,29 @@ func TestSubagentParseFailureSurfacesAsDrift(t *testing.T) {
 		t.Fatalf("subagent rows: got %d, want 1 (%v)", len(rows), rows)
 	}
 	if rows[0].durationMs.Valid {
-		t.Errorf("duration_ms = %d, want NULL for a transcript that failed to parse",
+		t.Errorf("duration_ms = %d, want NULL for a transcript whose second record drifted",
 			rows[0].durationMs.Int64)
 	}
 
 	var count int
 	if err := st.DB().QueryRow(`
 		SELECT COUNT(*) FROM unknown_records
-		WHERE session_id = 'sess-drift' AND type = ? AND subtype = 'explorer'`,
-		claudeparse.SubagentParseFailureMarker).Scan(&count); err != nil {
+		WHERE session_id = 'sess-drift' AND type = 'assistant' AND subtype = ?`,
+		drift.UnmodeledPayloadMarker+":header.isSidechain").Scan(&count); err != nil {
 		t.Fatalf("query unknown_records: %v", err)
 	}
 	if count != 1 {
-		t.Errorf("unknown_records rows naming the failed subagent parse: got %d, want 1", count)
+		t.Errorf("unknown_records rows naming the subagent's drifted field: got %d, want 1", count)
 	}
 
 	// The session that merely lacks a measurable span must not look like drift.
 	if err := st.DB().QueryRow(`
 		SELECT COUNT(*) FROM unknown_records
-		WHERE session_id = 'sess-parent' AND type = ?`,
-		claudeparse.SubagentParseFailureMarker).Scan(&count); err != nil {
+		WHERE session_id = 'sess-parent'`).Scan(&count); err != nil {
 		t.Fatalf("query unknown_records: %v", err)
 	}
 	if count != 0 {
-		t.Errorf("sess-parent unknown_records naming a subagent parse failure: got %d, want 0", count)
+		t.Errorf("sess-parent unknown_records: got %d, want 0", count)
 	}
 }
 

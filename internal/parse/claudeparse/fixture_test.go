@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"loom/internal/parse/drift"
 	"loom/internal/parse/summary"
 )
 
@@ -88,6 +89,53 @@ func parseFixture(t *testing.T, path string) *summary.SessionSummary {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return s
+}
+
+// TestPayloadDriftIsCountedAndParsingContinues pins the regression that
+// motivated the degrade path: a record that decoded at the type probe but not
+// as its typed struct used to abort the whole file. The drifted records are
+// lost — nothing is applied once the payload fails — but the session still
+// parses and the records after them land. Two records drifting on the same
+// field collapse to one counted row naming the field as the decoder reports
+// it, FirstSeen from the earlier of them, and a second field drifts on its
+// own row.
+func TestPayloadDriftIsCountedAndParsingContinues(t *testing.T) {
+	s := parseFixture(t, "testdata/claude_payload_drift.jsonl")
+
+	if len(s.Turns) != 2 {
+		t.Fatalf("Turns len: got %d, want 2", len(s.Turns))
+	}
+	if s.Turns[0].UserMessage != "hello" || s.Turns[0].AssistantText != "hi" {
+		t.Errorf("Turn[0]: got %q/%q, want hello/hi: the records after the drift did not land",
+			s.Turns[0].UserMessage, s.Turns[0].AssistantText)
+	}
+	if s.Turns[1].UserMessage != "and again" {
+		t.Errorf("Turn[1].UserMessage: got %q, want %q", s.Turns[1].UserMessage, "and again")
+	}
+
+	if len(s.Unknown) != 2 {
+		t.Fatalf("Unknown len: got %d, want 2", len(s.Unknown))
+	}
+	u := s.Unknown[0]
+	wantSub := drift.UnmodeledPayloadMarker + ":header.isSidechain"
+	if u.Type != "assistant" || u.Subtype != wantSub {
+		t.Errorf("Unknown entry: got %s::%s, want assistant::%s", u.Type, u.Subtype, wantSub)
+	}
+	if u.Count != 2 {
+		t.Errorf("Unknown Count: got %d, want 2", u.Count)
+	}
+	wantSeen := time.Date(2026, 4, 1, 10, 0, 1, 0, time.UTC)
+	if !u.FirstSeen.Equal(wantSeen) {
+		t.Errorf("Unknown FirstSeen: got %s, want %s", u.FirstSeen, wantSeen)
+	}
+	m := s.Unknown[1]
+	wantSub = drift.UnmodeledPayloadMarker + ":message"
+	if m.Type != "user" || m.Subtype != wantSub {
+		t.Errorf("Unknown entry: got %s::%s, want user::%s", m.Type, m.Subtype, wantSub)
+	}
+	if m.Count != 1 {
+		t.Errorf("Unknown Count: got %d, want 1", m.Count)
+	}
 }
 
 // TestTurnConditionsLand pins the per-turn model, effort and CLI version: each

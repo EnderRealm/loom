@@ -5,7 +5,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
+	"loom/internal/parse/drift"
 	"loom/internal/parse/summary"
 )
 
@@ -37,6 +39,13 @@ const explorerTranscript = `{"type":"user","uuid":"v1","sessionId":"sess","isSid
 {"type":"assistant","uuid":"v4","sessionId":"sess","isSidechain":true,"timestamp":"2026-09-01T10:02:00.000Z","message":{"role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"exploring"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"user","uuid":"v5","sessionId":"sess","isSidechain":true,"promptId":"sp5","timestamp":"2026-09-01T10:02:30.000Z","message":{"role":"user","content":"and finish"}}
 {"type":"assistant","uuid":"v6","sessionId":"sess","isSidechain":true,"timestamp":"2026-09-01T10:03:00.000Z","message":{"role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}}
+`
+
+// driftedTranscript is toolu_A's sidechain with its second record drifted:
+// isSidechain arrives as a string, which decodes at the type probe and fails
+// on the typed record, so the transcript carries one usable timestamp.
+const driftedTranscript = `{"type":"user","uuid":"d1","sessionId":"sess","isSidechain":true,"promptId":"sp1","timestamp":"2026-09-01T10:00:02.000Z","message":{"role":"user","content":"review"}}
+{"type":"assistant","uuid":"d2","sessionId":"sess","isSidechain":"yes","timestamp":"2026-09-01T10:04:00.000Z","message":{"role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"verdict"}],"stop_reason":"end_turn"}}
 `
 
 func openString(s string) func() (io.ReadCloser, error) {
@@ -115,5 +124,45 @@ func TestSubagentUsageComesFromItsOwnTranscript(t *testing.T) {
 	}
 	if unshipped.Usage != nil {
 		t.Errorf("unshipped Usage: got %+v, want nil for a dispatch with no transcript", *unshipped.Usage)
+	}
+}
+
+// TestSubagentPayloadDriftFoldsIntoTheParent pins that a dispatched transcript
+// with a drifted record still folds: the row is written, unmeasured because
+// only one record stamped a time, and the transcript's drift is counted on
+// the parent under the record's own type rather than as a failed parse.
+func TestSubagentPayloadDriftFoldsIntoTheParent(t *testing.T) {
+	s, err := ParseWithSubagents(strings.NewReader(dispatchingSession), []SubagentInput{
+		{AgentType: "reviewer", ToolUseID: "toolu_A", Open: openString(driftedTranscript)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewer *summary.Subagent
+	for i := range s.Subagents {
+		if s.Subagents[i].AgentType == "reviewer" {
+			reviewer = &s.Subagents[i]
+		}
+	}
+	if reviewer == nil {
+		t.Fatalf("Subagents: got %+v, want a reviewer row", s.Subagents)
+	}
+	if reviewer.DurationMs != nil {
+		t.Errorf("reviewer DurationMs: got %d, want nil: the drifted record stamped no time", *reviewer.DurationMs)
+	}
+	if reviewer.Prompt != "review" {
+		t.Errorf("reviewer Prompt: got %q, want review", reviewer.Prompt)
+	}
+	if len(s.Unknown) != 1 {
+		t.Fatalf("Unknown len: got %d, want 1 (%+v)", len(s.Unknown), s.Unknown)
+	}
+	u := s.Unknown[0]
+	wantSub := drift.UnmodeledPayloadMarker + ":header.isSidechain"
+	if u.Type != "assistant" || u.Subtype != wantSub || u.Count != 1 {
+		t.Errorf("Unknown entry: got %s::%s x%d, want assistant::%s x1", u.Type, u.Subtype, u.Count, wantSub)
+	}
+	wantSeen := time.Date(2026, 9, 1, 10, 4, 0, 0, time.UTC)
+	if !u.FirstSeen.Equal(wantSeen) {
+		t.Errorf("Unknown FirstSeen: got %s, want %s", u.FirstSeen, wantSeen)
 	}
 }

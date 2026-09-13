@@ -31,6 +31,20 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The Claude parser no longer discards a whole session on one drifted
+  payload. Its `feed` still returned each handler's unmarshal error, so a
+  record whose shape had moved away from our structs — an `isSidechain`
+  arriving as a string — ended the file where the Codex parser had
+  already been made to degrade. A handler's decode failure is now counted
+  as an Unknown record, `<type>::__unmodeled_payload__[:<field>]` with
+  the field named as the decoder reports it, and parsing continues. The
+  two markers and the field-name sanitizer moved out of `codexparse`
+  into `internal/parse/drift`, shared by both parsers, so a reader of
+  either sees one drift contract. A dispatched subagent transcript's
+  drift folds into the parent's Unknown records, since the subagent has
+  no session row of its own; `__subagent_parse_failed__` now means only
+  that the transcript could not be read through.
+
 - A Codex `/work` run's report no longer omits its parent session. The
   Codex render's run record names no `session_id` (no session id is
   reachable from a shell on that runtime), so the report metered only the

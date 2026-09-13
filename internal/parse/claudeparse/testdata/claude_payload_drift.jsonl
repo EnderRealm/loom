@@ -1,0 +1,6 @@
+{"type":"user","sessionId":"s1","uuid":"u1","promptId":"p1","timestamp":"2026-04-01T10:00:00.000Z","cwd":"/tmp/p","message":{"role":"user","content":"hello"}}
+{"type":"assistant","sessionId":"s1","uuid":"u2","isSidechain":"yes","timestamp":"2026-04-01T10:00:01.000Z","message":{"id":"m1","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"lost"}],"stop_reason":"end_turn"}}
+{"type":"assistant","sessionId":"s1","uuid":"u3","isSidechain":"yes","timestamp":"2026-04-01T10:00:02.000Z","message":{"id":"m2","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"also lost"}],"stop_reason":"end_turn"}}
+{"type":"user","sessionId":"s1","uuid":"u4","promptId":"p1","timestamp":"2026-04-01T10:00:03.000Z","message":"a bare string"}
+{"type":"assistant","sessionId":"s1","uuid":"u5","timestamp":"2026-04-01T10:00:04.000Z","message":{"id":"m3","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}}
+{"type":"user","sessionId":"s1","uuid":"u6","promptId":"p2","timestamp":"2026-04-01T10:00:05.000Z","message":{"role":"user","content":"and again"}}

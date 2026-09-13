@@ -3,20 +3,22 @@ package claudeparse
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"loom/internal/parse/drift"
 	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
 )
 
 // Parse consumes a Claude Code session JSONL stream and returns the
-// normalized summary. Unknown record types are folded into Unknown rather
-// than dropped or erroring — schema drift is observable, not fatal.
+// normalized summary. Unknown record types and payloads whose shape has
+// drifted away from our structs are both folded into Unknown rather than
+// dropped or erroring: the producer moving ahead of us is something to
+// record, not something to fail on.
 func Parse(r io.Reader) (*summary.SessionSummary, error) {
 	return ParseWithSubagents(r, nil)
 }
@@ -53,9 +55,7 @@ func parseStream(r io.Reader, sidechain bool) (*state, error) {
 			line = trimNewline(line)
 			if len(line) > 0 {
 				st.line = lineNo
-				if perr := st.feed(line); perr != nil {
-					return nil, fmt.Errorf("line %d: %w", lineNo, perr)
-				}
+				st.feed(line)
 			}
 		}
 		if err == io.EOF {
@@ -67,11 +67,6 @@ func parseStream(r io.Reader, sidechain bool) (*state, error) {
 	}
 	return st, nil
 }
-
-// MalformedLineMarker is bumped into Unknown when a single line fails to
-// decode. Parsing continues so partial corruption doesn't lose the rest of
-// the session.
-const MalformedLineMarker = "__malformed__"
 
 // syntheticModel is the model Claude stamps on the placeholder assistant record
 // it writes for an API error (isApiErrorMessage). Not a model that ran.
@@ -156,7 +151,7 @@ func newState(s *summary.SessionSummary) *state {
 	}
 }
 
-func (st *state) feed(line []byte) error {
+func (st *state) feed(line []byte) {
 	var probe struct {
 		Type      string `json:"type"`
 		Timestamp string `json:"timestamp"`
@@ -164,37 +159,43 @@ func (st *state) feed(line []byte) error {
 	if err := json.Unmarshal(line, &probe); err != nil {
 		// Receiver-level corruption (interleaved writes, truncated lines)
 		// is expected at scale. Surface it as drift rather than aborting.
-		st.bumpUnknown(MalformedLineMarker, "", time.Time{})
-		return nil
+		st.bumpUnknown(drift.MalformedLineMarker, "", time.Time{})
+		return
 	}
+	var err error
 	switch probe.Type {
 	case "user":
-		return st.handleUser(line)
+		err = st.handleUser(line)
 	case "assistant":
-		return st.handleAssistant(line)
+		err = st.handleAssistant(line)
 	case "system":
-		return st.handleSystem(line)
+		err = st.handleSystem(line)
 	case "attachment":
-		return st.handleAttachment(line)
+		err = st.handleAttachment(line)
 	case "progress":
-		return st.handleProgress(line)
+		err = st.handleProgress(line)
 	case "queue-operation":
-		return st.handleQueueOperation(line)
+		err = st.handleQueueOperation(line)
 	case "file-history-snapshot":
-		return st.handleFileHistorySnapshot(line)
+		err = st.handleFileHistorySnapshot(line)
 	case "permission-mode":
-		return st.handlePermissionMode(line)
+		err = st.handlePermissionMode(line)
 	case "agent-name":
-		return st.handleAgentName(line)
+		err = st.handleAgentName(line)
 	case "custom-title":
-		return st.handleCustomTitle(line)
+		err = st.handleCustomTitle(line)
 	case "last-prompt":
-		return st.handleLastPrompt(line)
+		err = st.handleLastPrompt(line)
 	case "pr-link":
-		return st.handlePRLink(line)
+		err = st.handlePRLink(line)
 	default:
 		st.bumpUnknown(probe.Type, "", parseTime(probe.Timestamp))
-		return nil
+	}
+	// Every handler error is a payload json.Unmarshal failure; count the
+	// record, naming the drifted field where the decoder gave one, and keep the
+	// rest of the session rather than discarding the file.
+	if err != nil {
+		st.bumpUnknown(probe.Type, drift.UnmodeledSubtype(err), parseTime(probe.Timestamp))
 	}
 }
 
@@ -723,6 +724,26 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 // the same input produces identical output. Zero ts is acceptable for cases
 // (malformed lines, top-level probe miss) where no timestamp is available.
 func (st *state) bumpUnknown(typ, sub string, ts time.Time) {
+	st.unknownEntry(typ, sub, ts).Count++
+}
+
+// mergeUnknown folds an already-counted Unknown entry — a subagent
+// transcript's — into this parse under the same key bumpUnknown uses. The
+// transcript's drift is the parent's to report, since the subagent has no
+// session row of its own in summaries.db. FirstSeen is the earlier of the
+// two: the parent and its transcripts are folded in file order, not time
+// order, so first-encountered would measure the fold rather than the drift.
+func (st *state) mergeUnknown(in summary.UnknownRecord) {
+	u := st.unknownEntry(in.Type, in.Subtype, in.FirstSeen)
+	if !in.FirstSeen.IsZero() && (u.FirstSeen.IsZero() || in.FirstSeen.Before(u.FirstSeen)) {
+		u.FirstSeen = in.FirstSeen.UTC()
+	}
+	u.Count += in.Count
+}
+
+// unknownEntry returns the Unknown accumulator for typ::sub, creating it with
+// ts as FirstSeen when this is the first sighting.
+func (st *state) unknownEntry(typ, sub string, ts time.Time) *summary.UnknownRecord {
 	key := typ + "::" + sub
 	u := st.unknown[key]
 	if u == nil {
@@ -736,7 +757,7 @@ func (st *state) bumpUnknown(typ, sub string, ts time.Time) {
 		}
 		st.unknown[key] = u
 	}
-	u.Count++
+	return u
 }
 
 func (st *state) finalize() {

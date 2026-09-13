@@ -18,9 +18,11 @@ type SubagentInput struct {
 }
 
 // SubagentParseFailureMarker is bumped into the parent's Unknown when a
-// dispatched subagent transcript fails to parse. The row is still written,
-// with no duration — this marker is what separates a transcript whose shape
-// drifted from one with no measurable span.
+// dispatched subagent transcript cannot be read through. The row is still
+// written, with no duration — this marker is what separates a transcript
+// that could not be read from one with no measurable span. Shape drift inside
+// a transcript that does read through is not this: it lands as the
+// transcript's own Unknown records, folded into the parent.
 const SubagentParseFailureMarker = "__subagent_parse_failed__"
 
 // foldSubagents writes one Subagent row per dispatch: one for each shipped
@@ -68,6 +70,11 @@ func foldSubagents(st *state, subs []SubagentInput) {
 			f.sa.ResultSummary = truncate(sub.lastAssistantText, resultTextLimit)
 			f.sa.ErrorCount = len(sub.s.Errors)
 			f.sa.Usage = subagentUsage(sub.s)
+			// The transcript's drift is the parent's to report, since the
+			// subagent has no session row of its own in summaries.db.
+			for _, u := range sub.s.Unknown {
+				st.mergeUnknown(u)
+			}
 			// The row lives in the parent's session, so its turn is the
 			// dispatching turn, as on the subagents row; the transcript's
 			// own turn numbering means nothing there.
@@ -110,10 +117,10 @@ func foldSubagents(st *state, subs []SubagentInput) {
 	}
 }
 
-// parseSubagent folds one transcript, returning nil when it can't be read or
-// parsed. A parse error here is not malformed JSON — feed absorbs that into
-// Unknown — it is a decode failure on a known record type, so it is drift and
-// is bumped onto the parent rather than dropped.
+// parseSubagent folds one transcript, returning nil when it can't be read
+// through. A parse error here is neither malformed JSON nor a drifted payload
+// — feed absorbs both into the transcript's own Unknown — it is the reader
+// failing mid-stream, so it is bumped onto the parent rather than dropped.
 func parseSubagent(st *state, in SubagentInput) *state {
 	rc, err := in.Open()
 	if err != nil {
