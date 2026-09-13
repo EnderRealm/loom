@@ -1,11 +1,10 @@
 package cmd
 
 import (
-	"time"
-
 	"github.com/spf13/cobra"
 
 	"loom/internal/summarize"
+	"loom/transport/shipper"
 )
 
 var summarizeCmd = &cobra.Command{
@@ -32,7 +31,7 @@ func init() {
 	f.BoolP("v", "v", false, "verbose progress")
 	f.Bool("watch", false, "stay running and re-sweep on a ticker")
 	f.Bool("rebuild", false, "drop the summary DB and rebuild from received/")
-	f.Duration("interval", 30*time.Second, "watch-mode sweep interval")
+	f.Duration("interval", shipper.DefaultSummarizerInterval, "watch-mode sweep interval")
 
 	rootCmd.AddCommand(summarizeCmd)
 }

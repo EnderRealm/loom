@@ -12,19 +12,60 @@ import (
 
 	"loom/internal/config"
 	"loom/internal/runreport"
+	"loom/transport/shipper"
 )
 
 // runsWindow bounds the runs list: the last 30 days, with no upper bound so
 // a run still going is listed.
 const runsWindow = 30 * 24 * time.Hour
 
+// runDetailRefresh is how often an open run detail reloads itself.
+const runDetailRefresh = 5 * time.Second
+
 // listSummaries and loadRunDetail are the queries the overlays run off the
-// update loop. Variables so a test can stand in a loader that blocks and
-// show the loop keeps taking keys while it does.
+// update loop; lastShipperSync and pipelineCadences are the local shipper
+// state and the configured cadences read beside a detail load. Variables
+// so a test can stand in a loader that blocks and show the loop keeps
+// taking keys while it does.
 var (
-	listSummaries = runreport.ListSummaries
-	loadRunDetail = runreport.LoadDetail
+	listSummaries    = runreport.ListSummaries
+	loadRunDetail    = runreport.LoadDetail
+	lastShipperSync  = shipper.LastSync
+	pipelineCadences = shipper.Cadences
 )
+
+// pipelineState is what a detail load reads beside the report: the local
+// shipper's last successful sync, meaningful only when shippedKnown, and
+// how old the sweep marker and that sync may be before each reads stale.
+type pipelineState struct {
+	shippedAt       time.Time
+	shippedKnown    bool
+	sweepStaleAfter time.Duration
+	shipStaleAfter  time.Duration
+}
+
+// minStaleAfter floors the stale thresholds so a cadence of a second or two
+// does not flicker into stale between ticks.
+const minStaleAfter = 30 * time.Second
+
+// staleAfter is how old a marker may be before its producer is reported
+// stale: two of its cadences, so the marker's age at the moment a tick is
+// due does not read as stale, and never less than minStaleAfter.
+func staleAfter(cadence time.Duration) time.Duration {
+	return max(2*cadence, minStaleAfter)
+}
+
+// loadPipelineState reads the shipper's sync and the configured cadences.
+// A config that cannot be read leaves the default cadences, so a bad
+// config.json degrades the thresholds rather than the detail.
+func loadPipelineState() pipelineState {
+	ship, sweep, err := pipelineCadences()
+	if err != nil {
+		ship, sweep = shipper.DefaultIntervalMinutes*time.Minute, shipper.DefaultSummarizerInterval
+	}
+	shippedAt, known := lastShipperSync()
+	return pipelineState{shippedAt: shippedAt, shippedKnown: known, sweepStaleAfter: staleAfter(sweep), shipStaleAfter: staleAfter(ship)}
+}
 
 func summariesPath() string {
 	return filepath.Join(config.Home(), "summaries.db")
@@ -38,10 +79,23 @@ type runsLoadedMsg struct {
 	err  error
 }
 
+// runDetailLoadedMsg carries gen so a result from an earlier opening of the
+// same run is told from the current one's, the way runDetailTickMsg is.
 type runDetailLoadedMsg struct {
 	runID  string
+	gen    int
 	detail *runreport.Detail
 	err    error
+	// pipeline is read in the same goroutine as the detail.
+	pipeline pipelineState
+}
+
+// runDetailTickMsg is one beat of an open run detail's refresh chain. The
+// run id and gen name the opening that armed it: a beat for any other is
+// dropped and not re-armed, so at most one chain runs at a time.
+type runDetailTickMsg struct {
+	runID string
+	gen   int
 }
 
 func loadRunsCmd() tea.Cmd {
@@ -51,11 +105,17 @@ func loadRunsCmd() tea.Cmd {
 	}
 }
 
-func loadRunDetailCmd(runID string) tea.Cmd {
+func loadRunDetailCmd(runID string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		d, err := loadRunDetail(summariesPath(), runID)
-		return runDetailLoadedMsg{runID: runID, detail: d, err: err}
+		return runDetailLoadedMsg{runID: runID, gen: gen, detail: d, err: err, pipeline: loadPipelineState()}
 	}
+}
+
+func runDetailTickCmd(runID string, gen int) tea.Cmd {
+	return tea.Tick(runDetailRefresh, func(time.Time) tea.Msg {
+		return runDetailTickMsg{runID: runID, gen: gen}
+	})
 }
 
 type runsModel struct {

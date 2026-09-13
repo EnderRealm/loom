@@ -95,9 +95,6 @@ func installShipper() error {
 	if err != nil {
 		return err
 	}
-	if cfg.IntervalMinutes <= 0 {
-		cfg.IntervalMinutes = shipper.DefaultIntervalMinutes
-	}
 	bin, err := loomBinary()
 	if err != nil {
 		return err
@@ -132,7 +129,7 @@ func installShipper() error {
 	fmt.Printf("installed shipper:\n")
 	fmt.Printf("  label:    %s\n", spec.Label)
 	fmt.Printf("  binary:   %s\n", bin)
-	fmt.Printf("  interval: %d min (in-process ticker; plist is KeepAlive)\n", cfg.IntervalMinutes)
+	fmt.Printf("  interval: %s (in-process ticker; plist is KeepAlive)\n", cfg.Interval())
 	fmt.Printf("  log:      %s\n", logPath)
 	return nil
 }
@@ -231,22 +228,33 @@ func installReceiver() error {
 	return nil
 }
 
+// summarizerSpec builds the summarizer's launchd Spec. The sweep interval
+// is baked into the arguments at install time, so a config change takes
+// effect on reinstall.
+func summarizerSpec(bin, logPath string, interval time.Duration) launchd.Spec {
+	return launchd.Spec{
+		Label:     summarizerLabel,
+		Program:   bin,
+		Args:      []string{"summarize", "--watch", "--interval", interval.String()},
+		LogPath:   logPath,
+		Env:       map[string]string{"LOOM_HOME": config.Home()},
+		KeepAlive: true,
+		RunAtLoad: true,
+	}
+}
+
 func installSummarizer() error {
+	interval, err := shipper.SummarizerInterval()
+	if err != nil {
+		return err
+	}
 	bin, err := loomBinary()
 	if err != nil {
 		return err
 	}
 	logPath := filepath.Join(config.Home(), "summarizer.log")
 
-	spec := launchd.Spec{
-		Label:     summarizerLabel,
-		Program:   bin,
-		Args:      []string{"summarize", "--watch"},
-		LogPath:   logPath,
-		Env:       map[string]string{"LOOM_HOME": config.Home()},
-		KeepAlive: true,
-		RunAtLoad: true,
-	}
+	spec := summarizerSpec(bin, logPath, interval)
 	if err := launchd.Install(spec); err != nil {
 		return err
 	}
@@ -256,6 +264,7 @@ func installSummarizer() error {
 	fmt.Printf("installed summarizer:\n")
 	fmt.Printf("  label:    %s\n", spec.Label)
 	fmt.Printf("  binary:   %s\n", bin)
+	fmt.Printf("  interval: %s (sweep ticker)\n", interval)
 	fmt.Printf("  log:      %s\n", logPath)
 	return nil
 }

@@ -22,15 +22,15 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show loom component status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Shipper interval lives in config.json (in-process ticker);
-		// summarizer ticks every 30s by default (plist-baked flag).
+		// Both cadences live in config.json; the summarizer's is read at
+		// daemon start, so a missing file yields its default.
 		shipperInterval := ""
 		if cfg, err := shipper.LoadConfig(); err == nil {
-			n := cfg.IntervalMinutes
-			if n <= 0 {
-				n = shipper.DefaultIntervalMinutes
-			}
-			shipperInterval = fmt.Sprintf("%dm (capture+ship ticker)", n)
+			shipperInterval = fmt.Sprintf("%s (capture+ship ticker)", cfg.Interval())
+		}
+		summarizerInterval, err := shipper.SummarizerInterval()
+		if err != nil {
+			summarizerInterval = shipper.DefaultSummarizerInterval
 		}
 
 		role := config.ReadRole()
@@ -54,7 +54,7 @@ var statusCmd = &cobra.Command{
 			human:    "loom-summarizer",
 			label:    summarizerLabel,
 			logPath:  filepath.Join(config.Home(), "summarizer.log"),
-			interval: "30s (sweep ticker)",
+			interval: fmt.Sprintf("%s (sweep ticker)", summarizerInterval),
 			role:     role,
 			expected: expected[summarizerLabel],
 		})

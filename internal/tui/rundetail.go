@@ -16,15 +16,35 @@ import (
 // execution hierarchy, stages and lens attempts, windowed by offset. Two
 // cursors move apart from the scroll: node walks the hierarchy, lens walks
 // the lens attempts, and enter on a lens attempt opens the whole response
-// the store kept for it.
+// the store kept for it. The detail reloads itself every runDetailRefresh
+// with one load out at a time; a failed reload leaves the last good report
+// up and marks it stale.
 type runDetailModel struct {
-	runID   string
-	detail  *runreport.Detail
+	runID string
+	// gen names this opening of the run: a tick or load result carrying
+	// another gen belongs to an earlier opening and is dropped.
+	gen    int
+	detail *runreport.Detail
+	// err is the failure with nothing to show; loading is true until the
+	// first result of either kind.
 	err     error
 	loading bool
-	width   int
-	height  int
-	offset  int
+	// refreshing is true while a load is out. A tick or `r` that lands
+	// then is coalesced into it rather than starting a second.
+	refreshing bool
+	// loadedAt is the last successful load; staleErr the refresh that
+	// failed after it, cleared by the next success.
+	loadedAt time.Time
+	staleErr error
+	// sweptAt is when the summarizer last completed a sweep of the
+	// database (zero when none is recorded, or sweepErr says why it could
+	// not be read); pipeline is the shipper's sync and the stale thresholds.
+	sweptAt  time.Time
+	sweepErr error
+	pipeline pipelineState
+	width    int
+	height   int
+	offset   int
 
 	nodes  []treeNode
 	node   int
@@ -57,8 +77,20 @@ type detailLines struct {
 	lensAt []int
 }
 
-func newRunDetailModel(runID string, w, h int) runDetailModel {
-	return runDetailModel{runID: runID, loading: true, width: w, height: h}
+// newRunDetailModel is a detail whose first load the caller sends out with
+// it, so refreshing starts true and a tick before that load returns is
+// coalesced into it.
+func newRunDetailModel(runID string, gen, w, h int) runDetailModel {
+	return runDetailModel{runID: runID, gen: gen, loading: true, refreshing: true, width: w, height: h}
+}
+
+// refresh starts a load unless one is already out.
+func (m *runDetailModel) refresh() tea.Cmd {
+	if m.refreshing {
+		return nil
+	}
+	m.refreshing = true
+	return loadRunDetailCmd(m.runID, m.gen)
 }
 
 func (m *runDetailModel) setSize(w, h int) {
@@ -66,19 +98,31 @@ func (m *runDetailModel) setSize(w, h int) {
 	m.height = h
 }
 
-// setDetail installs a load's result. The cursors reset: a reload can
-// change the tree under them.
+// setDetail installs a load's result. A failure after a successful load
+// keeps that report up, marked stale with the error, so the body never
+// blanks under the reader; a failure with nothing loaded is the body. A
+// reload keeps the cursors and scroll where they were, clamped to the new
+// tree; only the first load starts them at the top.
 func (m *runDetailModel) setDetail(d *runreport.Detail, err error) {
 	m.loading = false
-	m.err = err
-	m.detail = d
-	m.nodes, m.lenses = nil, nil
-	m.node, m.lens = 0, 0
-	m.offset, m.responseScroll = 0, 0
-	m.showResponse = false
-	if err != nil || d == nil {
+	m.refreshing = false
+	if err != nil {
+		if m.detail != nil {
+			m.staleErr = err
+			return
+		}
+		m.err = err
 		return
 	}
+	if d == nil {
+		return
+	}
+	first := m.detail == nil
+	m.err, m.staleErr = nil, nil
+	m.loadedAt = time.Now()
+	m.detail = d
+	m.sweptAt, m.sweepErr = d.SweptAt, d.SweepErr
+	m.nodes, m.lenses = nil, nil
 	rep := d.Report
 	if rep.Tree != nil {
 		m.flatten(rep.Tree, 0, false)
@@ -90,6 +134,18 @@ func (m *runDetailModel) setDetail(d *runreport.Detail, err error) {
 		for a := range rep.Lenses[g].Attempts {
 			m.lenses = append(m.lenses, lensRef{group: g, attempt: a})
 		}
+	}
+	if first {
+		m.node, m.lens = 0, 0
+		m.offset, m.responseScroll = 0, 0
+		m.showResponse = false
+		return
+	}
+	m.node = min(m.node, max(0, len(m.nodes)-1))
+	m.lens = min(m.lens, max(0, len(m.lenses)-1))
+	if len(m.lenses) == 0 {
+		m.showResponse = false
+		m.responseScroll = 0
 	}
 }
 
@@ -376,12 +432,58 @@ func (m runDetailModel) headerLines(width int) []string {
 	}
 	out = append(out,
 		field("Last seen", seen),
+		field("Freshness", m.freshnessCell(width)),
+		field("Pipeline", m.pipelineCell()),
 		field("Started", stampCell(run.StartedAt)+StyleDim.Render("   ended  ")+stampCell(run.EndedAt)),
 	)
 	for _, g := range tel.Gaps {
 		out = append(out, StyleDim.Render("  · "+truncate(sanitize(g), width-4)))
 	}
 	return out
+}
+
+// clockAgo is a wall-clock stamp with its age.
+func clockAgo(t time.Time) string {
+	return t.Local().Format("15:04:05") + " (" + humanDuration(time.Since(t)) + " ago)"
+}
+
+// freshnessCell is how current this view is: when it last loaded, or the
+// load it is stale from and why, and whether a refresh is out.
+func (m runDetailModel) freshnessCell(width int) string {
+	loaded := white("loaded " + clockAgo(m.loadedAt))
+	if m.staleErr != nil {
+		loaded = StyleWarning.Render(truncate("stale — last successful load "+clockAgo(m.loadedAt)+": "+sanitize(m.staleErr.Error()), max(20, width-16)))
+	}
+	if m.refreshing {
+		loaded += StyleDim.Render("  refreshing…")
+	}
+	return loaded
+}
+
+// pipelineCell is how current the data behind the view is: when the
+// summarizer last completed a sweep of the database and when the local
+// shipper last reached the receiver, each stale past its threshold. Either
+// not recorded, or a sweep marker that could not be read, says so rather
+// than reading as current.
+func (m runDetailModel) pipelineCell() string {
+	swept := StyleDim.Render("swept " + unavailable + "  no sweep recorded")
+	switch {
+	case m.sweepErr != nil:
+		swept = StyleDim.Render("swept "+unavailable+"  ") + StyleWarning.Render(sanitize(m.sweepErr.Error()))
+	case !m.sweptAt.IsZero():
+		swept = StyleDim.Render("swept ") + white(clockAgo(m.sweptAt))
+		if time.Since(m.sweptAt) > m.pipeline.sweepStaleAfter {
+			swept += " " + StyleWarning.Render("stale")
+		}
+	}
+	shipped := StyleDim.Render("shipped " + unavailable + "  no local shipper state")
+	if m.pipeline.shippedKnown {
+		shipped = StyleDim.Render("shipped ") + white(clockAgo(m.pipeline.shippedAt))
+		if time.Since(m.pipeline.shippedAt) > m.pipeline.shipStaleAfter {
+			shipped += " " + StyleWarning.Render("stale")
+		}
+	}
+	return swept + StyleDim.Render("  ·  ") + shipped
 }
 
 func (m runDetailModel) timeLines(width int) []string {

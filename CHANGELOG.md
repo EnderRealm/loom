@@ -8,6 +8,26 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Thirty-second visibility into an active run. `config.json` takes
+  `interval_seconds` and `summarizer_interval_seconds`: a positive seconds
+  value overrides the minute cadence, an absent one keeps it, and zero or
+  negative is rejected. `loom install summarizer` bakes the configured
+  interval into the plist as `--interval` (reinstall to change it), and the
+  summarizer stamps the database with the end of each completed sweep. The
+  `loom ui` run detail reloads itself every 5 seconds with one load out at a
+  time — a tick or `r` during a load is coalesced into it — keeping the
+  cursors and scroll across reloads. Its header carries a `Freshness` line
+  (last successful load, `stale` with the error when a reload fails, while
+  the last good report stays up) and a `Pipeline` line (the summarizer's
+  last sweep and the local shipper's last sync, each `stale` past twice its
+  configured cadence and never under 30 seconds, or that neither is
+  recorded).
+  Tokens remain what the transcripts recorded: a pending execution reads
+  `pending` with tokens unavailable. `internal/pipeline` carries complete
+  parent, child, Weft and routed-lens records from producer files through
+  the shipper, a receiver, the summarizer and the run view in one process,
+  and checks late and post-outage records land exactly once.
+
 - `loom ui` runs screen (`w` from the dashboard) and `loom ui --run <id>`:
   the last 30 days of runs as one sortable row each — ticket, date, outcome,
   telemetry completeness with the pending count, last observed, wall,
@@ -40,6 +60,13 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   metric standing. `workreport` exports the pricing helpers and
   `HumanInteraction`, and `runs` exports `SpanningInvocation`, so the report
   shares those rules rather than copying them.
+
+### Fixed
+
+- The shipper released its pass lock only when the process exited, so with
+  `flock` per open description the daemon's next tick was refused as another
+  shipper until the leaked descriptor was garbage collected. The lock is now
+  held for the pass and released at its end.
 
 ## [1.7.0] — 2026-09-12 — Session metrics baseline
 

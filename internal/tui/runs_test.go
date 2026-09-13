@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -221,27 +222,7 @@ func TestRunsListLoadsOffTheUpdateLoop(t *testing.T) {
 	}
 	t.Cleanup(func() { listSummaries = prev })
 
-	type step struct {
-		m   tea.Model
-		cmd tea.Cmd
-	}
-	// Every Update runs on its own goroutine under a deadline: one that ran
-	// the loader inline would sit on the channel and fail here rather than
-	// hang the suite.
-	update := func(m tea.Model, msg tea.Msg) step {
-		done := make(chan step, 1)
-		go func() {
-			next, cmd := m.Update(msg)
-			done <- step{next, cmd}
-		}()
-		select {
-		case s := <-done:
-			return s
-		case <-time.After(2 * time.Second):
-			t.Fatalf("Update(%T) blocked on the loader", msg)
-			return step{}
-		}
-	}
+	update := func(m tea.Model, msg tea.Msg) step { return updateWithin(t, m, msg) }
 
 	var m tea.Model = New()
 	m = update(m, tea.WindowSizeMsg{Width: 160, Height: 30}).m
@@ -286,6 +267,49 @@ func TestRunsListLoadsOffTheUpdateLoop(t *testing.T) {
 	if v := app.View(); !strings.Contains(v, "t/a") || strings.Contains(v, "loading…") {
 		t.Errorf("view after the load:\n%s", v)
 	}
+}
+
+type step struct {
+	m   tea.Model
+	cmd tea.Cmd
+}
+
+// updateWithin runs one Update on its own goroutine under a deadline: one
+// that ran a loader inline would sit on its channel and fail here rather
+// than hang the suite.
+func updateWithin(t *testing.T, m tea.Model, msg tea.Msg) step {
+	t.Helper()
+	done := make(chan step, 1)
+	go func() {
+		next, cmd := m.Update(msg)
+		done <- step{next, cmd}
+	}()
+	select {
+	case s := <-done:
+		return s
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Update(%T) blocked on the loader", msg)
+		return step{}
+	}
+}
+
+// runCmd executes cmd off the test goroutine, delivering what it and every
+// member of a batch produce to msgs. A refresh tick among them sleeps out
+// its interval in the background and is never waited on.
+func runCmd(cmd tea.Cmd, msgs chan<- tea.Msg) {
+	if cmd == nil {
+		return
+	}
+	go func() {
+		msg := cmd()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				runCmd(c, msgs)
+			}
+			return
+		}
+		msgs <- msg
+	}()
 }
 
 // fixtureRun is internal/runs/testdata/executions.jsonl's run, with its
@@ -511,7 +535,7 @@ func TestRunDetailTotalsRenderUnmeteredAsUnavailable(t *testing.T) {
 		},
 		Tree: &runs.Node{ExecutionID: "root", Kind: "stage", Stage: "work"},
 	}
-	m := newRunDetailModel("r", 120, 60)
+	m := newRunDetailModel("r", 0, 120, 60)
 	m.setDetail(&runreport.Detail{Report: rep, LensResponses: map[string]string{}}, nil)
 	lines := m.lines(m.contentWidth()).lines
 	rows := map[string]string{}
@@ -599,7 +623,7 @@ func TestRunScreensStripTerminalControls(t *testing.T) {
 	}
 	rep.Metrics.Total.PricingWarnings = []string{"warn" + csi}
 	body := map[string]string{runreport.LensKey(rep.Lenses[0].Lens, 1, 1): "one" + osc + "\ntwo" + csi + "\nthree"}
-	m := newRunDetailModel(rep.Run.RunID, 120, 80)
+	m := newRunDetailModel(rep.Run.RunID, 0, 120, 80)
 	m.setDetail(&runreport.Detail{Report: rep, LensResponses: body}, nil)
 	v := m.view()
 	for _, want := range []string{"loom/t", "claude", "weft", "loom", "gap", "root", "subagent", "code", "detail", "exec", "work", "security", "parsed", "satisfied", "fresh", "bad", "warn"} {
@@ -618,8 +642,16 @@ func TestRunScreensStripTerminalControls(t *testing.T) {
 	if hasControl(v) {
 		t.Errorf("response view carries a terminal control:\n%q", v)
 	}
+	// A failed refresh keeps the body and reports the error on the
+	// freshness line; a failure with nothing loaded is the body.
+	m, _ = m.update(key("esc"))
 	m.setDetail(nil, errors.New("run not found: "+csi))
-	if v := m.view(); hasControl(v) || !strings.Contains(v, "run not found") {
+	if v := m.view(); hasControl(v) || !strings.Contains(v, "run not found") || !strings.Contains(v, "HIERARCHY") {
+		t.Errorf("stale view:\n%q", v)
+	}
+	fresh := newRunDetailModel("r", 0, 120, 80)
+	fresh.setDetail(nil, errors.New("run not found: "+csi))
+	if v := fresh.view(); hasControl(v) || !strings.Contains(v, "run not found") {
 		t.Errorf("error view:\n%q", v)
 	}
 
@@ -643,7 +675,7 @@ func TestRunDetailResponseViewSurvivesATinyHeight(t *testing.T) {
 		Lenses: []runreport.LensGroup{{Lens: "security", Round: 1, Attempts: []runreport.LensAttempt{{Attempt: 1}}}},
 	}
 	body := map[string]string{runreport.LensKey("security", 1, 1): "one\ntwo\nthree\nfour"}
-	m := newRunDetailModel("r", 80, 3)
+	m := newRunDetailModel("r", 0, 80, 3)
 	m.setDetail(&runreport.Detail{Report: rep, LensResponses: body}, nil)
 	m, _ = m.update(key("enter"))
 	for h := 0; h <= 6; h++ {
@@ -651,5 +683,303 @@ func TestRunDetailResponseViewSurvivesATinyHeight(t *testing.T) {
 		if v := m.view(); !strings.Contains(v, "LENS RESPONSE") || !strings.Contains(v, "one") {
 			t.Errorf("height %d: response view lost its body:\n%s", h, v)
 		}
+	}
+}
+
+// threeNodeDetail is a run with a root and two children, one of them still
+// pending with no transcript metered, and one lens attempt.
+func threeNodeDetail() *runreport.Detail {
+	rep := &runreport.Report{
+		Run:       runreport.RunInfo{RunID: "r", Outcome: runreport.OutcomeRunning},
+		Telemetry: runreport.Telemetry{State: runreport.StatePartial, ExecutionsPending: []string{"lens-1"}},
+		Metrics: runreport.Scopes{
+			Parent:      runreport.Metrics{Executions: 1, TokensByRuntime: map[string]*runreport.Tokens{"claude-code": {Total: 1200}}, TotalTokens: 1200},
+			Descendants: runreport.Metrics{Executions: 2, TokensByRuntime: map[string]*runreport.Tokens{"claude-code": {Total: 300}}, TotalTokens: 300},
+			Total:       runreport.Metrics{Executions: 3, TokensByRuntime: map[string]*runreport.Tokens{"claude-code": {Total: 1500}}, TotalTokens: 1500},
+		},
+		Executions: []runreport.ExecutionMetrics{
+			{ExecutionID: "root-1", Kind: "root", Metrics: runreport.Metrics{TokensByRuntime: map[string]*runreport.Tokens{"claude-code": {Total: 1200}}, TotalTokens: 1200}},
+			{ExecutionID: "stage-1", Kind: "stage", Metrics: runreport.Metrics{TokensByRuntime: map[string]*runreport.Tokens{"claude-code": {Total: 300}}, TotalTokens: 300}},
+			{ExecutionID: "lens-1", Kind: "lens", Lens: "security"},
+		},
+		Tree: &runs.Node{ExecutionID: "root-1", Kind: "root", Children: []*runs.Node{
+			{ExecutionID: "stage-1", Kind: "stage", Stage: "work", Outcome: "completed"},
+			{ExecutionID: "lens-1", Kind: "lens", Lens: "security"},
+		}},
+		Lenses: []runreport.LensGroup{{Lens: "security", Round: 1, Attempts: []runreport.LensAttempt{{Attempt: 1, ExecutionID: "lens-1"}}}},
+	}
+	return &runreport.Detail{Report: rep, LensResponses: map[string]string{}, SweptAt: time.Now()}
+}
+
+// stubDetailLoader stands in a loader that blocks until released, counting
+// its calls, with no local shipper state.
+func stubDetailLoader(t *testing.T, detail *runreport.Detail) (release chan struct{}, loads *int32) {
+	t.Helper()
+	t.Setenv("LOOM_HOME", t.TempDir())
+	release = make(chan struct{}, 8)
+	loads = new(int32)
+	prevLoad, prevSync := loadRunDetail, lastShipperSync
+	loadRunDetail = func(string, string) (*runreport.Detail, error) {
+		atomic.AddInt32(loads, 1)
+		<-release
+		return detail, nil
+	}
+	lastShipperSync = func() (time.Time, bool) { return time.Time{}, false }
+	t.Cleanup(func() { loadRunDetail, lastShipperSync = prevLoad, prevSync })
+	return release, loads
+}
+
+func waitLoads(t *testing.T, loads *int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(loads) < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("loader called %d times, want %d", atomic.LoadInt32(loads), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func detailMsg(t *testing.T, msgs <-chan tea.Msg) runDetailLoadedMsg {
+	t.Helper()
+	select {
+	case msg := <-msgs:
+		d, ok := msg.(runDetailLoadedMsg)
+		if !ok {
+			t.Fatalf("got %T, want runDetailLoadedMsg", msg)
+		}
+		return d
+	case <-time.After(2 * time.Second):
+		t.Fatal("no detail load arrived")
+		return runDetailLoadedMsg{}
+	}
+}
+
+// A refresh tick while a load is out starts no second load, keys still
+// land during it, the body says it is refreshing, and the tick after the
+// load returns loads again.
+func TestRunDetailRefreshCoalescesIntoTheLoadInFlight(t *testing.T) {
+	release, loads := stubDetailLoader(t, threeNodeDetail())
+	msgs := make(chan tea.Msg, 16)
+
+	var m tea.Model = New()
+	m = updateWithin(t, m, tea.WindowSizeMsg{Width: 160, Height: 60}).m
+	m, cmd := m.(App).openRun("r")
+	app := m.(App)
+	gen := app.runDetail.gen
+	runCmd(cmd, msgs)
+	waitLoads(t, loads, 1)
+
+	s := updateWithin(t, app, runDetailTickMsg{runID: "r", gen: gen})
+	app = s.m.(App)
+	runCmd(s.cmd, msgs)
+	app = updateWithin(t, app, key("down")).m.(App)
+	if app.runDetail.offset != 1 {
+		t.Errorf("down during the load: offset %d, want 1", app.runDetail.offset)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := atomic.LoadInt32(loads); n != 1 {
+		t.Fatalf("a tick during the load started another: %d loads", n)
+	}
+
+	release <- struct{}{}
+	app = updateWithin(t, app, detailMsg(t, msgs)).m.(App)
+	if app.runDetail.refreshing || app.runDetail.detail == nil {
+		t.Fatalf("after the load: refreshing %v detail %v", app.runDetail.refreshing, app.runDetail.detail != nil)
+	}
+	if !strings.Contains(app.View(), "loaded ") || strings.Contains(app.View(), "refreshing…") {
+		t.Errorf("view after the load:\n%s", app.View())
+	}
+
+	s = updateWithin(t, app, runDetailTickMsg{runID: "r", gen: gen})
+	app = s.m.(App)
+	runCmd(s.cmd, msgs)
+	waitLoads(t, loads, 2)
+	if !app.runDetail.refreshing {
+		t.Error("the tick after the load did not mark a refresh out")
+	}
+	// The last good body stays up while the refresh is out.
+	if v := app.View(); !strings.Contains(v, "refreshing…") || !strings.Contains(v, "stage-1") {
+		t.Errorf("view during the refresh:\n%s", v)
+	}
+	// `r` during the refresh is coalesced too.
+	s = updateWithin(t, app, key("r"))
+	app = s.m.(App)
+	runCmd(s.cmd, msgs)
+	time.Sleep(20 * time.Millisecond)
+	if n := atomic.LoadInt32(loads); n != 2 {
+		t.Fatalf("r during a refresh started another load: %d loads", n)
+	}
+	release <- struct{}{}
+	app = updateWithin(t, app, detailMsg(t, msgs)).m.(App)
+	if app.runDetail.refreshing {
+		t.Error("refresh did not clear")
+	}
+}
+
+// A tick for a run the user has left, or from an earlier opening of the
+// one on screen, is dropped without re-arming; only the current opening's
+// beat carries on.
+func TestRunDetailStaleTicksAreDropped(t *testing.T) {
+	stubDetailLoader(t, threeNodeDetail())
+	m, _ := New().openRun("one")
+	m, _ = m.(App).openRun("two")
+	app := m.(App)
+	gen := app.runDetail.gen
+	for _, tick := range []runDetailTickMsg{{runID: "one", gen: gen - 1}, {runID: "two", gen: gen - 1}, {runID: "one", gen: gen}} {
+		if _, cmd := app.Update(tick); cmd != nil {
+			t.Errorf("tick %+v for another opening was re-armed", tick)
+		}
+	}
+	if _, cmd := app.Update(runDetailTickMsg{runID: "two", gen: gen}); cmd == nil {
+		t.Error("the current opening's tick was not re-armed")
+	}
+	m, _ = app.openRuns()
+	if _, cmd := m.Update(runDetailTickMsg{runID: "two", gen: gen}); cmd != nil {
+		t.Error("a tick after leaving the detail was re-armed")
+	}
+}
+
+// A refresh that fails after a successful load keeps the last body up and
+// marks it stale with the last success; the next success clears it. A
+// reload keeps the cursors and scroll where they were.
+func TestRunDetailFailedRefreshKeepsTheBody(t *testing.T) {
+	stubDetailLoader(t, threeNodeDetail())
+	var m tea.Model = New()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
+	m, _ = m.(App).openRun("r")
+	app := m.(App)
+	gen := app.runDetail.gen
+	loaded := func(d *runreport.Detail, err error) runDetailLoadedMsg {
+		return runDetailLoadedMsg{runID: "r", gen: gen, detail: d, err: err, pipeline: loadPipelineState()}
+	}
+
+	app = updateWithin(t, app, loaded(threeNodeDetail(), nil)).m.(App)
+	app = press(app, "j", "j", "down", "n")
+	if app.runDetail.node != 2 || app.runDetail.offset != 1 {
+		t.Fatalf("node %d offset %d before the reload", app.runDetail.node, app.runDetail.offset)
+	}
+	loadedAt := app.runDetail.loadedAt
+	stamp := loadedAt.Local().Format("15:04:05")
+
+	app = updateWithin(t, app, loaded(nil, errors.New("summaries.db is busy"))).m.(App)
+	v := app.View()
+	for _, want := range []string{"stale", "last successful load " + stamp, "summaries.db is busy", "stage-1", "lens-1", "HIERARCHY"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("stale view lacks %q:\n%s", want, v)
+		}
+	}
+	if !app.runDetail.loadedAt.Equal(loadedAt) {
+		t.Error("a failed refresh moved the last successful load")
+	}
+	if app.runDetail.node != 2 || app.runDetail.offset != 1 {
+		t.Errorf("failed refresh moved the cursor: node %d offset %d", app.runDetail.node, app.runDetail.offset)
+	}
+
+	app = updateWithin(t, app, loaded(threeNodeDetail(), nil)).m.(App)
+	if v := app.View(); strings.Contains(v, "stale") || strings.Contains(v, "busy") {
+		t.Errorf("a successful refresh left the stale mark:\n%s", v)
+	}
+	if app.runDetail.node != 2 || app.runDetail.offset != 1 || app.runDetail.lens != 0 {
+		t.Errorf("reload moved the cursors: node %d offset %d lens %d", app.runDetail.node, app.runDetail.offset, app.runDetail.lens)
+	}
+
+	// A smaller tree clamps the cursor rather than leaving it past the end.
+	small := threeNodeDetail()
+	small.Report.Tree.Children = small.Report.Tree.Children[:1]
+	app = updateWithin(t, app, loaded(small, nil)).m.(App)
+	if app.runDetail.node != 1 {
+		t.Errorf("node after a smaller reload = %d, want 1", app.runDetail.node)
+	}
+}
+
+// The pipeline line reports the summarizer's sweep and the shipper's sync
+// as recorded, each stale past its own threshold: a sweep or a sync older
+// than the threshold is stale, no local shipper state and no sweep marker
+// say so rather than reading as current, and a marker that cannot be read
+// names the error rather than blanking the detail.
+func TestRunDetailFreshnessLine(t *testing.T) {
+	m := newRunDetailModel("r", 0, 160, 60)
+	m.pipeline = pipelineState{sweepStaleAfter: time.Minute, shipStaleAfter: time.Minute}
+	d := threeNodeDetail()
+	d.SweptAt = time.Now().Add(-2 * time.Minute)
+	m.setDetail(d, nil)
+	v := stripANSI(m.view())
+	if !strings.Contains(v, "stale") || !strings.Contains(v, "no local shipper state") {
+		t.Errorf("stale sweep, no shipper state:\n%s", v)
+	}
+	d.SweptAt = time.Now()
+	m.pipeline.shippedAt, m.pipeline.shippedKnown = time.Now().Add(-30*time.Second), true
+	m.setDetail(d, nil)
+	v = stripANSI(m.view())
+	if strings.Contains(v, "stale") || strings.Contains(v, "no local shipper state") || !strings.Contains(v, "shipped "+m.pipeline.shippedAt.Local().Format("15:04:05")+" (30s ago)") {
+		t.Errorf("fresh sweep, fresh shipper sync:\n%s", v)
+	}
+	m.pipeline.shippedAt = time.Now().Add(-time.Hour)
+	m.setDetail(d, nil)
+	v = stripANSI(m.view())
+	if !strings.Contains(v, "shipped "+m.pipeline.shippedAt.Local().Format("15:04:05")+" (1h ago) stale") {
+		t.Errorf("fresh sweep, stale shipper sync:\n%s", v)
+	}
+	d.SweptAt = time.Time{}
+	m.setDetail(d, nil)
+	if v := stripANSI(m.view()); !strings.Contains(v, "no sweep recorded") {
+		t.Errorf("no sweep marker:\n%s", v)
+	}
+	d.SweepErr = errors.New("parse last sweep: bad marker")
+	m.setDetail(d, nil)
+	if v := stripANSI(m.view()); !strings.Contains(v, "swept —  parse last sweep: bad marker") || !strings.Contains(v, "HIERARCHY") {
+		t.Errorf("unreadable sweep marker:\n%s", v)
+	}
+}
+
+// The stale thresholds come from the configured cadences: twice each, so
+// a marker due now is not yet stale, floored so a seconds cadence does not
+// flicker; a config that cannot be read leaves the defaults.
+func TestRunDetailStaleThresholdsFollowConfiguredCadences(t *testing.T) {
+	stubDetailLoader(t, threeNodeDetail())
+	prev := pipelineCadences
+	t.Cleanup(func() { pipelineCadences = prev })
+
+	pipelineCadences = func() (time.Duration, time.Duration, error) { return 30 * time.Second, 5 * time.Second, nil }
+	got := loadPipelineState()
+	if got.shipStaleAfter != time.Minute || got.sweepStaleAfter != minStaleAfter {
+		t.Errorf("30s ship, 5s sweep: ship %s sweep %s; want 1m0s %s", got.shipStaleAfter, got.sweepStaleAfter, minStaleAfter)
+	}
+
+	pipelineCadences = func() (time.Duration, time.Duration, error) { return 0, 0, errors.New("parse config.json") }
+	got = loadPipelineState()
+	if got.shipStaleAfter != 20*time.Minute || got.sweepStaleAfter != time.Minute {
+		t.Errorf("unreadable config: ship %s sweep %s; want 20m0s 1m0s", got.shipStaleAfter, got.sweepStaleAfter)
+	}
+}
+
+// Tokens are what the report recorded and nothing else: two loads of the
+// same report render the same totals, and a pending execution with no
+// transcript metered reads pending with tokens unavailable, never a number.
+func TestRunDetailTokensComeOnlyFromRecordedUsage(t *testing.T) {
+	m := newRunDetailModel("r", 0, 160, 60)
+	tokensRow := func() string {
+		for _, l := range m.lines(m.contentWidth()).lines {
+			if plain := stripANSI(l); strings.HasPrefix(plain, "Tokens") {
+				return plain
+			}
+		}
+		return ""
+	}
+	m.setDetail(threeNodeDetail(), nil)
+	first := tokensRow()
+	m.setDetail(threeNodeDetail(), nil)
+	if second := tokensRow(); second != first || !strings.Contains(first, "1.5k") {
+		t.Errorf("tokens row changed with no new usage: %q then %q", first, second)
+	}
+	var lensLine string
+	for _, l := range m.lines(m.contentWidth()).lines {
+		if plain := stripANSI(l); strings.Contains(plain, "lens security") {
+			lensLine = plain
+		}
+	}
+	if !strings.Contains(lensLine, "pending") || !strings.Contains(lensLine, unavailable+" tok") {
+		t.Errorf("pending lens line = %q, want pending with tokens unavailable", lensLine)
 	}
 }

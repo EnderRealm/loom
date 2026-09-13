@@ -3,8 +3,10 @@ package cmd
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"loom/internal/config"
+	"loom/transport/shipper"
 )
 
 func TestResolveReceiverTokenFromEnv(t *testing.T) {
@@ -64,5 +66,23 @@ func TestReceiverSpecOmitsToken(t *testing.T) {
 	}
 	if strings.Contains(spec.PlistXML(), "LOOM_RECEIVER_TOKEN") {
 		t.Fatalf("receiver plist XML contains LOOM_RECEIVER_TOKEN:\n%s", spec.PlistXML())
+	}
+}
+
+// The summarizer plist carries its sweep cadence as arguments, so the
+// installed command reflects the configured seconds and the default alone.
+func TestSummarizerSpecCarriesTheInterval(t *testing.T) {
+	t.Setenv("LOOM_HOME", t.TempDir())
+
+	spec := summarizerSpec("/Users/me/.local/bin/loom", "/tmp/summarizer.log", 5*time.Second)
+	if got := strings.Join(spec.Args, " "); got != "summarize --watch --interval 5s" {
+		t.Fatalf("args = %q", got)
+	}
+	spec = summarizerSpec("/Users/me/.local/bin/loom", "/tmp/summarizer.log", shipper.DefaultSummarizerInterval)
+	if got := strings.Join(spec.Args, " "); got != "summarize --watch --interval 30s" {
+		t.Fatalf("default args = %q", got)
+	}
+	if !strings.Contains(spec.PlistXML(), "<string>30s</string>") {
+		t.Fatalf("plist XML lacks the interval:\n%s", spec.PlistXML())
 	}
 }

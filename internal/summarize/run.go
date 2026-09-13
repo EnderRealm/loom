@@ -63,6 +63,7 @@ func Run(opts Options) error {
 	defer cancel()
 
 	report(sweep(ctx, st, opts.ReceivedDir, opts.Force, opts.Verbose), opts.DBPath)
+	markSweep(ctx, st)
 
 	if !opts.Watch {
 		return nil
@@ -71,6 +72,8 @@ func Run(opts Options) error {
 	tick := time.NewTicker(opts.Interval)
 	defer tick.Stop()
 
+	// Sweeps run one at a time on this goroutine: a tick that fires while a
+	// sweep is still going waits for it rather than overlapping it.
 	for {
 		select {
 		case <-ctx.Done():
@@ -81,7 +84,21 @@ func Run(opts Options) error {
 			if r.parsed > 0 || r.errored > 0 {
 				report(r, opts.DBPath)
 			}
+			markSweep(ctx, st)
 		}
+	}
+}
+
+// markSweep stamps the store with the end of a sweep that ran to completion.
+// A sweep cut short by shutdown leaves the old marker: it did not see the
+// whole tree. A write failure only costs the freshness signal, so it is
+// logged rather than ending the watch.
+func markSweep(ctx context.Context, st *summaries.Store) {
+	if ctx.Err() != nil {
+		return
+	}
+	if err := st.SetLastSweep(time.Now()); err != nil {
+		log.Printf("mark sweep: %v", err)
 	}
 }
 

@@ -103,6 +103,23 @@ func TestLoadDetailCarriesTheWholeLensResponse(t *testing.T) {
 	}
 }
 
+// A sweep marker that does not parse is a defect in the freshness signal,
+// carried on the detail; the report still loads.
+func TestLoadDetailSurvivesAnUnreadableSweepMarker(t *testing.T) {
+	st, path := fixture(t)
+	if _, err := st.DB().Exec(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('last_sweep_at', 'yesterday')`); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	d, err := LoadDetail(path, fixtureRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Report == nil || !d.SweptAt.IsZero() || d.SweepErr == nil || !strings.Contains(d.SweepErr.Error(), "parse last sweep") {
+		t.Errorf("detail with a bad marker: report %v swept %s err %v", d.Report != nil, d.SweptAt, d.SweepErr)
+	}
+}
+
 func TestLensResponsesSkipsAttemptsWithNoResponse(t *testing.T) {
 	st, _ := fixture(t)
 	run, err := runs.Load(st.DB(), fixtureRun)

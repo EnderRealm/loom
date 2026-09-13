@@ -105,6 +105,37 @@ func migrate(db *sql.DB) error {
 	return err
 }
 
+// lastSweepKey is the schema_meta row holding when the summarizer last
+// completed a sweep, RFC3339Nano UTC. A reader compares it against the
+// sweep cadence to tell a live summary DB from one nothing is folding into.
+const lastSweepKey = "last_sweep_at"
+
+// SetLastSweep records t as the end of the latest completed sweep.
+func (s *Store) SetLastSweep(t time.Time) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)`,
+		lastSweepKey, t.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// LastSweep reads the sweep marker off any handle on the database, so a
+// read-only reader (run-report, the TUI) can report freshness without a
+// Store.
+func LastSweep(db *sql.DB) (time.Time, bool, error) {
+	var v string
+	err := db.QueryRow(`SELECT value FROM schema_meta WHERE key = ?`, lastSweepKey).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("read last sweep: %w", err)
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse last sweep: %w", err)
+	}
+	return t, true, nil
+}
+
 // SessionAlreadyCurrent reports whether the DB already has a summary for
 // this (agent, session_id) whose source_size and source_mtime match. Used to
 // skip re-summarizing unchanged files.

@@ -132,16 +132,18 @@ func (t tickCounts) classBreakdown() string {
 	return " " + strings.Join(parts, " ")
 }
 
-// Once executes one capture+ship pass. Acquires the file lock so a
-// concurrent Daemon and a manual `loom shipper once` don't race on
+// Once executes one capture+ship pass. Holds the file lock for the pass so
+// a concurrent Daemon and a manual `loom shipper once` don't race on
 // staging or cursors. Errors are logged but not returned: the caller is
 // the launchd job, and a non-zero exit there triggers KeepAlive respawn
 // which we don't want for a normal failed tick.
 func Once() {
-	if err := acquireLock(); err != nil {
+	unlock, err := acquireLock()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "another shipper is running, skipping")
 		return
 	}
+	defer unlock()
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -219,11 +221,10 @@ func Once() {
 		counts.captured, counts.captureFailed, shipSummary, len(state.PendingSessions))
 }
 
-// Daemon runs Once on a ticker driven by config.IntervalMinutes (or
-// DefaultIntervalMinutes when unset). Designed to run as a launchd
-// KeepAlive job so the kernel respawns us on crash; we sleep between
-// ticks ourselves rather than relying on launchd's StartInterval, which
-// dasd coalesces aggressively.
+// Daemon runs Once on a ticker driven by Config.Interval. Designed to run
+// as a launchd KeepAlive job so the kernel respawns us on crash; we sleep
+// between ticks ourselves rather than relying on launchd's StartInterval,
+// which dasd coalesces aggressively.
 //
 // Cancellable via SIGINT / SIGTERM through the supplied context.
 func Daemon(ctx context.Context) error {
@@ -231,11 +232,7 @@ func Daemon(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	interval := cfg.IntervalMinutes
-	if interval <= 0 {
-		interval = DefaultIntervalMinutes
-	}
-	d := time.Duration(interval) * time.Minute
+	d := cfg.Interval()
 	log.Printf("daemon starting interval=%s", d)
 
 	// Run once immediately so the agent gets fresh data on launchd's first
@@ -643,21 +640,34 @@ func lockPath() string {
 	return filepath.Join(config.TransportDir(), "shipper.lock")
 }
 
-func acquireLock() error {
+// acquireLock takes the non-blocking exclusive lock and returns its release.
+// flock locks belong to the open file description, so a second open in the
+// same process conflicts with the first: the lock has to be released at the
+// end of each pass, or the daemon's next tick is refused as another shipper
+// until the leaked descriptor is finalized.
+func acquireLock() (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath()), 0o700); err != nil {
-		return err
+		return nil, err
 	}
 	f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// Non-blocking exclusive lock. f is intentionally leaked: the lock releases
-	// automatically when this process exits.
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return err
+		return nil, err
 	}
-	return nil
+	return func() { f.Close() }, nil
+}
+
+// LastSync is when the shipper last reached the receiver, per the notify
+// state file; false when no state is recorded or no tick has succeeded.
+func LastSync() (time.Time, bool) {
+	state, err := notify.LoadState()
+	if err != nil || state.LastSuccessTS.IsZero() {
+		return time.Time{}, false
+	}
+	return state.LastSuccessTS, true
 }
 
 // ---------- health printer ----------

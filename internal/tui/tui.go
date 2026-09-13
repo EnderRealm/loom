@@ -55,7 +55,7 @@ func New(opts ...Options) App {
 	a := App{loading: true, dashboard: dashboardModel{sortCol: defaultSortCol()}}
 	for _, o := range opts {
 		if o.RunID != "" {
-			a.runDetail = newRunDetailModel(o.RunID, 0, 0)
+			a.runDetail = newRunDetailModel(o.RunID, 0, 0, 0)
 			a.overlay = overlayRunDetail
 		}
 	}
@@ -180,7 +180,7 @@ func (a *App) clearStatus() {
 func (a App) Init() tea.Cmd {
 	cmds := []tea.Cmd{loadCmd(), loadKnowledgeCmd(), tickCmd()}
 	if a.overlay == overlayRunDetail && a.runDetail.loading {
-		cmds = append(cmds, loadRunDetailCmd(a.runDetail.runID))
+		cmds = append(cmds, loadRunDetailCmd(a.runDetail.runID, a.runDetail.gen), runDetailTickCmd(a.runDetail.runID, a.runDetail.gen))
 	}
 	return tea.Batch(cmds...)
 }
@@ -276,10 +276,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runDetailLoadedMsg:
 		// A load for a run the user has since left is stale, not a result.
-		if msg.runID == a.runDetail.runID {
+		if msg.runID == a.runDetail.runID && msg.gen == a.runDetail.gen {
+			a.runDetail.pipeline = msg.pipeline
 			a.runDetail.setDetail(msg.detail, msg.err)
 		}
 		return a, nil
+
+	case runDetailTickMsg:
+		// A beat for a run the user has left, or from an earlier opening of
+		// this one, is dropped and not re-armed: the current opening's own
+		// chain is the only one that carries on.
+		if a.overlay != overlayRunDetail || msg.runID != a.runDetail.runID || msg.gen != a.runDetail.gen {
+			return a, nil
+		}
+		return a, tea.Batch(runDetailTickCmd(msg.runID, msg.gen), a.runDetail.refresh())
 
 	case tickMsg:
 		return a, tea.Batch(loadCmd(), loadKnowledgeCmd(), tickCmd())
@@ -373,9 +383,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "esc", "q":
 					return a.openRuns()
 				case "r":
-					a.runDetail.loading = true
 					cmd := a.setStatus("refreshing…", 2*time.Second)
-					return a, tea.Batch(loadRunDetailCmd(a.runDetail.runID), cmd)
+					return a, tea.Batch(a.runDetail.refresh(), cmd)
 				}
 			}
 			var cmd tea.Cmd
@@ -458,11 +467,14 @@ func (a App) reloadRuns() (tea.Model, tea.Cmd) {
 	return a, tea.Batch(loadRunsCmd(), cmd)
 }
 
-// openRun shows one run's detail and starts its load.
+// openRun shows one run's detail, starts its load and arms its refresh
+// chain. The gen advances past the previous opening's so a beat or load
+// still out for that one cannot join this one.
 func (a App) openRun(runID string) (tea.Model, tea.Cmd) {
-	a.runDetail = newRunDetailModel(runID, a.width, a.contentHeight())
+	gen := a.runDetail.gen + 1
+	a.runDetail = newRunDetailModel(runID, gen, a.width, a.contentHeight())
 	a.overlay = overlayRunDetail
-	return a, loadRunDetailCmd(runID)
+	return a, tea.Batch(loadRunDetailCmd(runID, gen), runDetailTickCmd(runID, gen))
 }
 
 // quit leaves, unless a gesture's deferred commit is still in flight. bubbletea

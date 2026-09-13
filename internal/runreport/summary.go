@@ -7,6 +7,7 @@ import (
 
 	"loom/internal/pricing"
 	"loom/internal/runs"
+	"loom/internal/summaries"
 )
 
 // Summary is one run as a list row: the figures a reader compares runs by,
@@ -103,12 +104,17 @@ func Summaries(db *sql.DB, table *pricing.Table, since, until time.Time) ([]Summ
 	return out, nil
 }
 
-// Detail is one run as a reader inspects it: the report, and the complete
-// body of every lens response the run's attempts carry, keyed by LensKey.
-// The bodies stay off the Report so `run-report` prints what it always has.
+// Detail is one run as a reader inspects it: the report, the complete body
+// of every lens response the run's attempts carry, keyed by LensKey, and
+// when the summarizer last completed a sweep of the database (zero when it
+// never recorded one, or when SweepErr says the marker could not be read:
+// a defect in the freshness signal does not blank the report). The extras
+// stay off the Report so `run-report` prints what it always has.
 type Detail struct {
 	Report        *Report
 	LensResponses map[string]string
+	SweptAt       time.Time
+	SweepErr      error
 }
 
 // LoadDetail opens dbPath the way Load does and reads the run's detail.
@@ -130,7 +136,8 @@ func LoadDetail(dbPath, runID string) (*Detail, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Detail{Report: rep, LensResponses: responses}, nil
+	sweptAt, _, sweepErr := summaries.LastSweep(db)
+	return &Detail{Report: rep, LensResponses: responses, SweptAt: sweptAt, SweepErr: sweepErr}, nil
 }
 
 // LensKey names one attempt the way Report.Lenses groups it.

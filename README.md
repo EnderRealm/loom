@@ -352,11 +352,15 @@ Each machine you want to ship sessions from runs its own loom shipper daemon + c
 }
 ```
 
-| Field              | Required | Default | Notes                                                         |
-| ------------------ | -------- | ------- | ------------------------------------------------------------- |
-| `server_url`       | yes      | —       | Base URL of the receiver; no trailing `/v1/ingest`            |
-| `auth_token`       | no       | empty   | Bearer token; must match the server                           |
-| `interval_minutes` | no       | `10`    | In-process ticker cadence inside `loom shipper daemon`        |
+| Field                         | Required | Default | Notes                                                                                                   |
+| ----------------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------- |
+| `server_url`                  | yes      | —       | Base URL of the receiver; no trailing `/v1/ingest`                                                      |
+| `auth_token`                  | no       | empty   | Bearer token; must match the server                                                                     |
+| `interval_minutes`            | no       | `10`    | In-process ticker cadence inside `loom shipper daemon`                                                  |
+| `interval_seconds`            | no       | unset   | Same cadence in seconds; when set it takes precedence over `interval_minutes`. Must be positive.        |
+| `summarizer_interval_seconds` | no       | `30`    | Watch-mode sweep cadence baked into the summarizer plist by `loom install summarizer`. Must be positive. |
+
+The seconds fields are the only ones the server role reads: a server has no `server_url`, and `loom install summarizer` reads `summarizer_interval_seconds` from `$LOOM_HOME/config.json` when the file exists, falling back to `30` when it does not. A zero or negative value in either seconds field is rejected rather than defaulted.
 
 Permissions: `chmod 600 ~/.loom/config.json` — it contains the bearer token.
 
@@ -367,7 +371,7 @@ loom install shipper
 ```
 
 This:
-1. Loads `$LOOM_HOME/config.json` to read `interval_minutes`
+1. Loads `$LOOM_HOME/config.json` to read the tick cadence (`interval_seconds`, else `interval_minutes`)
 2. Writes `~/Library/LaunchAgents/com.loom.shipper.plist` with `KeepAlive=true`, `ThrottleInterval=10`, `RunAtLoad=true`, and `ProgramArguments=[<loom>, shipper, daemon]`
 3. Validates the plist with `plutil -lint`
 4. Boots out any prior instance and bootstraps the new one
@@ -436,7 +440,7 @@ Install the updater (see [Auto-update](#auto-update)). It polls GitHub Releases,
 
 ### Testing an unreleased build
 
-To run code that hasn't been released yet, build in place over the pinned path and kickstart the daemons. The shipper reads `interval_minutes` at daemon startup, the receiver re-execs on `KeepAlive`, and the summarizer's watch loop is interruptible — kickstarting all three is enough.
+To run code that hasn't been released yet, build in place over the pinned path and kickstart the daemons. The shipper reads its interval at daemon startup, the receiver re-execs on `KeepAlive`, and the summarizer's watch loop is interruptible — kickstarting all three is enough.
 
 ```sh
 cd loom
@@ -454,7 +458,8 @@ The updater will reinstate the latest release on its next tick, so use this only
 Re-run `loom install <component>` when any of these change:
 
 - **Binary path** — you moved the loom binary off the absolute path the plist pinned
-- **`interval_minutes`** in config — only takes effect at daemon startup; reinstall (or kickstart -k) the shipper after editing
+- **`interval_minutes` / `interval_seconds`** in config — only take effect at daemon startup; reinstall (or kickstart -k) the shipper after editing
+- **`summarizer_interval_seconds`** in config — baked into the summarizer plist as `--interval` at install time; reinstall the summarizer after editing
 - **`LOOM_HOME`** — if non-default, it's baked into `EnvironmentVariables` on every plist
 - **`LOOM_RECEIVER_TOKEN`** — persisted to `~/.loom/receiver-token` at install time; re-export and reinstall (or edit the file) to rotate
 

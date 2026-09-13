@@ -17,7 +17,7 @@ var shipperCmd = &cobra.Command{
 	Long: `Shipper subcommands:
 
   loom shipper once     ship any new session bytes and exit
-  loom shipper daemon   stay running, ship every interval_minutes (config.json)
+  loom shipper daemon   stay running, ship every interval_seconds or interval_minutes (config.json)
   loom shipper health   show last-sync / pending-session state`,
 }
 
