@@ -24,6 +24,8 @@ const (
 	overlayDetail
 	overlayKnowledge
 	overlayActivity
+	overlayRuns
+	overlayRunDetail
 )
 
 type App struct {
@@ -31,6 +33,8 @@ type App struct {
 	detail    detailModel
 	knowledge knowledgeModel
 	activity  activityModel
+	runs      runsModel
+	runDetail runDetailModel
 	overlay   overlayID
 	width     int
 	height    int
@@ -41,8 +45,21 @@ type App struct {
 	quitting  bool
 }
 
-func New() App {
-	return App{loading: true, dashboard: dashboardModel{sortCol: defaultSortCol()}}
+// Options is what `loom ui` passes in: RunID opens the app on that run's
+// detail rather than the dashboard.
+type Options struct {
+	RunID string
+}
+
+func New(opts ...Options) App {
+	a := App{loading: true, dashboard: dashboardModel{sortCol: defaultSortCol()}}
+	for _, o := range opts {
+		if o.RunID != "" {
+			a.runDetail = newRunDetailModel(o.RunID, 0, 0)
+			a.overlay = overlayRunDetail
+		}
+	}
+	return a
 }
 
 // defaultSortCol returns the index of the SESSIONS column so the dashboard's
@@ -161,7 +178,11 @@ func (a *App) clearStatus() {
 }
 
 func (a App) Init() tea.Cmd {
-	return tea.Batch(loadCmd(), loadKnowledgeCmd(), tickCmd())
+	cmds := []tea.Cmd{loadCmd(), loadKnowledgeCmd(), tickCmd()}
+	if a.overlay == overlayRunDetail && a.runDetail.loading {
+		cmds = append(cmds, loadRunDetailCmd(a.runDetail.runID))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -173,6 +194,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.detail.setSize(a.width, a.contentHeight())
 		a.knowledge.setSize(a.width, a.contentHeight())
 		a.activity.setSize(a.width, a.contentHeight())
+		a.runs.setSize(a.width, a.contentHeight())
+		a.runDetail.setSize(a.width, a.contentHeight())
 		return a, nil
 
 	case projectsLoadedMsg:
@@ -247,6 +270,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.activity.setData(msg.view, msg.tickets)
 		return a, nil
 
+	case runsLoadedMsg:
+		a.runs.setRows(msg.rows, msg.err)
+		return a, nil
+
+	case runDetailLoadedMsg:
+		// A load for a run the user has since left is stale, not a result.
+		if msg.runID == a.runDetail.runID {
+			a.runDetail.setDetail(msg.detail, msg.err)
+		}
+		return a, nil
+
 	case tickMsg:
 		return a, tea.Batch(loadCmd(), loadKnowledgeCmd(), tickCmd())
 
@@ -313,6 +347,41 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.activity, cmd = a.activity.update(msg)
 			return a, cmd
 		}
+		if a.overlay == overlayRuns {
+			switch msg.String() {
+			case "esc", "q":
+				a.overlay = overlayNone
+				return a, nil
+			case "r":
+				return a.reloadRuns()
+			case "enter", "o", "l", "right":
+				if sel := a.runs.selected(); sel != nil {
+					return a.openRun(sel.RunID)
+				}
+				return a, nil
+			}
+			var cmd tea.Cmd
+			a.runs, cmd = a.runs.update(msg)
+			return a, cmd
+		}
+		if a.overlay == overlayRunDetail {
+			// The response viewer takes its own keys; the overlay closes only
+			// from the report, back to the list it was (or would have been)
+			// opened from.
+			if !a.runDetail.showResponse {
+				switch msg.String() {
+				case "esc", "q":
+					return a.openRuns()
+				case "r":
+					a.runDetail.loading = true
+					cmd := a.setStatus("refreshing…", 2*time.Second)
+					return a, tea.Batch(loadRunDetailCmd(a.runDetail.runID), cmd)
+				}
+			}
+			var cmd tea.Cmd
+			a.runDetail, cmd = a.runDetail.update(msg)
+			return a, cmd
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return a.quit()
@@ -327,6 +396,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			a.overlay = overlayKnowledge
 			return a, loadKnowledgeCmd()
+		case "w":
+			return a.openRuns()
 		case "enter", "o", "l", "right":
 			if sel := a.dashboard.selected(); sel != nil {
 				a.detail = newDetailModel(sel, a.width, a.contentHeight())
@@ -354,9 +425,44 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.activity, cmd = a.activity.update(msg)
 		return a, cmd
 	}
+	if a.overlay == overlayRuns {
+		var cmd tea.Cmd
+		a.runs, cmd = a.runs.update(msg)
+		return a, cmd
+	}
+	if a.overlay == overlayRunDetail {
+		var cmd tea.Cmd
+		a.runDetail, cmd = a.runDetail.update(msg)
+		return a, cmd
+	}
 	var cmd tea.Cmd
 	a.dashboard, cmd = a.dashboard.update(msg)
 	return a, cmd
+}
+
+// openRuns shows the runs list, loading it the first time. The load runs off
+// the update loop: every run in the window is built as run-report builds it,
+// and the list takes keys while that happens.
+func (a App) openRuns() (tea.Model, tea.Cmd) {
+	a.overlay = overlayRuns
+	if a.runs.loaded || a.runs.loading {
+		return a, nil
+	}
+	a.runs.loading = true
+	return a, loadRunsCmd()
+}
+
+func (a App) reloadRuns() (tea.Model, tea.Cmd) {
+	a.runs.loading = true
+	cmd := a.setStatus("refreshing…", 2*time.Second)
+	return a, tea.Batch(loadRunsCmd(), cmd)
+}
+
+// openRun shows one run's detail and starts its load.
+func (a App) openRun(runID string) (tea.Model, tea.Cmd) {
+	a.runDetail = newRunDetailModel(runID, a.width, a.contentHeight())
+	a.overlay = overlayRunDetail
+	return a, loadRunDetailCmd(runID)
 }
 
 // quit leaves, unless a gesture's deferred commit is still in flight. bubbletea
@@ -439,6 +545,12 @@ func (a App) View() string {
 	if a.overlay == overlayActivity {
 		body = a.activity.view()
 	}
+	if a.overlay == overlayRuns {
+		body = a.runs.view()
+	}
+	if a.overlay == overlayRunDetail {
+		body = a.runDetail.view()
+	}
 	b.WriteString(body)
 
 	// Footer: status or help.
@@ -468,7 +580,16 @@ func (a App) helpLine() string {
 	if a.overlay == overlayActivity {
 		return "↑↓ scroll  │  r refresh  │  esc/q close"
 	}
-	return "↑↓ select  │  enter open  │  s sort  │  a activity  │  c knowledge  │  r refresh  │  q quit"
+	if a.overlay == overlayRuns {
+		return "↑↓ select  │  enter open  │  s sort  │  r refresh  │  esc/q close"
+	}
+	if a.overlay == overlayRunDetail {
+		if a.runDetail.showResponse {
+			return "↑↓ scroll  │  esc/q back"
+		}
+		return "↑↓ scroll  │  j/k node  │  n/p lens  │  enter response  │  r refresh  │  esc/q runs"
+	}
+	return "↑↓ select  │  enter open  │  s sort  │  w runs  │  a activity  │  c knowledge  │  r refresh  │  q quit"
 }
 
 // launchTk shells out to `tk ui --repo <path>` via tea.ExecProcess so the

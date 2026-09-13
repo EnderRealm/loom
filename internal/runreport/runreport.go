@@ -358,29 +358,40 @@ type Attempt struct {
 
 // Load opens dbPath read-only and reports the run.
 func Load(dbPath, runID string) (*Report, error) {
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil, fmt.Errorf("summaries.db not found at %s — run `loom summarize`", dbPath)
-	}
-	// mode=ro keeps us out of the summarizer's way; it holds the only writer.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open summaries.db: %w", err)
-	}
-	defer db.Close()
-
-	if v := workreport.SchemaVersionOf(db); v < schemaVersion {
-		return nil, fmt.Errorf("summaries.db is at schema %d and predates the execution and lens tables (want %d) — run `loom summarize --rebuild`", v, schemaVersion)
-	}
-	table, err := pricing.Default()
+	db, table, err := open(dbPath)
 	if err != nil {
 		return nil, err
 	}
+	defer db.Close()
 	run, err := runs.Load(db, runID)
 	if err != nil {
 		return nil, err
 	}
 	return Build(db, run, table)
+}
+
+// open is the one way this package reads a database: read-only, at a schema
+// that holds the execution and lens tables, priced from the default table.
+func open(dbPath string) (*sql.DB, *pricing.Table, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, nil, fmt.Errorf("summaries.db not found at %s — run `loom summarize`", dbPath)
+	}
+	// mode=ro keeps us out of the summarizer's way; it holds the only writer.
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open summaries.db: %w", err)
+	}
+	if v := workreport.SchemaVersionOf(db); v < schemaVersion {
+		db.Close()
+		return nil, nil, fmt.Errorf("summaries.db is at schema %d and predates the execution and lens tables (want %d) — run `loom summarize --rebuild`", v, schemaVersion)
+	}
+	table, err := pricing.Default()
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+	return db, table, nil
 }
 
 // unit is one execution with whatever evidence there is to meter it: its

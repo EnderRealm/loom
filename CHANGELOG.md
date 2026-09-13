@@ -8,6 +8,18 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `loom ui` runs screen (`w` from the dashboard) and `loom ui --run <id>`:
+  the last 30 days of runs as one sortable row each — ticket, date, outcome,
+  telemetry completeness with the pending count, last observed, wall,
+  execution and tool time, tokens, tool calls, failures, children and cost —
+  with `s` cycling the sort across the metric columns, and a run detail
+  showing the report's header, time, per-scope totals, failure classes, the
+  execution hierarchy with a node cursor (`j`/`k`), stages with attempts and
+  retries, and lens attempts (`n`/`p`) whose whole stored response opens on
+  enter. Rows are `runreport.SummaryOf` over the same report `run-report`
+  prints, so the two cannot disagree; what the report could not measure
+  renders as unavailable, never as zero. Both loads run off the update loop,
+  so the list takes keys while a query is out.
 - `loom run-report --run <id>` and `internal/runreport`: one JSON document
   per run measuring everything attributable to it. `cost-report` meters the
   parent span and the subagent rows it can see; this reads the execution tree

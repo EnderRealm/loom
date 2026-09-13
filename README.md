@@ -87,6 +87,7 @@ loom install updater            # keep the binary on the latest release — see 
 loom uninstall                  # remove all loom launchd agents
 loom status                     # show state of all installed components
 loom ui                         # open the dashboard (alias: loom tui)
+loom ui --run <id>              # open on one run's detail; w lists recent runs
 ```
 
 The `server` and `remote` profiles also record the machine's role under `$LOOM_HOME/role`. `loom dev` and `loom status` scope their health rollup to the daemons that role expects, so a `remote` machine running only the shipper no longer reports "degraded" for the receiver/summarizer it was never meant to run. Installing individual components (`receiver`, `summarizer`, `extractor`, `shipper`, `updater`) leaves the role untouched.
@@ -416,7 +417,7 @@ rm -f ~/.local/bin/loom
 | `loom work-report`            | `/work`-run compliance metrics from the summary DB, as JSON.                |
 | `loom cost-report`            | Per-`/work`-run cost — turns, tokens, tools, time, conditions — as JSON.    |
 | `loom run-report --run <id>`  | One run's tree with parent, descendant and total metrics, as JSON.          |
-| `loom ui`                     | Interactive dashboard (alias: `loom tui`).                                  |
+| `loom ui`                     | Interactive dashboard (alias: `loom tui`); `--run <id>` opens a run's detail. |
 | `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `extractor` / `shipper`. `server`/`remote` also record the machine role. |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |
 | `loom status`                 | Launchctl state per component + sync health + config presence.              |
