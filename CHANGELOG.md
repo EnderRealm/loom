@@ -6,6 +6,20 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A Codex `/work` run's report no longer omits its parent session. The
+  Codex render's run record names no `session_id` (no session id is
+  reachable from a shell on that runtime), so the report metered only the
+  routed lens and called its telemetry `complete`. `internal/runs` now joins
+  such a record to the session whose recognized `/work` invocation names the
+  run's ticket, in the run's runtime, and spans the run's start, claiming it
+  so the same work is not also listed as a transcript-origin run; the run
+  and the report carry `transcript_basis` (`declared`, `invocation` or
+  `transcript`), and the `loom ui` run header shows it. More than one
+  candidate is an `ambiguous_join` diagnostic and no join. A root with no
+  transcript is now a named telemetry gap, and the report reads `partial`.
+
 ## [1.8.0] — 2026-09-12 — Run visibility
 
 ### Added

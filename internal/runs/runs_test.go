@@ -277,6 +277,21 @@ func claudeRun(sessionID, ticket string, start time.Time) *summary.SessionSummar
 	}
 }
 
+// codexRun is a Codex parent session opened by the typed invocation form,
+// `$work <ticket>`, the way the Codex render's rollouts record it.
+func codexRun(sessionID, ticket string, start time.Time) *summary.SessionSummary {
+	return &summary.SessionSummary{
+		SessionID: sessionID,
+		Agent:     summary.AgentCodex,
+		StartTime: start,
+		EndTime:   start.Add(time.Hour),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: "$work " + ticket, AssistantText: "on it", StartedAt: start},
+			{Idx: 1, UserMessage: "carry on", AssistantText: "done", StartedAt: start.Add(20 * time.Minute)},
+		},
+	}
+}
+
 func codexSession(sessionID, parent string, start time.Time) *summary.SessionSummary {
 	return &summary.SessionSummary{
 		SessionID:       sessionID,
@@ -432,8 +447,11 @@ func TestHistoricalRunsFromTranscripts(t *testing.T) {
 	}
 
 	rec := runByID(t, runs, "run-recorded")
-	if rec.Origin != OriginRecord {
-		t.Errorf("recorded session's run has origin %q", rec.Origin)
+	if rec.Origin != OriginRecord || rec.TranscriptBasis != BasisDeclared {
+		t.Errorf("recorded session's run has origin %q basis %q", rec.Origin, rec.TranscriptBasis)
+	}
+	if one.TranscriptBasis != BasisTranscript {
+		t.Errorf("historical run basis = %q, want %s", one.TranscriptBasis, BasisTranscript)
 	}
 
 	// Load resolves a synthesized id too.
@@ -1033,5 +1051,89 @@ func TestRunsCarryLensAttempts(t *testing.T) {
 	}
 	if _, err := json.Marshal(recorded); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A recorded run naming no transcript — the Codex render cannot reach its
+// session id — is joined to the /work invocation naming its ticket in a
+// session of its runtime whose span holds its start, and that session is
+// claimed rather than re-recognized. Two such invocations make the join
+// ambiguous: a diagnostic, no join, and both sessions stay transcript runs.
+func TestRecordWithoutSessionJoinsItsInvocation(t *testing.T) {
+	st := openStore(t, filepath.Join(t.TempDir(), "summaries.db"))
+	defer st.Close()
+	const ticket = "folio/add-owner-navigation-f58f"
+
+	writeSession(t, st, codexRun("codex-parent", ticket, base))
+	writeSession(t, st, codexSession("codex-lens", "", base.Add(10*time.Minute)))
+	path := filepath.Join(t.TempDir(), "executions.jsonl")
+	records := strings.Join([]string{
+		`{"v":1,"kind":"run","run_id":"run-codex","ticket":"` + ticket + `","runtime":"codex-cli","started_at":"2026-09-10T09:02:00Z","ended_at":"2026-09-10T09:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-run-codex","run_id":"run-codex","execution_kind":"root","started_at":"2026-09-10T09:02:00Z","ended_at":"2026-09-10T09:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-codex-security-r1-a1","run_id":"run-codex","parent_execution_id":"root-run-codex","execution_kind":"lens","lens":"security","round":1,"attempt":1,"agent":"codex-cli","session_id":"codex-lens","started_at":"2026-09-10T09:10:00Z","ended_at":"2026-09-10T09:20:00Z","outcome":"completed"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(records), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importFile(t, st, path)
+
+	run, err := Load(st.DB(), "run-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Transcript == nil || run.Transcript.Agent != "codex-cli" || run.Transcript.SessionID != "codex-parent" {
+		t.Fatalf("joined run transcript = %+v, want codex-cli/codex-parent", run.Transcript)
+	}
+	if run.TranscriptBasis != BasisInvocation {
+		t.Errorf("basis = %q, want %s", run.TranscriptBasis, BasisInvocation)
+	}
+	if run.Root == nil {
+		t.Fatal("joined run has no root")
+	}
+	wantTranscript(t, run.Root, "codex-cli", "codex-parent")
+	if len(run.Diagnostics) != 0 {
+		t.Errorf("diagnostics = %+v, want none", run.Diagnostics)
+	}
+
+	list, err := List(st.DB(), time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range list {
+		ids = append(ids, r.RunID)
+	}
+	if strings.Join(ids, ",") != "run-codex" {
+		t.Errorf("runs = %v, want the joined record alone: its session is claimed", ids)
+	}
+
+	// A second session of the same runtime with a /work of the same ticket
+	// spanning the same start: nothing says which one the record is.
+	writeSession(t, st, codexRun("codex-parent-2", ticket, base.Add(time.Minute)))
+	run, err = Load(st.DB(), "run-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Transcript != nil || run.TranscriptBasis != "" || run.Root.Transcript != nil {
+		t.Errorf("ambiguous run transcript = %+v basis %q root %+v, want none", run.Transcript, run.TranscriptBasis, run.Root.Transcript)
+	}
+	if len(run.Diagnostics) != 1 {
+		t.Fatalf("diagnostics = %+v, want one %s", run.Diagnostics, DiagAmbiguousJoin)
+	}
+	d := run.Diagnostics[0]
+	if d.Code != DiagAmbiguousJoin || d.RunID != "run-codex" || d.ExecutionID != "root-run-codex" || d.Detail != "runtime=codex-cli ticket="+ticket+" invocations=2" {
+		t.Errorf("diagnostic = %+v", d)
+	}
+	list, err = List(st.DB(), time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids = ids[:0]
+	for _, r := range list {
+		ids = append(ids, r.RunID)
+	}
+	want := "transcript:codex-cli:codex-parent:0,transcript:codex-cli:codex-parent-2:0,run-codex"
+	if strings.Join(ids, ",") != want {
+		t.Errorf("runs = %v, want %s: neither candidate is claimed", ids, want)
 	}
 }

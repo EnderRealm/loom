@@ -123,6 +123,7 @@ type RunInfo struct {
 	Origin          string              `json:"origin"`
 	Producer        string              `json:"producer"`
 	Transcript      *runs.TranscriptRef `json:"transcript"`
+	TranscriptBasis string              `json:"transcript_basis"`
 	StartedAt       string              `json:"started_at"`
 	EndedAt         string              `json:"ended_at"`
 	ReportingCutoff string              `json:"reporting_cutoff"`
@@ -132,11 +133,13 @@ type RunInfo struct {
 }
 
 // Telemetry is how complete the evidence is, apart from how the run ended.
-// State is complete when every execution has ended and every one naming a
-// transcript has that session in the database; Gaps names each reason it is
-// not. RootSpan says whether the root's parent-only span is its /work
-// invocation's turn range or, with no invocation recognized, the whole
-// session; empty when the root names no transcript.
+// State is complete when every execution has ended, every one naming a
+// transcript has that session in the database, and the root names a
+// transcript at all — a root without one leaves the parent unmetered, which
+// is a gap and not a zero; Gaps names each reason it is not. RootSpan says
+// whether the root's parent-only span is its /work invocation's turn range
+// or, with no invocation recognized, the whole session; empty when the root
+// names no transcript.
 type Telemetry struct {
 	State                       string   `json:"state"`
 	Gaps                        []string `json:"gaps"`
@@ -594,6 +597,9 @@ func (b *builder) report() *Report {
 			withTranscript++
 		} else {
 			noTranscript = append(noTranscript, n.ExecutionID)
+			if n == run.Root {
+				b.gap(fmt.Sprintf("root execution %s has no transcript; parent not metered", n.ExecutionID))
+			}
 		}
 		// A recorded execution is pending until a record closes it with an
 		// outcome. A historical dispatch's row is never pending: its NULL
@@ -659,6 +665,7 @@ func (b *builder) report() *Report {
 		Origin:          run.Origin,
 		Producer:        run.Producer,
 		Transcript:      run.Transcript,
+		TranscriptBasis: run.TranscriptBasis,
 		StartedAt:       run.StartedAt,
 		EndedAt:         run.EndedAt,
 		ReportingCutoff: run.ReportingCutoff,

@@ -403,6 +403,15 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
+// basisSegment is the header's transcript basis, present only when the run
+// has a transcript to have come by.
+func basisSegment(basis string) string {
+	if basis == "" {
+		return ""
+	}
+	return StyleDim.Render("  ·  transcript ") + white(sanitize(basis))
+}
+
 // headerLines is the run's identity with its outcome, its telemetry and its
 // freshness on three lines of their own: the record's word, how complete the
 // evidence is, and when anything was last seen are three different things.
@@ -414,6 +423,7 @@ func (m runDetailModel) headerLines(width int) []string {
 		StyleDim.Render("ticket ") + orUnavailable(truncate(sanitize(run.Ticket), 48)) +
 			StyleDim.Render("  ·  runtime ") + orUnavailable(sanitize(run.Runtime)) +
 			StyleDim.Render("  ·  origin ") + orUnavailable(sanitize(run.Origin)) +
+			basisSegment(run.TranscriptBasis) +
 			StyleDim.Render("  ·  producer ") + orUnavailable(sanitize(run.Producer)),
 		field("Outcome", lipgloss.NewStyle().Foreground(outcomeColor(run.Outcome)).Render(sanitize(run.Outcome))),
 	}

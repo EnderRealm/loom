@@ -841,6 +841,62 @@ func TestMissingSessionLeavesCostUnknown(t *testing.T) {
 	}
 }
 
+// A recorded run naming no transcript — the Codex render's form — reports
+// its root as a gap rather than complete; once a codex-cli session holding
+// the /work invocation for its ticket spans its start, the run is joined to
+// it and the parent scope meters that session's turn under the invocation.
+func TestRecordWithoutSessionIsAGapUntilJoined(t *testing.T) {
+	st, _ := openStore(t)
+	const ticket = "loom/cx-0001"
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-cx","ticket":"`+ticket+`","runtime":"codex-cli","started_at":"2026-09-10T12:02:00Z","ended_at":"2026-09-10T12:20:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-run-cx","run_id":"run-cx","execution_kind":"root","started_at":"2026-09-10T12:02:00Z","ended_at":"2026-09-10T12:20:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-cx-security-r1-a1","run_id":"run-cx","parent_execution_id":"root-run-cx","execution_kind":"lens","lens":"security","round":1,"attempt":1,"agent":"codex-cli","session_id":"sess-cx-lens","started_at":"2026-09-10T12:10:00Z","ended_at":"2026-09-10T12:15:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	writeSession(t, st, oneTurn(summary.AgentCodex, "sess-cx-lens", codexModel, begin.Add(10*time.Minute), begin.Add(15*time.Minute), 500, 100, 50, summary.KindBash, 1500))
+
+	rep := build(t, st, "run-cx")
+	if rep.Run.TranscriptBasis != "" || rep.Run.Transcript != nil {
+		t.Errorf("unjoined run: transcript %+v basis %q, want none", rep.Run.Transcript, rep.Run.TranscriptBasis)
+	}
+	if rep.Telemetry.State != StatePartial || rep.Telemetry.RootSpan != "" {
+		t.Errorf("unjoined telemetry = %+v, want partial with no root span", rep.Telemetry)
+	}
+	if !strings.Contains(strings.Join(rep.Telemetry.Gaps, "\n"), "root execution root-run-cx has no transcript; parent not metered") {
+		t.Errorf("gaps = %v, want the root's missing transcript named", rep.Telemetry.Gaps)
+	}
+	if rep.Metrics.Parent.Turns != 0 || rep.Metrics.Descendants.Turns != 1 {
+		t.Errorf("unjoined scopes = parent %d turns descendants %d turns, want 0 and the lens's 1", rep.Metrics.Parent.Turns, rep.Metrics.Descendants.Turns)
+	}
+
+	// The parent session, opened by the typed Codex invocation.
+	parent := oneTurn(summary.AgentCodex, "sess-cx-parent", codexModel, begin, begin.Add(30*time.Minute), 2000, 800, 300, summary.KindBash, 4000)
+	parent.Turns[0].UserMessage = "$work " + ticket
+	writeSession(t, st, parent)
+
+	rep = build(t, st, "run-cx")
+	if rep.Run.TranscriptBasis != runs.BasisInvocation || rep.Run.Transcript == nil || rep.Run.Transcript.SessionID != "sess-cx-parent" {
+		t.Fatalf("joined run: transcript %+v basis %q, want sess-cx-parent by invocation", rep.Run.Transcript, rep.Run.TranscriptBasis)
+	}
+	if rep.Telemetry.State != StateComplete || len(rep.Telemetry.Gaps) != 0 || rep.Telemetry.RootSpan != SpanInvocation {
+		t.Errorf("joined telemetry = %+v, want complete over the invocation span", rep.Telemetry)
+	}
+	if rep.Executions[0].ExecutionID != "root-run-cx" || rep.Executions[0].Transcript == nil || rep.Executions[0].Transcript.SessionID != "sess-cx-parent" {
+		t.Errorf("root execution = %+v, want the joined transcript", rep.Executions[0])
+	}
+	p := rep.Metrics.Parent
+	if p.Turns != 1 || p.ToolCalls != 1 || p.ToolCallsByKind["bash"] != 1 || p.ToolTimeMs != 4000 {
+		t.Errorf("parent = %d turns %d tool calls %v %dms", p.Turns, p.ToolCalls, p.ToolCallsByKind, p.ToolTimeMs)
+	}
+	if got := tokens(t, p, "codex-cli"); got != (Tokens{Input: 2000, Output: 300, CacheRead: 800, CacheSemantics: CacheReadInsideInput, Total: 2300}) {
+		t.Errorf("parent codex tokens = %+v", got)
+	}
+	if rep.Metrics.Descendants.Turns != 1 || rep.Metrics.Total.Turns != 2 || rep.Metrics.Total.TotalTokens != 2300+550 {
+		t.Errorf("scopes = descendants %d turns total %d turns %d tokens", rep.Metrics.Descendants.Turns, rep.Metrics.Total.Turns, rep.Metrics.Total.TotalTokens)
+	}
+}
+
 func TestLoadRefusesAnUnknownRun(t *testing.T) {
 	st, path := fixture(t)
 	st.Close()

@@ -102,6 +102,18 @@ holds more than one recognized run is listed unresolved under each of them
 with an `ambiguous_parent` diagnostic rather than placed by time. A session
 with a `run` record is not re-recognized: the record wins.
 
+A `run` record that names no `agent`/`session_id` — the Codex render cannot
+reach its own session id from a shell — is joined by loom to the session
+whose recognized `/work` invocation names the run's ticket, in the run's
+runtime, and spans the run's start; the root takes the same transcript when
+its record named none. The join is reported as `transcript_basis:
+invocation`, beside `declared` for a record that named its transcript and
+`transcript` for a run recognized from one, and a session so joined is
+claimed like a declared one. More than one candidate invocation is an
+`ambiguous_join` diagnostic and no join. With no join, the run-report names
+the root's missing transcript as a telemetry gap rather than reporting
+`complete`.
+
 `loom run-report --run <id>` is the read surface over that tree: one JSON
 document with the run's tree, unresolved executions and diagnostics as
 `internal/runs` reads them, and parent-only, descendant and total metrics

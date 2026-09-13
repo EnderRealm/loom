@@ -11,6 +11,11 @@
 // parent's own subagent rows, and Codex sessions whose session_meta names
 // the parent thread. Nothing is joined by project or by time alone; an
 // association the evidence cannot settle stays in Unresolved.
+//
+// A recorded run that names no transcript — the Codex render cannot reach
+// its own session id from a shell — is joined to the /work invocation naming
+// its ticket in a session of its runtime whose span holds the run's start,
+// and the Run's TranscriptBasis says so.
 package runs
 
 import (
@@ -36,6 +41,20 @@ const (
 	KindSubagent = "subagent"
 )
 
+// TranscriptBasis values: how a run came by its Transcript. Empty when the
+// run has none.
+const (
+	// BasisDeclared: the run record named it.
+	BasisDeclared = "declared"
+	// BasisInvocation: the record named none, and loom inferred it from a
+	// /work invocation naming the run's ticket in a session of the run's
+	// runtime whose span holds the run's start.
+	BasisInvocation = "invocation"
+	// BasisTranscript: a transcript-recognized run, whose transcript is its
+	// identity.
+	BasisTranscript = "transcript"
+)
+
 // Diagnostic codes the loader writes; the importer's are in summaries.
 const (
 	// DiagAmbiguousParent: a Codex subagent session whose parent session
@@ -49,6 +68,10 @@ const (
 	// — its own parent, or a member of a longer cycle. No child pointer is
 	// added for it, so the tree stays acyclic and serializable.
 	DiagCyclicParent = "cyclic_parent"
+	// DiagAmbiguousJoin: a recorded run naming no transcript for which more
+	// than one /work invocation of its runtime names its ticket and spans its
+	// start. It belongs to one of them, and nothing says which; no join.
+	DiagAmbiguousJoin = "ambiguous_join"
 )
 
 // SourceRef locates the record a row was last written from.
@@ -103,6 +126,7 @@ type Run struct {
 	Ticket          string         `json:"ticket"`
 	Runtime         string         `json:"runtime"`
 	Transcript      *TranscriptRef `json:"transcript"`
+	TranscriptBasis string         `json:"transcript_basis"`
 	StartedAt       string         `json:"started_at"`
 	EndedAt         string         `json:"ended_at"`
 	Outcome         string         `json:"outcome"`
@@ -273,7 +297,9 @@ func loadRunRow(db *sql.DB, runID string) (*runRow, error) {
 
 // buildRecorded assembles a declared run. Its lens attempts come from the
 // /work invocation recognized in its transcript: the only one in the session,
-// or with several, the one whose span holds the run's start.
+// or with several, the one whose span holds the run's start. A record naming
+// no transcript takes the one invocation inferJoin finds, and its root — a
+// record that named none either — takes the same reference.
 func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) (*Run, error) {
 	run := &Run{
 		RunID:           row.runID,
@@ -288,6 +314,9 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 		Origin:          OriginRecord,
 		Source:          &SourceRef{Path: row.sourcePath, Line: row.sourceLine},
 	}
+	if run.Transcript != nil {
+		run.TranscriptBasis = BasisDeclared
+	}
 	nodes, err := loadExecutions(db, row.runID)
 	if err != nil {
 		return nil, err
@@ -297,13 +326,65 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 		return nil, err
 	}
 	attach(run, nodes)
-	if inv, ok := SpanningInvocation(invocations, row.agent, row.sessionID, parseTime(row.startedAt)); ok {
+	var inv workreport.Invocation
+	var ok bool
+	if run.Transcript != nil {
+		inv, ok = SpanningInvocation(invocations, row.agent, row.sessionID, parseTime(row.startedAt))
+	} else {
+		var n int
+		inv, n = inferJoin(invocations, row)
+		ok = n == 1
+		switch {
+		case ok:
+			ref := TranscriptRef{Agent: inv.Agent, SessionID: inv.SessionID}
+			run.Transcript = &ref
+			run.TranscriptBasis = BasisInvocation
+			if run.Root != nil && run.Root.Transcript == nil {
+				r := ref
+				run.Root.Transcript = &r
+			}
+		case n > 1:
+			d := Diagnostic{
+				Code:   DiagAmbiguousJoin,
+				Detail: fmt.Sprintf("runtime=%s ticket=%s invocations=%d", row.runtime, row.ticket, n),
+				RunID:  row.runID,
+			}
+			if run.Root != nil {
+				d.ExecutionID = run.Root.ExecutionID
+			}
+			run.Diagnostics = append(run.Diagnostics, d)
+		}
+	}
+	if ok {
 		run.Lenses, err = workreport.Lenses(db, inv)
 		if err != nil {
 			return nil, err
 		}
 	}
 	return run, nil
+}
+
+// inferJoin finds the /work invocation a record naming no transcript belongs
+// to: same runtime, same ticket, both named, and a span holding the run's
+// start. It returns the last match and how many there were; only a count of
+// one is a join. A row with no start cannot be placed in any span.
+func inferJoin(invocations []workreport.Invocation, row runRow) (workreport.Invocation, int) {
+	startedAt := parseTime(row.startedAt)
+	if row.agent != "" || row.sessionID != "" || row.runtime == "" || row.ticket == "" || startedAt.IsZero() {
+		return workreport.Invocation{}, 0
+	}
+	var match workreport.Invocation
+	n := 0
+	for _, inv := range invocations {
+		if inv.Agent != row.runtime || inv.Ticket != row.ticket || inv.StartedAt.IsZero() || startedAt.Before(inv.StartedAt) {
+			continue
+		}
+		if inv.EndsAt.IsZero() || startedAt.Before(inv.EndsAt) {
+			match = inv
+			n++
+		}
+	}
+	return match, n
 }
 
 // SpanningInvocation picks the invocation a recorded run's lens attempts are
@@ -497,7 +578,7 @@ func loadDiagnostics(db *sql.DB, runID string) ([]Diagnostic, error) {
 // invocation in range whose session no record has claimed. The root's id is
 // transcript:<agent>:<session_id>:<turn idx>, which is also the run's.
 func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, until time.Time) ([]Run, error) {
-	recorded, err := recordedSessions(db)
+	recorded, err := recordedSessions(db, invocations)
 	if err != nil {
 		return nil, err
 	}
@@ -524,14 +605,15 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 			EndedAt:     isoOrEmpty(inv.EndsAt),
 		}
 		run := Run{
-			RunID:      id,
-			Ticket:     inv.Ticket,
-			Runtime:    inv.Agent,
-			Transcript: &ref,
-			StartedAt:  root.StartedAt,
-			EndedAt:    root.EndedAt,
-			Origin:     OriginTranscript,
-			Root:       root,
+			RunID:           id,
+			Ticket:          inv.Ticket,
+			Runtime:         inv.Agent,
+			Transcript:      &ref,
+			TranscriptBasis: BasisTranscript,
+			StartedAt:       root.StartedAt,
+			EndedAt:         root.EndedAt,
+			Origin:          OriginTranscript,
+			Root:            root,
 		}
 		if err := attachSubagentRows(db, &run, inv); err != nil {
 			return nil, err
@@ -548,23 +630,25 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 	return out, nil
 }
 
-// recordedSessions is the set of transcripts a run record claims. A session
-// with a record is not re-recognized from its transcript: the record wins.
-func recordedSessions(db *sql.DB) (map[TranscriptRef]bool, error) {
-	rows, err := db.Query(`SELECT agent, session_id FROM runs WHERE agent IS NOT NULL AND session_id IS NOT NULL`)
+// recordedSessions is the set of transcripts a run record claims, by naming
+// one or by the join inferJoin settles for a record naming none. A session so
+// claimed is not re-recognized from its transcript: the record wins.
+func recordedSessions(db *sql.DB, invocations []workreport.Invocation) (map[TranscriptRef]bool, error) {
+	rows, err := loadRunRows(db, time.Time{}, time.Time{})
 	if err != nil {
-		return nil, fmt.Errorf("query recorded sessions: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
 	out := map[TranscriptRef]bool{}
-	for rows.Next() {
-		var ref TranscriptRef
-		if err := rows.Scan(&ref.Agent, &ref.SessionID); err != nil {
-			return nil, err
+	for _, row := range rows {
+		if ref := transcriptRef(row.agent, row.sessionID); ref != nil {
+			out[*ref] = true
+			continue
 		}
-		out[ref] = true
+		if inv, n := inferJoin(invocations, row); n == 1 {
+			out[TranscriptRef{inv.Agent, inv.SessionID}] = true
+		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // attachSubagentRows adds one child per subagents row whose dispatching turn
