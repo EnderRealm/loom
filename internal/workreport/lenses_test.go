@@ -35,11 +35,15 @@ import (
 // `rg --passthru` rather than cat, one chains a cat of the README
 // redirected to a notes file after the router before reading that file,
 // and one runs two rounds appending the second verdict to the first's file
-// with `>>` before reading it back.
+// with `>>` before reading it back. codexFileWriteFixture is a Codex run
+// over two rounds whose contract and quality passes were written to files
+// through apply_patch, the routed security lens after the writes in round 1
+// and before them in round 2.
 const (
-	lensFixture          = "../parse/claudeparse/testdata/lens_responses.jsonl"
-	codexLensFixture     = "../parse/codexparse/testdata/lens_responses.jsonl"
-	codexReadbackFixture = "../parse/codexparse/testdata/lens_readback.jsonl"
+	lensFixture           = "../parse/claudeparse/testdata/lens_responses.jsonl"
+	codexLensFixture      = "../parse/codexparse/testdata/lens_responses.jsonl"
+	codexReadbackFixture  = "../parse/codexparse/testdata/lens_readback.jsonl"
+	codexFileWriteFixture = "../parse/codexparse/testdata/lens_filewrite.jsonl"
 )
 
 // foldFixture parses a transcript fixture through its parser and writes it
@@ -383,6 +387,105 @@ func TestCodexInlinedPassesAreUndispatchedAttempts(t *testing.T) {
 	}
 	if run.ContaminationReports != 0 || run.CriteriaUnverified == nil || *run.CriteriaUnverified != 0 {
 		t.Errorf("run = contamination %d criteria %v, want 0 and 0", run.ContaminationReports, run.CriteriaUnverified)
+	}
+}
+
+// A Codex run whose inlined passes were written to files: each file_write
+// row is a tool row of its lens, placed among the turn's calls by time, so
+// the round-1 writes after the first router call land in round 1, and the
+// round-2 writes ahead of the second router call — a second contract verdict
+// with the first already parsed — apply the next commitment line and land in
+// round 2, none superseding another. The same rows on a Claude
+// runtime place nothing: a file the assistant wrote is not a lens answering
+// there any more than its text is.
+func TestCodexFileWritesAreInlinedPasses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "summaries.db")
+	foldFixture(t, path, codexFileWriteFixture, summary.AgentCodex)
+	db := openRO(t, path)
+	attempts, err := Lenses(db, fixtureInvocation(t, db), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "contract/1/1/parsed quality/1/1/parsed security/1/1/parsed contract/2/1/parsed quality/2/1/parsed security/2/1/parsed"
+	if got := shapeOf(attempts); got != want {
+		t.Fatalf("attempts = %v, want %v", got, want)
+	}
+	for round, line := range map[int]int{1: 7, 2: 10} {
+		for _, name := range []string{lens.Contract, lens.Quality} {
+			a := attempt(t, attempts, name, round, 1)
+			if a.Dispatched || a.DispatchID != "" || a.Superseded || a.Late || !a.Successful() || a.ResponseTurnIdx != 0 {
+				t.Errorf("%s round %d = %+v, want an undispatched attempt standing as successful", name, round, a)
+			}
+			if a.Source == nil || a.Source.Line != line || !strings.HasSuffix(a.Source.Path, "lens_filewrite.jsonl") {
+				t.Errorf("%s round %d source = %+v, want the FileChange item on line %d", name, round, a.Source, line)
+			}
+		}
+		if a := attempt(t, attempts, lens.Security, round, 1); !a.Dispatched || a.DispatchID != fmt.Sprintf("call_sec%d", round) || !a.Successful() {
+			t.Errorf("security round %d = %+v, want dispatched by call_sec%d and successful", round, a, round)
+		}
+	}
+	if c1, c2 := attempt(t, attempts, lens.Contract, 1, 1), attempt(t, attempts, lens.Contract, 2, 1); c1.Verdict != "findings" || c2.Verdict != "satisfied" {
+		t.Errorf("contract verdicts = %s then %s, want findings then satisfied: each round's write is its own attempt", c1.Verdict, c2.Verdict)
+	}
+	var stored int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM lens_responses WHERE origin = ? AND status = 'parsed'`, summary.OriginFileWrite).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 4 {
+		t.Errorf("file_write rows stored = %d, want 4", stored)
+	}
+	rep, err := Load(path, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run := only(t, rep); run.Runtime != RuntimeCodex || !run.FanOutDispatched || run.Classification != ClassCompliant || run.ReviewIterations == nil || *run.ReviewIterations != 2 {
+		t.Errorf("run = %+v, want a compliant two-round codex run", run)
+	}
+
+	// The same rows on a Claude runtime: the router calls dispatch the
+	// security lens in both rounds and the file writes place nothing, so the
+	// committed contract and quality lenses come out missing.
+	const (
+		ticket = "loom/claude-write-9012"
+		router = "~/.codex/codex-lens.sh --lens security --payload /tmp/c/context.md"
+	)
+	at := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
+	verdict := func(name string) string {
+		return `{"lens": "` + name + `", "verdict": "satisfied", "summary": "Fine."}`
+	}
+	sum := &summary.SessionSummary{
+		SessionID: "claude-file-writes",
+		Agent:     summary.AgentClaude,
+		StartTime: at(0),
+		EndTime:   at(60),
+		Turns: []summary.Turn{{
+			Idx: 0, UserMessage: workInvocation(ticket), StartedAt: at(0),
+			AssistantText: "dispatching (" + ticket + " round 1): contract, quality, security\ndispatching (" + ticket + " round 2): contract, quality, security",
+		}},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "call_sec1", Kind: summary.KindBash, ToolName: "Bash", KeyArg: router, StartedAt: at(5), DurationMs: 9000, ResultSummary: fenced(verdict(lens.Security))},
+			{TurnIdx: 0, CallID: "call_sec2", Kind: summary.KindBash, ToolName: "Bash", KeyArg: router, StartedAt: at(20), DurationMs: 9000, ResultSummary: fenced(verdict(lens.Security))},
+		},
+	}
+	for i, w := range []struct {
+		sec  int
+		name string
+	}{{10, lens.Contract}, {11, lens.Quality}, {25, lens.Contract}, {26, lens.Quality}} {
+		sum.LensResponses = append(sum.LensResponses, summary.LensResponse{
+			TurnIdx: 0, Origin: summary.OriginFileWrite, SourceLine: 100 + i, At: at(w.sec),
+			Block: lens.Extract(fenced(verdict(w.name)))[0],
+		})
+	}
+	f := newFixture(t)
+	f.add(sum)
+	db = openRO(t, f.path)
+	attempts, err = Lenses(db, fixtureInvocation(t, db), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "contract/1/0/missing quality/1/0/missing security/1/1/parsed contract/2/0/missing quality/2/0/missing security/2/1/parsed"
+	if got := shapeOf(attempts); got != want {
+		t.Fatalf("claude attempts = %v, want %v", got, want)
 	}
 }
 

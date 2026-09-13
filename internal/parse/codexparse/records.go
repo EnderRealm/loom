@@ -126,6 +126,21 @@ type eventMsgPayload struct {
 	// token_count
 	Info       *tokenCountInfo `json:"info"`
 	RateLimits *rateLimits     `json:"rate_limits"`
+
+	// item_completed
+	Item *completedItem `json:"item"`
+}
+
+// completedItem is an item_completed event's item. Only FileChange is read,
+// for the files it added: an `add` change carries the whole file as
+// written, where an `update` carries a unified diff and a `delete` the
+// removed file's content.
+type completedItem struct {
+	Type    string `json:"type"`
+	Changes map[string]struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	} `json:"changes"`
 }
 
 type tokenCountInfo struct {

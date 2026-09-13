@@ -225,6 +225,10 @@ const (
 	OriginToolResult       = "tool_result"
 	OriginAssistant        = "assistant"
 	OriginUser             = "user"
+	// OriginFileWrite is a file the agent wrote whole through a Codex
+	// FileChange item — an inlined pass the /work render had it write to a
+	// file for verdict-merge.sh rather than into its own text.
+	OriginFileWrite = "file_write"
 )
 
 // LensResponse is one lens verdict block and where it was read from. Both

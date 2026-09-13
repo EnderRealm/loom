@@ -466,7 +466,7 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 // them for the walk.
 func loadLenses(db *sql.DB, agent, sessionID string, data *sessionData) error {
 	rows, err := db.Query(`
-		SELECT response_id, turn_idx, origin, dispatch_id, source_path, source_line,
+		SELECT response_id, turn_idx, origin, dispatch_id, source_path, source_line, at,
 		       lens, verdict, summary, status, malformed_reason,
 		       context_kind, context_state, criteria_json
 		FROM lens_responses WHERE agent = ? AND session_id = ? ORDER BY seq
@@ -477,17 +477,18 @@ func loadLenses(db *sql.DB, agent, sessionID string, data *sessionData) error {
 	defer rows.Close()
 	for rows.Next() {
 		var (
-			r                                           lensRow
-			turnIdx, sourceLine                         sql.NullInt64
-			dispatchID, sourcePath, lensName, verdict   sql.NullString
-			summaryText, reason, contextState, criteria sql.NullString
+			r                                             lensRow
+			turnIdx, sourceLine                           sql.NullInt64
+			dispatchID, sourcePath, at, lensName, verdict sql.NullString
+			summaryText, reason, contextState, criteria   sql.NullString
 		)
-		if err := rows.Scan(&r.responseID, &turnIdx, &r.origin, &dispatchID, &sourcePath, &sourceLine,
+		if err := rows.Scan(&r.responseID, &turnIdx, &r.origin, &dispatchID, &sourcePath, &sourceLine, &at,
 			&lensName, &verdict, &summaryText, &r.status, &reason,
 			&r.contextKind, &contextState, &criteria); err != nil {
 			return err
 		}
 		r.turnIdx = int(turnIdx.Int64)
+		r.at = parseTime(at)
 		r.dispatchID = dispatchID.String
 		r.sourcePath = sourcePath.String
 		r.sourceLine = int(sourceLine.Int64)
@@ -559,10 +560,11 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 		}
 		lines.scan(t.assistantText)
 		for _, r := range data.lensesByTurn[t.idx] {
-			// Only a whole block counts as an inlined pass: a malformed one
+			// Only a whole block counts as an inlined pass, whether the
+			// assistant wrote it as text or to a file: a malformed one
 			// stands on its lens field alone, which is the one field a quoted
 			// template also carries.
-			if r.origin == summary.OriginAssistant && r.status == lens.StatusParsed {
+			if (r.origin == summary.OriginAssistant || r.origin == summary.OriginFileWrite) && r.status == lens.StatusParsed {
 				inlinedLenses[r.lens] = true
 			}
 		}

@@ -7,8 +7,9 @@ orchestrator's transcript by several routes: a task notification on the user
 side for a background reviewer, the subagent call's own tool result for a
 synchronous one, the `codex-lens.sh` call's output for the routed security
 lens (or nothing, when the run redirected that output to a file and read it
-back with a later `cat`), and the assistant's own text on a runtime that
-inlines its passes. The summary tables cut every tool result at 800
+back with a later `cat`), and the assistant's own text — or a file it wrote
+whole — on a runtime that inlines its passes. The summary tables cut every
+tool result at 800
 characters, which lands inside most verdicts' criteria lists. This is the
 store that keeps them whole.
 
@@ -25,7 +26,7 @@ dropped and never promoted.
 | `agent`, `session_id`, `seq` | The session the block was read from and the block's position among its lens rows. |
 | `response_id` | The position-derived identity below. |
 | `turn_idx` | The turn the record belongs to. |
-| `origin` | Where the block landed: `task_notification`, `tool_result`, `assistant` or `user`. `task_notification` is the envelope the harness posts when a background dispatch finishes — a user record, or a `queued_command` attachment prompt, whose text opens with `<task-notification>` past any leading `<system-reminder>` blocks, and that is not a compaction summary (`isCompactSummary`). `user` is any other Claude user message, one that merely contains the marker included — a pasted note or a compaction summary quoting a whole notification, dispatch id and all, is stored with no dispatch to answer; a Codex user item is not read for blocks. |
+| `origin` | Where the block landed: `task_notification`, `tool_result`, `assistant`, `file_write` or `user`. `task_notification` is the envelope the harness posts when a background dispatch finishes — a user record, or a `queued_command` attachment prompt, whose text opens with `<task-notification>` past any leading `<system-reminder>` blocks, and that is not a compaction summary (`isCompactSummary`). `user` is any other Claude user message, one that merely contains the marker included — a pasted note or a compaction summary quoting a whole notification, dispatch id and all, is stored with no dispatch to answer; a Codex user item is not read for blocks. `file_write` is a file the agent wrote whole through a Codex `item_completed` FileChange item — the `add` change's content, which is the whole file as written, since the `/work` render has the inlined passes write their verdicts to files for `verdict-merge.sh` and a file written through `apply_patch` lands in no message. An `update` carries a unified diff and a `delete` the removed file's content — the run's cleanup deletes every verdict file at once — and neither is read. |
 | `dispatch_id` | The tool call the response answers — a tool result's `tool_use_id` / `call_id`, a task notification's `<tool-use-id>` — or NULL where the text names none. |
 | `source_path`, `source_line` | The transcript file and the 1-based line of the record. |
 | `ordinal` | The block's index among the lens blocks in that record. |
@@ -101,7 +102,12 @@ lens in one review round. The run's turns are walked in order.
   such path, since any document the run reads can hold a block shaped like a
   verdict. An inlined pass — an `assistant` row on a runtime that inlines
   its passes — answers the latest unanswered dispatched attempt of its lens
-  in the current round, else opens an undispatched attempt there. A paired
+  in the current round, else opens an undispatched attempt there. A
+  `file_write` row places the same way, on a runtime that inlines its
+  passes only, in its position among the turn's tool rows by time — ahead
+  of the first timed call it does not follow, after the last call otherwise
+  — and applies the next commitment line first when its lens already
+  answered in the current round, as a re-dispatch of that lens does. A paired
   response makes the attempt `parsed` or, when malformed, `responded`. A
   `task_notification` row places only through its dispatch id: one for a
   dispatch that is not one of the run's lens attempts is not placed, since
@@ -146,8 +152,9 @@ tool row has no position among the turn's commitment lines, so the first line
 is applied at the turn's first lens dispatch and each later one when a lens
 that already answered in the current round is dispatched again; a retry
 follows a failed, malformed or unanswered attempt and does not open a round.
-Inlined blocks are placed only on a runtime that inlines its passes (Codex,
-Cursor); on Claude the assistant quoting a verdict is not a lens answering.
+Inlined blocks and `file_write` rows are placed only on a runtime that
+inlines its passes (Codex, Cursor); on Claude the assistant quoting a
+verdict, in its text or in a file it wrote, is not a lens answering.
 A file-reading tool's result is not paired either: a diff or a doc it reads
 can quote verdict blocks that answer nothing. The redirect path is read off
 `tool_calls.key_arg`, the command cut at 200 characters; a redirect past the

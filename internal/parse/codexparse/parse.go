@@ -105,6 +105,37 @@ func (st *state) recordLenses(text, origin, dispatchID string, turnIdx int, ts t
 	}
 }
 
+// recordFileWrites stores every lens verdict block in the files a FileChange
+// item added, in path order. A file's blocks are numbered from 0 by
+// lens.Extract; the ordinal is renumbered to run across the whole record,
+// since response_id is derived from (source_line, origin, dispatch_id,
+// ordinal) and two files' first blocks would otherwise collide.
+func (st *state) recordFileWrites(item completedItem, turnIdx int, ts time.Time) {
+	paths := make([]string, 0, len(item.Changes))
+	for path := range item.Changes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	ordinal := 0
+	for _, path := range paths {
+		change := item.Changes[path]
+		if change.Type != "add" || change.Content == "" {
+			continue
+		}
+		for _, b := range lens.Extract(change.Content) {
+			b.Ordinal = ordinal
+			ordinal++
+			st.s.LensResponses = append(st.s.LensResponses, summary.LensResponse{
+				TurnIdx:    turnIdx,
+				Origin:     summary.OriginFileWrite,
+				SourceLine: st.line,
+				At:         ts,
+				Block:      b,
+			})
+		}
+	}
+}
+
 // recordCallLenses reads a tool call's full output for lens responses, once
 // per call whichever record delivers it first.
 func (st *state) recordCallLenses(callID, output string, turnIdx int, ts time.Time) {
@@ -383,6 +414,14 @@ func (st *state) handleEventMsg(env envelope, ts time.Time) error {
 			t := &st.s.Turns[turnIdx]
 			t.ReasoningPresent = true
 			t.ReasoningChars += len(p.Message)
+		}
+	case "item_completed":
+		// A FileChange item is the one record of a file written through
+		// apply_patch by way of the exec tool: its id matches no tool call.
+		// Every other item type duplicates the message, exec or mcp records
+		// already read.
+		if p.Item != nil && p.Item.Type == "FileChange" {
+			st.recordFileWrites(*p.Item, turnIdx, ts)
 		}
 	default:
 		st.bumpUnknown("event_msg", p.Type, ts)

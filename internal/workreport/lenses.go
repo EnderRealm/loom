@@ -122,6 +122,7 @@ type lensRow struct {
 	dispatchID   string
 	sourcePath   string
 	sourceLine   int
+	at           time.Time
 	lens         string
 	verdict      string
 	summary      string
@@ -287,15 +288,21 @@ const joinSlack = 5 * time.Second
 // redirected to pairs it, which a compound command never records;
 // then the user-side responses whose dispatch was only on record
 // after those rows; then the assistant text, its commitment lines and inlined
-// blocks in text order. A tool row has no position among the commitment
-// lines, so the turn's first line is applied at its first lens dispatch and
-// each later one when a lens that already answered in the current round is
-// dispatched again — a retry follows a failed, malformed or unanswered attempt
-// and does not open a round. The text pass then applies every line where it
-// sits, which is idempotent, so an inlined block lands in the round of the
-// line before it.
-// Inlined blocks are placed only on a runtime that inlines its passes; on
-// Claude the assistant quoting a verdict is not a lens answering.
+// blocks in text order. A file-write row — an inlined pass the agent wrote
+// to a file — is a tool row too, and takes its position among the turn's
+// tool rows by time: it is placed ahead of the first timed call it does not
+// follow, and after the last call otherwise. A tool row has no position
+// among the commitment lines, so the turn's first line is applied at its
+// first lens dispatch and each later one when a lens that already answered
+// in the current round is dispatched again — a retry follows a failed,
+// malformed or unanswered attempt and does not open a round; a file-write
+// row applies a line the same way, since a second verdict of a lens written
+// in the same round is the next round's. The text pass then applies every
+// line where it sits, which is idempotent, so an inlined block lands in the
+// round of the line before it.
+// Inlined blocks and file-write rows are placed only on a runtime that
+// inlines its passes; on Claude the assistant quoting a verdict is not a
+// lens answering.
 //
 // Each lens dispatch row joins at most one of execs, and each record joins
 // once: the record naming the row's call id, else — for a router call, whose
@@ -316,7 +323,7 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 		if t.idx < startIdx || t.idx > endIdx {
 			continue
 		}
-		var inlined, deferred []lensRow
+		var inlined, written, deferred []lensRow
 		for _, r := range data.lensesByTurn[t.idx] {
 			switch r.origin {
 			case summary.OriginTaskNotification:
@@ -332,7 +339,12 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 				w.respond(r)
 			case summary.OriginAssistant:
 				inlined = append(inlined, r)
+			case summary.OriginFileWrite:
+				written = append(written, r)
 			}
+		}
+		if !inlinesLenses(runtime) {
+			inlined, written = nil, nil
 		}
 		w.pending = commitments(t.assistantText)
 		w.applied = false
@@ -356,6 +368,12 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 			}
 		}
 		for _, c := range data.callsByTurn[t.idx] {
+			// The rows are in stored order, which is transcript order, so
+			// the head is the earliest not yet placed.
+			for len(written) > 0 && !c.startedAt.IsZero() && !written[0].at.After(c.startedAt) {
+				w.write(written[0])
+				written = written[1:]
+			}
 			if name := dispatchLens(c); name != "" {
 				w.dispatch(name, c, t.idx)
 				if c.toolKind == subagentKind || routerAlone(c.keyArg) {
@@ -369,11 +387,11 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 				}
 			}
 		}
+		for _, r := range written {
+			w.write(r)
+		}
 		for _, r := range deferred {
 			w.respond(r)
-		}
-		if !inlinesLenses(runtime) {
-			inlined = nil
 		}
 		w.text(t.assistantText, inlined)
 	}
@@ -542,18 +560,26 @@ func (w *lensWalk) open(name string, round int, dispatched bool, dispatchID stri
 	return a
 }
 
+// advance applies the turn's next pending commitment line ahead of a lens's
+// tool row: the first at the turn's first such row, each later one when
+// the lens already answered in the current round.
+func (w *lensWalk) advance(name string) {
+	if len(w.pending) == 0 {
+		return
+	}
+	prev := w.latest(name, w.round)
+	if !w.applied || (prev != nil && prev.Status == AttemptParsed) {
+		w.apply(w.pending[0])
+		w.pending = w.pending[1:]
+		w.applied = true
+	}
+}
+
 // dispatch opens an attempt for a lens dispatch row. A row whose own result
 // was an error starts failed; a verdict in that result, paired right after,
 // overrides it.
 func (w *lensWalk) dispatch(name string, c callRow, turnIdx int) {
-	if len(w.pending) > 0 {
-		prev := w.latest(name, w.round)
-		if !w.applied || (prev != nil && prev.Status == AttemptParsed) {
-			w.apply(w.pending[0])
-			w.pending = w.pending[1:]
-			w.applied = true
-		}
-	}
+	w.advance(name)
 	a := w.open(name, w.round, true, c.callID, turnIdx)
 	if i, ok := w.joins[c.callID]; ok {
 		a.ExecutionID = w.execs[i].ExecutionID
@@ -566,6 +592,16 @@ func (w *lensWalk) dispatch(name string, c callRow, turnIdx int) {
 			w.redirects[c.callID] = path
 		}
 	}
+}
+
+// write places a verdict the agent wrote to a file, as a tool row of its
+// lens: the next commitment line is applied first where the lens already
+// answered in the current round, as at a re-dispatch, and the row then
+// answers the unanswered dispatched attempt of its lens there or opens an
+// undispatched one, as an inlined pass does.
+func (w *lensWalk) write(r lensRow) {
+	w.advance(r.lens)
+	w.respond(r)
 }
 
 // readBack places a verdict a shell call's result carried. It answers the

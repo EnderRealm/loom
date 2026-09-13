@@ -78,3 +78,41 @@ func TestLastAgentMessageIsReadForLenses(t *testing.T) {
 		t.Errorf("row = %s %s, want a parsed quality verdict", r.Lens, r.Status)
 	}
 }
+
+// TestFileWritesAreReadForLenses pins the fourth carrier of an inlined pass:
+// a verdict the agent wrote to a file through apply_patch lives in an
+// item_completed FileChange item's `add` content and in no message. Each
+// added file's blocks land as file_write rows numbered across the record in
+// path order; an `update` carries a diff and a `delete` the removed file's
+// content, and neither is read. The event is modeled, so no item type of it
+// is unknown.
+func TestFileWritesAreReadForLenses(t *testing.T) {
+	s := parseFixture(t, "testdata/lens_filewrite.jsonl")
+	var written []summary.LensResponse
+	for _, r := range s.LensResponses {
+		if r.Origin == summary.OriginFileWrite {
+			written = append(written, r)
+		}
+	}
+	if len(written) != 4 || len(s.LensResponses) != 6 {
+		t.Fatalf("LensResponses = %+v, want the two routed verdicts and the four added files' verdicts, nothing from the update or delete", s.LensResponses)
+	}
+	want := []struct {
+		line, ordinal int
+		lens, verdict string
+	}{
+		{7, 0, lens.Contract, "findings"}, {7, 1, lens.Quality, "findings"},
+		{10, 0, lens.Contract, "satisfied"}, {10, 1, lens.Quality, "satisfied"},
+	}
+	for i, r := range written {
+		if r.DispatchID != "" || r.TurnIdx != 0 || r.SourceLine != want[i].line || r.Ordinal != want[i].ordinal || r.At.IsZero() {
+			t.Errorf("written[%d] = dispatch %q turn %d line %d ordinal %d at %v, want a row on turn 0 from line %d at ordinal %d", i, r.DispatchID, r.TurnIdx, r.SourceLine, r.Ordinal, r.At, want[i].line, want[i].ordinal)
+		}
+		if r.Lens != want[i].lens || r.Verdict != want[i].verdict || r.Status != lens.StatusParsed || r.Context == nil || r.Context.State != "shared" {
+			t.Errorf("written[%d] = %s %s %s context %+v, want a parsed %s %s verdict in path order", i, r.Lens, r.Verdict, r.Status, r.Context, want[i].lens, want[i].verdict)
+		}
+	}
+	if len(s.Unknown) != 0 {
+		t.Errorf("unknown = %+v, want none: item_completed is modeled, its other item types included", s.Unknown)
+	}
+}
