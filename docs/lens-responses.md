@@ -113,13 +113,33 @@ lens in one review round. The run's turns are walked in order.
   task notification — is never placed: no lens answers as a plain user
   message, so the block is quoted material (a compaction summary reproducing
   a verdict, a human pasting one), stored as evidence only.
+- A recorded run's lens execution records (docs/execution-records.md) join
+  its dispatches, each record to at most one dispatch and each dispatch to
+  at most one record: a record naming a `dispatch_id` joins the row with
+  that call id; a record naming none — `codex-lens.sh` writes its own record
+  and cannot know its tool_use_id — joins a `codex-lens.sh` call of its lens
+  whose window holds the record's start, from five seconds before the call
+  began to five seconds after it ended (unbounded after, when the call's
+  duration is unknown), the earliest such record first. A subagent row joins
+  by dispatch id alone. The attempt carries the record's `execution_id`, and
+  the run report fills that attempt with the record's outcome and metrics
+  rather than looking one up by (lens, round, attempt).
+- A turn whose assistant text holds no commitment line — a Claude transcript
+  since Claude Code 2.1.268 carries no text block from an assistant message
+  that also called a tool, so no row holds the line — takes its round from
+  the records its dispatches joined: one line per joined row naming the
+  record's round and no lenses, applied the way a text line is, so the
+  turn's subagent dispatches ahead of the router call land in that round
+  too, and no `missing` attempt is derived from a record. A text line, where
+  one exists, wins.
 - After the walk, a lens a commitment line named with no attempt in that
   round gets one `missing` attempt; every attempt with a later attempt for
   the same lens and round is `superseded`; a response that landed after the
   next round's commitment line, or after the next `/work` invocation, is
   `late`.
 
-Round 0 holds attempts no commitment line placed. Within a turn the order is
+Round 0 holds attempts neither a commitment line nor a joined record placed.
+Within a turn the order is
 the user-side responses that open it, then its tool rows in sequence, then
 its assistant text with commitment lines and inlined blocks in text order. A
 tool row has no position among the turn's commitment lines, so the first line

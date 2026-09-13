@@ -31,6 +31,24 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `run-report` places a Claude run's lens attempts in their rounds again.
+  Round attribution read the `dispatching (<ticket> round N): …` line out
+  of the turn's assistant text, and since Claude Code 2.1.268 the
+  transcript keeps no text block from an assistant message that also
+  called a tool, so no row held the line: contract and quality sat in
+  round 0 with attempts standing in for rounds, and the routed security
+  lens was listed twice — a round-0 `dispatched` attempt from its Bash row
+  and a round-N `completed` one from its execution record, never joined.
+  The attempt model now joins each lens execution record to a dispatch —
+  by `dispatch_id` where the record carries one, else to the
+  `codex-lens.sh` call of its lens whose window holds the record's start,
+  since the script cannot know its own tool_use_id — and a turn with no
+  commitment line takes the round of the record its router dispatch
+  joined, its subagent dispatches with it. `LensAttempt` carries the
+  joined `execution_id`, and the report fills that attempt with the
+  record's outcome and metrics rather than looking one up by (lens,
+  round, attempt). Round 0 now holds attempts neither a line nor a joined
+  record placed (docs/lens-responses.md).
 - The Claude parser no longer discards a whole session on one drifted
   payload. Its `feed` still returned each handler's unmarshal error, so a
   record whose shape had moved away from our structs — an `isSidechain`

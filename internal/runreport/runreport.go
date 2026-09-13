@@ -762,13 +762,18 @@ func (b *builder) stages(rep *Report) {
 	}
 }
 
-// lenses joins the lens executions with the run's LensAttempt records on
-// (lens, round, attempt): an attempt on either side alone is still listed.
+// lenses joins the lens executions with the run's LensAttempt records: an
+// execution the attempt model joined to a dispatch (LensAttempt.ExecutionID)
+// fills that attempt wherever the walk placed it, and any other joins on
+// (lens, round, attempt); an attempt on either side alone is still listed.
 // Groups follow the LensAttempt order (round, lens, attempt), then
 // executions no record matched in walk order.
 func (b *builder) lenses(rep *Report) {
+	// Attempts are addressed as (group, attempt) indices: a pointer into
+	// rep.Lenses would not survive the appends that follow it.
+	type slot struct{ group, attempt int }
 	index := map[string]int{}
-	group := func(name string, round int) *LensGroup {
+	group := func(name string, round int) int {
 		key := fmt.Sprintf("%s/%d", name, round)
 		at, ok := index[key]
 		if !ok {
@@ -776,30 +781,39 @@ func (b *builder) lenses(rep *Report) {
 			index[key] = at
 			rep.Lenses = append(rep.Lenses, LensGroup{Lens: name, Round: round, Attempts: []LensAttempt{}})
 		}
-		return &rep.Lenses[at]
+		return at
 	}
-	find := func(name string, round, attempt int) *LensAttempt {
+	find := func(name string, round, attempt int) slot {
 		g := group(name, round)
-		for i := range g.Attempts {
-			if g.Attempts[i].Attempt == attempt {
-				return &g.Attempts[i]
+		for i := range rep.Lenses[g].Attempts {
+			if rep.Lenses[g].Attempts[i].Attempt == attempt {
+				return slot{g, i}
 			}
 		}
-		g.Attempts = append(g.Attempts, LensAttempt{Attempt: attempt})
-		return &g.Attempts[len(g.Attempts)-1]
+		rep.Lenses[g].Attempts = append(rep.Lenses[g].Attempts, LensAttempt{Attempt: attempt})
+		return slot{g, len(rep.Lenses[g].Attempts) - 1}
 	}
+	joined := map[string]slot{}
 	for _, a := range b.run.Lenses {
-		la := find(a.Lens, a.Round, a.Attempt)
+		at := find(a.Lens, a.Round, a.Attempt)
+		la := &rep.Lenses[at.group].Attempts[at.attempt]
 		la.Recorded = true
 		la.Status, la.Verdict, la.ContextState = a.Status, a.Verdict, a.ContextState
 		la.Contaminated, la.Superseded, la.Late, la.Malformed = a.Contaminated, a.Superseded, a.Late, a.Malformed
+		if a.ExecutionID != "" {
+			joined[a.ExecutionID] = at
+		}
 	}
 	for i, u := range b.units {
 		n := u.node
-		if n.Kind != "lens" {
+		if n.Kind != runs.KindLens {
 			continue
 		}
-		la := find(n.Lens, intOf(n.Round), intOf(n.Attempt))
+		at, ok := joined[n.ExecutionID]
+		if !ok {
+			at = find(n.Lens, intOf(n.Round), intOf(n.Attempt))
+		}
+		la := &rep.Lenses[at.group].Attempts[at.attempt]
 		em := rep.Executions[i]
 		m := em.Metrics
 		la.ExecutionID, la.Outcome, la.DurationMs, la.Metrics = n.ExecutionID, n.Outcome, em.DurationMs, &m

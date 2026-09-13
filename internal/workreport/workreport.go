@@ -296,13 +296,14 @@ type turnRow struct {
 }
 
 type callRow struct {
-	callID    string
-	toolKind  string
-	toolName  string
-	keyArg    string
-	startedAt time.Time
-	exitCode  *int
-	isError   bool
+	callID     string
+	toolKind   string
+	toolName   string
+	keyArg     string
+	startedAt  time.Time
+	durationMs int64
+	exitCode   *int
+	isError    bool
 }
 
 type commitRow struct {
@@ -416,7 +417,7 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 	}
 
 	calls, err := db.Query(`
-		SELECT turn_idx, call_id, tool_kind, tool_name, key_arg, started_at, exit_code, is_error
+		SELECT turn_idx, call_id, tool_kind, tool_name, key_arg, started_at, duration_ms, exit_code, is_error
 		FROM tool_calls WHERE agent = ? AND session_id = ? ORDER BY seq
 	`, agent, sessionID)
 	if err != nil {
@@ -426,11 +427,11 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 	for calls.Next() {
 		var (
 			c                                     callRow
-			turnIdx, exitCode                     sql.NullInt64
+			turnIdx, durationMs, exitCode         sql.NullInt64
 			callID, kind, name, keyArg, startedAt sql.NullString
 			isError                               sql.NullBool
 		)
-		if err := calls.Scan(&turnIdx, &callID, &kind, &name, &keyArg, &startedAt, &exitCode, &isError); err != nil {
+		if err := calls.Scan(&turnIdx, &callID, &kind, &name, &keyArg, &startedAt, &durationMs, &exitCode, &isError); err != nil {
 			return nil, err
 		}
 		c.callID = callID.String
@@ -438,6 +439,7 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 		c.toolName = name.String
 		c.keyArg = keyArg.String
 		c.startedAt = parseTime(startedAt)
+		c.durationMs = durationMs.Int64
 		if exitCode.Valid {
 			code := int(exitCode.Int64)
 			c.exitCode = &code
@@ -601,7 +603,7 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 	// reported.
 	counted := map[string]bool{}
 	var lastContract string
-	for _, a := range lensAttempts(run.Runtime, inv.idx, endIdx, data) {
+	for _, a := range lensAttempts(run.Runtime, inv.idx, endIdx, data, nil) {
 		if a.Status == AttemptParsed && a.Contaminated && !counted[a.ResponseID] {
 			counted[a.ResponseID] = true
 			run.ContaminationReports++

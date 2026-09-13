@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -894,6 +895,74 @@ func TestRecordWithoutSessionIsAGapUntilJoined(t *testing.T) {
 	}
 	if rep.Metrics.Descendants.Turns != 1 || rep.Metrics.Total.Turns != 2 || rep.Metrics.Total.TotalTokens != 2300+550 {
 		t.Errorf("scopes = descendants %d turns total %d turns %d tokens", rep.Metrics.Descendants.Turns, rep.Metrics.Total.Turns, rep.Metrics.Total.TotalTokens)
+	}
+}
+
+// A recorded Claude run whose transcript holds no commitment line — none
+// survives in a transcript since Claude Code 2.1.268 — still reports each
+// lens once in the round its execution record declares: the record, naming
+// no dispatch, joins the router call whose window holds its start, the
+// subagent dispatches in the same turn follow it into that round, and the
+// routed lens is one attempt carrying both sides of the join.
+func TestRecordedRoundPlacesAttemptsWithNoCommitmentLine(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		ticket  = "loom/no-line-0001"
+		session = "sess-no-line"
+		router  = "~/.codex/codex-lens.sh --lens security --payload /tmp/c/context.md > /tmp/c/verdict.txt"
+	)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-no-line","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-12T04:00:00Z","ended_at":"2026-09-12T04:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-no-line","run_id":"run-no-line","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-12T04:00:00Z","ended_at":"2026-09-12T04:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-no-line-security-r1-a1","run_id":"run-no-line","parent_execution_id":"root-no-line","execution_kind":"lens","lens":"security","round":1,"attempt":1,"agent":"codex-cli","session_id":"sess-no-line-lens","started_at":"2026-09-12T04:03:15Z","ended_at":"2026-09-12T04:03:23Z","outcome":"completed"}`,
+	)
+	day := func(hhmmss string) time.Time { return at(hhmmss).AddDate(0, 0, 2) }
+	verdict := func(name string) string {
+		return `{"lens": "` + name + `", "verdict": "satisfied", "summary": "Fine."}`
+	}
+	sum := &summary.SessionSummary{
+		SessionID: session,
+		Agent:     summary.AgentClaude,
+		StartTime: day("04:00:00"),
+		EndTime:   day("04:30:00"),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), AssistantText: "Fanning out.", StartedAt: day("04:00:00"), EndedAt: day("04:04:00"), Model: claudeModel, InputTokens: 100, OutputTokens: 50},
+			{Idx: 1, UserMessage: notification("toolu_c", verdict("contract")), AssistantText: "Contract in.", StartedAt: day("04:05:00"), EndedAt: day("04:05:10"), Model: claudeModel, InputTokens: 50, OutputTokens: 10},
+			{Idx: 2, UserMessage: notification("toolu_q", verdict("quality")), AssistantText: "Quality in.", StartedAt: day("04:06:00"), EndedAt: day("04:06:10"), Model: claudeModel, InputTokens: 50, OutputTokens: 10},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "toolu_c", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 1", StartedAt: day("04:03:10"), DurationMs: 120000},
+			{TurnIdx: 0, CallID: "toolu_q", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens round 1", StartedAt: day("04:03:11"), DurationMs: 120000},
+			{TurnIdx: 0, CallID: "toolu_b", Kind: summary.KindBash, ToolName: "Bash", KeyArg: router, StartedAt: day("04:03:13"), DurationMs: 10367},
+		},
+	}
+	for idx, id := range map[int]string{1: "toolu_c", 2: "toolu_q"} {
+		for _, b := range lens.Extract(sum.Turns[idx].UserMessage) {
+			sum.LensResponses = append(sum.LensResponses, summary.LensResponse{
+				TurnIdx: idx, Origin: summary.OriginTaskNotification, DispatchID: id, SourceLine: idx + 1, At: sum.Turns[idx].StartedAt, Block: b,
+			})
+		}
+	}
+	writeSession(t, st, sum)
+	writeSession(t, st, oneTurn(summary.AgentCodex, "sess-no-line-lens", codexModel, day("04:03:15"), day("04:03:23"), 500, 100, 50, summary.KindBash, 1500))
+
+	rep := build(t, st, "run-no-line")
+	var groups []string
+	for _, g := range rep.Lenses {
+		groups = append(groups, g.Lens+"/"+strconv.Itoa(g.Round)+"/"+strconv.Itoa(len(g.Attempts)))
+	}
+	if got := strings.Join(groups, " "); got != "contract/1/1 quality/1/1 security/1/1" {
+		t.Fatalf("lens groups = %v, want each lens once in round 1", groups)
+	}
+	la := rep.Lenses[2].Attempts[0]
+	if la.ExecutionID != "lens-no-line-security-r1-a1" || !la.Recorded || la.Status != "dispatched" || la.Outcome != "completed" || la.Metrics == nil || la.Metrics.Turns != 1 {
+		t.Errorf("security attempt = %+v, want the record joined to the dispatched attempt", la)
+	}
+	if rep.Lenses[0].Attempts[0].Status != "parsed" || rep.Lenses[1].Attempts[0].Status != "parsed" {
+		t.Errorf("contract = %+v quality = %+v, want both parsed", rep.Lenses[0].Attempts[0], rep.Lenses[1].Attempts[0])
+	}
+	if len(rep.Attempts) != 3 {
+		t.Errorf("attempts = %+v, want one per lens", rep.Attempts)
 	}
 }
 

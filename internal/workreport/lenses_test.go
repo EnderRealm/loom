@@ -104,7 +104,7 @@ func fixtureRun(t *testing.T, db *sql.DB, ticket string) []LensAttempt {
 		if inv.Ticket != ticket {
 			continue
 		}
-		attempts, err := Lenses(db, inv)
+		attempts, err := Lenses(db, inv, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -227,7 +227,7 @@ func TestLensesModelRoundsAndRetries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "summaries.db")
 	foldFixture(t, path, lensFixture, summary.AgentClaude)
 	db := openRO(t, path)
-	attempts, err := Lenses(db, fixtureInvocation(t, db))
+	attempts, err := Lenses(db, fixtureInvocation(t, db), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestCodexInlinedPassesAreUndispatchedAttempts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "summaries.db")
 	foldFixture(t, path, codexLensFixture, summary.AgentCodex)
 	db := openRO(t, path)
-	attempts, err := Lenses(db, fixtureInvocation(t, db))
+	attempts, err := Lenses(db, fixtureInvocation(t, db), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,5 +680,91 @@ func TestRefoldKeepsResponseIdentities(t *testing.T) {
 	}
 	if afterCounts != beforeCounts {
 		t.Errorf("row counts after re-fold = %v, want %v", afterCounts, beforeCounts)
+	}
+}
+
+// A Claude transcript since 2.1.268 keeps no commitment line, so the round is
+// read off the run's execution records: the routed security lens's record —
+// which names no dispatch, since the script cannot know its tool_use_id —
+// joins the router call whose window holds its start, and the turn's
+// subagent dispatches take that record's round with it. A record starting
+// outside every call's window joins nothing, and the round falls back to 0.
+func TestRecordsPlaceARoundWithNoCommitmentLine(t *testing.T) {
+	const (
+		ticket = "loom/lens-attempts-0001"
+		router = "~/.codex/codex-lens.sh --lens security --payload /tmp/c/context.md > /tmp/c/verdict.txt"
+	)
+	at := func(hhmmss string) time.Time {
+		v, err := time.Parse("15:04:05", hhmmss)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return time.Date(2026, 9, 12, v.Hour(), v.Minute(), v.Second(), 0, time.UTC)
+	}
+	verdict := func(name string) string {
+		return `{"lens": "` + name + `", "verdict": "satisfied", "summary": "Fine."}`
+	}
+	f := newFixture(t)
+	f.add(&summary.SessionSummary{
+		SessionID: "no-commitment-line",
+		Agent:     summary.AgentClaude,
+		StartTime: at("04:00:00"),
+		EndTime:   at("04:30:00"),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), AssistantText: "Fanning out.", StartedAt: at("04:00:00")},
+			{Idx: 1, UserMessage: notification("toolu_c", verdict("contract")), AssistantText: "Contract in.", StartedAt: at("04:05:00")},
+			{Idx: 2, UserMessage: notification("toolu_q", verdict("quality")), AssistantText: "Quality in.", StartedAt: at("04:06:00")},
+			{Idx: 3, UserMessage: "carry on", AssistantText: "Fanning out again.", StartedAt: at("04:10:00")},
+			{Idx: 4, UserMessage: notification("toolu_c2", verdict("contract")), AssistantText: "Contract in.", StartedAt: at("04:15:00")},
+			{Idx: 5, UserMessage: notification("toolu_q2", verdict("quality")), AssistantText: "Quality in.", StartedAt: at("04:16:00")},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "toolu_c", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 1", StartedAt: at("04:03:10"), DurationMs: 120000},
+			{TurnIdx: 0, CallID: "toolu_q", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens round 1", StartedAt: at("04:03:11"), DurationMs: 120000},
+			{TurnIdx: 0, CallID: "toolu_b", Kind: summary.KindBash, ToolName: "Bash", KeyArg: router, StartedAt: at("04:03:13"), DurationMs: 10367},
+			{TurnIdx: 3, CallID: "toolu_c2", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 2", StartedAt: at("04:12:10"), DurationMs: 120000},
+			{TurnIdx: 3, CallID: "toolu_q2", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens round 2", StartedAt: at("04:12:11"), DurationMs: 120000},
+			{TurnIdx: 3, CallID: "toolu_b2", Kind: summary.KindBash, ToolName: "Bash", KeyArg: router, StartedAt: at("04:12:13"), DurationMs: 10000},
+		},
+	})
+	db := openRO(t, f.path)
+	inv := fixtureInvocation(t, db)
+
+	attempts, err := Lenses(db, inv, []LensExecution{
+		{ExecutionID: "lens-security-r2-a1", Lens: "security", Round: 2, StartedAt: at("04:12:15")},
+		{ExecutionID: "lens-security-r1-a1", Lens: "security", Round: 1, StartedAt: at("04:03:15")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "contract/1/1/parsed quality/1/1/parsed security/1/1/dispatched contract/2/1/parsed quality/2/1/parsed security/2/1/dispatched"
+	if got := shapeOf(attempts); got != want {
+		t.Fatalf("attempts = %v, want %v", got, want)
+	}
+	for round, id := range map[int]string{1: "lens-security-r1-a1", 2: "lens-security-r2-a1"} {
+		if a := attempt(t, attempts, "security", round, 1); a.ExecutionID != id || a.DispatchID == "" {
+			t.Errorf("security round %d = %+v, want joined to %s through its router dispatch", round, a, id)
+		}
+		if a := attempt(t, attempts, "contract", round, 1); a.ExecutionID != "" || a.Late {
+			t.Errorf("contract round %d = %+v, want no execution and not late", round, a)
+		}
+	}
+
+	// The same transcript against a record that started long after the
+	// router call ended: nothing joins, and nothing places a round.
+	attempts, err = Lenses(db, inv, []LensExecution{
+		{ExecutionID: "lens-security-stray", Lens: "security", Round: 1, StartedAt: at("04:20:00")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "contract/0/1/parsed contract/0/2/parsed quality/0/1/parsed quality/0/2/parsed security/0/1/dispatched security/0/2/dispatched"
+	if got := shapeOf(attempts); got != want {
+		t.Fatalf("attempts with a stray record = %v, want %v", got, want)
+	}
+	for _, a := range attempts {
+		if a.ExecutionID != "" {
+			t.Errorf("attempt %+v joined the stray record", a)
+		}
 	}
 }

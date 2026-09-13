@@ -39,6 +39,7 @@ const (
 const (
 	KindRoot     = "root"
 	KindSubagent = "subagent"
+	KindLens     = "lens"
 )
 
 // TranscriptBasis values: how a run came by its Transcript. Empty when the
@@ -356,12 +357,31 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 		}
 	}
 	if ok {
-		run.Lenses, err = workreport.Lenses(db, inv)
+		run.Lenses, err = workreport.Lenses(db, inv, lensExecutions(nodes))
 		if err != nil {
 			return nil, err
 		}
 	}
 	return run, nil
+}
+
+// lensExecutions is what the attempt model joins: the run's lens records in
+// the order they were loaded.
+func lensExecutions(nodes []*Node) []workreport.LensExecution {
+	var out []workreport.LensExecution
+	for _, n := range nodes {
+		if n.Kind != KindLens {
+			continue
+		}
+		out = append(out, workreport.LensExecution{
+			ExecutionID: n.ExecutionID,
+			Lens:        n.Lens,
+			Round:       intOf(n.Round),
+			DispatchID:  n.DispatchID,
+			StartedAt:   parseTime(n.StartedAt),
+		})
+	}
+	return out
 }
 
 // inferJoin finds the /work invocation a record naming no transcript belongs
@@ -621,7 +641,7 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 		if err := attachCodexChildren(db, &run, inv, perSession[ref]); err != nil {
 			return nil, err
 		}
-		run.Lenses, err = workreport.Lenses(db, inv)
+		run.Lenses, err = workreport.Lenses(db, inv, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -736,6 +756,13 @@ func intPtr(n sql.NullInt64) *int {
 	}
 	v := int(n.Int64)
 	return &v
+}
+
+func intOf(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func isoOrEmpty(t time.Time) string {

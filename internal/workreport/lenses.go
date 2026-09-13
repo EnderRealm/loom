@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
@@ -43,10 +44,11 @@ type SourceRef struct {
 
 // LensAttempt is one try at one lens in one review round: what was dispatched,
 // what came back, and how it stands against the round's other tries. Round 0
-// holds attempts no commitment line placed. DispatchTurnIdx and
-// ResponseTurnIdx are -1 where there was no dispatch or no response; Attempt
-// is 0 for a missing attempt, which was never tried. A stored response is
-// evidence of what the orchestrator saw, never proof the review passed.
+// holds attempts neither a commitment line nor a joined execution record
+// placed. DispatchTurnIdx and ResponseTurnIdx are -1 where there was no
+// dispatch or no response; Attempt is 0 for a missing attempt, which was
+// never tried. A stored response is evidence of what the orchestrator saw,
+// never proof the review passed.
 type LensAttempt struct {
 	Lens    string `json:"lens"`
 	Round   int    `json:"round"`
@@ -57,6 +59,9 @@ type LensAttempt struct {
 	Dispatched      bool   `json:"dispatched"`
 	DispatchID      string `json:"dispatch_id"`
 	DispatchTurnIdx int    `json:"dispatch_turn_idx"`
+	// ExecutionID names the recorded lens execution this dispatch joined,
+	// "" when none did.
+	ExecutionID     string `json:"execution_id"`
 	ResponseID      string `json:"response_id"`
 	ResponseTurnIdx int    `json:"response_turn_idx"`
 	Verdict         string `json:"verdict"`
@@ -82,9 +87,23 @@ func (a LensAttempt) Successful() bool {
 	return a.Status == AttemptParsed && !a.Superseded
 }
 
+// LensExecution is a recorded lens execution (docs/execution-records.md) of
+// the run whose attempts are read: what the record declared about the lens
+// it ran, and the dispatch it named when it could.
+type LensExecution struct {
+	ExecutionID string
+	Lens        string
+	Round       int
+	DispatchID  string
+	StartedAt   time.Time
+}
+
 // Lenses returns the attempt model of one run: every lens attempt in the
-// invocation's span, in (round, lens, attempt) order.
-func Lenses(db *sql.DB, inv Invocation) ([]LensAttempt, error) {
+// invocation's span, in (round, lens, attempt) order. execs are the run's
+// recorded lens executions, each joined to the dispatch it names or to the
+// router call whose window holds its start; a transcript-recognized run has
+// none.
+func Lenses(db *sql.DB, inv Invocation, execs []LensExecution) ([]LensAttempt, error) {
 	if v := SchemaVersionOf(db); v < lensSchemaVersion {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the lens_responses table (want %d) — run `loom summarize --rebuild`", v, lensSchemaVersion)
 	}
@@ -92,7 +111,7 @@ func Lenses(db *sql.DB, inv Invocation) ([]LensAttempt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return lensAttempts(runtimeOf(inv.Agent), inv.TurnIdx, inv.EndIdx, data), nil
+	return lensAttempts(runtimeOf(inv.Agent), inv.TurnIdx, inv.EndIdx, data, execs), nil
 }
 
 // lensRow is one lens_responses row.
@@ -242,7 +261,19 @@ type lensWalk struct {
 	// tool dispatch, and applied whether any of them has been.
 	pending []commitment
 	applied bool
+	// execs is the run's recorded lens executions; joined marks the ones a
+	// dispatch has taken, and joins holds each dispatch's execution by call
+	// id, as an index into execs.
+	execs  []LensExecution
+	joined []bool
+	joins  map[string]int
 }
+
+// joinSlack is how far a record's start may sit outside its router call's
+// window: the record is written by the routed script with second precision
+// and the call's timestamps by the harness, so the two clocks are not the
+// same clock.
+const joinSlack = 5 * time.Second
 
 // lensAttempts walks the turns from startIdx through endIdx in order and
 // returns the run's attempts.
@@ -265,10 +296,21 @@ type lensWalk struct {
 // line before it.
 // Inlined blocks are placed only on a runtime that inlines its passes; on
 // Claude the assistant quoting a verdict is not a lens answering.
-func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData) []LensAttempt {
+//
+// Each lens dispatch row joins at most one of execs, and each record joins
+// once: the record naming the row's call id, else — for a router call, whose
+// record cannot know its own call id — the earliest unjoined record of the
+// same lens naming no dispatch whose start falls in the call's window,
+// joinSlack either side. A turn whose assistant text holds no commitment
+// line — a Claude transcript since 2.1.268 keeps none — takes its round from
+// the records its dispatches joined instead: one line per joined row naming
+// the record's round and no lenses, applied the same way, so nothing derives
+// a missing attempt from a record. A text line, where one exists, wins.
+func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, execs []LensExecution) []LensAttempt {
 	w := &lensWalk{
 		byDispatch: map[string]*LensAttempt{}, redirects: map[string]string{},
 		committed: map[int][]string{},
+		execs:     execs, joined: make([]bool, len(execs)), joins: map[string]int{},
 	}
 	for _, t := range data.turns {
 		if t.idx < startIdx || t.idx > endIdx {
@@ -294,6 +336,25 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData) []Le
 		}
 		w.pending = commitments(t.assistantText)
 		w.applied = false
+		// The joins are settled before the rows are walked: with no
+		// commitment line, the round the first dispatch opens is read off
+		// whichever record any of the turn's rows joined.
+		recorded := len(w.pending) == 0
+		for _, c := range data.callsByTurn[t.idx] {
+			name := dispatchLens(c)
+			if name == "" {
+				continue
+			}
+			i := w.join(name, c)
+			if i < 0 {
+				continue
+			}
+			w.joins[c.callID] = i
+			w.joined[i] = true
+			if recorded && execs[i].Round > 0 {
+				w.pending = append(w.pending, commitment{round: execs[i].Round})
+			}
+		}
 		for _, c := range data.callsByTurn[t.idx] {
 			if name := dispatchLens(c); name != "" {
 				w.dispatch(name, c, t.idx)
@@ -396,6 +457,44 @@ func lensRank(name string) int {
 	return len(lensOrder)
 }
 
+// join picks the execution record a lens dispatch row takes, or -1: the
+// unjoined record naming the row's call id, else for a router call the
+// earliest unjoined record of the lens naming no dispatch that started in
+// the call's window — from joinSlack before the call to joinSlack after it
+// ended, or unbounded after when the call's duration is unknown — the
+// parsers write 0 where no result timestamp bounded the call. A subagent
+// row joins by dispatch id alone: its record names one. A row with no call
+// id joins nothing, since the join is kept by call id.
+func (w *lensWalk) join(name string, c callRow) int {
+	if c.callID == "" {
+		return -1
+	}
+	for i, e := range w.execs {
+		if !w.joined[i] && e.DispatchID != "" && e.DispatchID == c.callID {
+			return i
+		}
+	}
+	if c.toolKind == subagentKind || c.startedAt.IsZero() {
+		return -1
+	}
+	best := -1
+	for i, e := range w.execs {
+		if w.joined[i] || e.DispatchID != "" || e.Lens != name || e.StartedAt.IsZero() {
+			continue
+		}
+		if e.StartedAt.Before(c.startedAt.Add(-joinSlack)) {
+			continue
+		}
+		if c.durationMs > 0 && e.StartedAt.After(c.startedAt.Add(time.Duration(c.durationMs)*time.Millisecond+joinSlack)) {
+			continue
+		}
+		if best < 0 || e.StartedAt.Before(w.execs[best].StartedAt) {
+			best = i
+		}
+	}
+	return best
+}
+
 // apply makes a commitment line's round current and records what it named.
 func (w *lensWalk) apply(c commitment) {
 	w.round = c.round
@@ -456,6 +555,9 @@ func (w *lensWalk) dispatch(name string, c callRow, turnIdx int) {
 		}
 	}
 	a := w.open(name, w.round, true, c.callID, turnIdx)
+	if i, ok := w.joins[c.callID]; ok {
+		a.ExecutionID = w.execs[i].ExecutionID
+	}
 	if c.isError || (c.exitCode != nil && *c.exitCode != 0) {
 		a.Status = AttemptFailed
 	}
