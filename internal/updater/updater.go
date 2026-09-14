@@ -232,12 +232,9 @@ var (
 // is the only process that outlives the teardown far enough to observe the
 // result; internal/updater cannot import cmd.
 func VerifyRestarted(label, bin string) {
-	var binMtime time.Time
-	fi, err := os.Stat(bin)
+	binMtime, err := binaryMtime(bin)
 	if err != nil {
 		log.Printf("stat %s: %v — cannot check whether %s is on the new image", bin, err, label)
-	} else {
-		binMtime = fi.ModTime()
 	}
 	if verr := verifyRestarted(label, binMtime, err == nil); verr != nil {
 		log.Printf("re-bootstrap %s: %v", label, verr)
@@ -250,6 +247,26 @@ func VerifyRestarted(label, bin string) {
 		return
 	}
 	log.Printf("re-bootstrapped %s", label)
+}
+
+// AwaitRunning is the post-install check `loom install <component>` fails
+// on: unlike VerifyRestarted, which only logs, it returns the error so the
+// CLI exits non-zero when launchd registered the job but never spawned a
+// process for it. A bin that cannot be stat'd drops the image comparison
+// and waits for any process.
+func AwaitRunning(label, bin string) error {
+	binMtime, err := binaryMtime(bin)
+	return verifyRestarted(label, binMtime, err == nil)
+}
+
+// binaryMtime returns bin's mtime, the reference point a freshly spawned
+// process must not predate.
+func binaryMtime(bin string) (time.Time, error) {
+	fi, err := os.Stat(bin)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return fi.ModTime(), nil
 }
 
 // verifyRestarted waits for label to be running a process that did not start
@@ -272,7 +289,7 @@ func verifyRestarted(label string, binMtime time.Time, haveMtime bool) error {
 		case err != nil:
 			last = fmt.Errorf("cannot read process state: %v", err)
 		case !ok:
-			last = fmt.Errorf("no process after re-bootstrap")
+			last = fmt.Errorf("no process")
 		case haveMtime && p.Started.Before(binMtime.Add(-launchd.StartTolerance)):
 			last = fmt.Errorf("pid %d started %s, before the installed binary (%s) — still the old image",
 				p.PID, p.Started.Format(time.RFC3339), binMtime.Format(time.RFC3339))

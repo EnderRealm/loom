@@ -90,6 +90,30 @@ func loomHomeForPlist() string {
 	return os.Getenv("LOOM_HOME")
 }
 
+// installSpec and awaitRunning are package vars so tests can drive
+// installAgent without touching launchd on the host.
+var (
+	installSpec  = launchd.Install
+	awaitRunning = updater.AwaitRunning
+)
+
+// installAgent writes and bootstraps spec, then holds launchd to actually
+// running a process for it. bootstrap honors RunAtLoad on initial load, but
+// a re-install (bootout + bootstrap of an already-known label) can leave the
+// job registered and enabled yet never spawned; the await kickstarts once if
+// the job is still processless partway through its window, and a job that
+// never comes up fails the install by label rather than being reported as
+// installed.
+func installAgent(spec launchd.Spec) error {
+	if err := installSpec(spec); err != nil {
+		return err
+	}
+	if err := awaitRunning(spec.Label, spec.Program); err != nil {
+		return fmt.Errorf("%s: %w", spec.Label, err)
+	}
+	return nil
+}
+
 func installShipper() error {
 	cfg, err := shipper.LoadConfig()
 	if err != nil {
@@ -116,15 +140,8 @@ func installShipper() error {
 	if h := loomHomeForPlist(); h != "" {
 		spec.Env = map[string]string{"LOOM_HOME": h}
 	}
-	if err := launchd.Install(spec); err != nil {
+	if err := installAgent(spec); err != nil {
 		return err
-	}
-	// bootstrap honors RunAtLoad on initial load, but a re-install (bootout +
-	// bootstrap of an already-known label) can leave the job in pended/
-	// speculative state. Kickstart forces an immediate spawn so a rebuild +
-	// reinstall doesn't silently halt shipping until the next login.
-	if err := launchd.Kickstart(spec.Label); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: kickstart: %v\n", err)
 	}
 	fmt.Printf("installed shipper:\n")
 	fmt.Printf("  label:    %s\n", spec.Label)
@@ -209,11 +226,8 @@ func installReceiver() error {
 	logPath := filepath.Join(config.Home(), "receiver.log")
 
 	spec := receiverSpec(bin, logPath)
-	if err := launchd.Install(spec); err != nil {
+	if err := installAgent(spec); err != nil {
 		return err
-	}
-	if err := launchd.Kickstart(spec.Label); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: kickstart: %v\n", err)
 	}
 
 	if waitForHealthz("http://127.0.0.1:8765/healthz", 10*time.Second) {
@@ -255,11 +269,8 @@ func installSummarizer() error {
 	logPath := filepath.Join(config.Home(), "summarizer.log")
 
 	spec := summarizerSpec(bin, logPath, interval)
-	if err := launchd.Install(spec); err != nil {
+	if err := installAgent(spec); err != nil {
 		return err
-	}
-	if err := launchd.Kickstart(spec.Label); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: kickstart: %v\n", err)
 	}
 	fmt.Printf("installed summarizer:\n")
 	fmt.Printf("  label:    %s\n", spec.Label)
@@ -306,11 +317,8 @@ func installExtractor() error {
 		KeepAlive: true,
 		RunAtLoad: true,
 	}
-	if err := launchd.Install(spec); err != nil {
+	if err := installAgent(spec); err != nil {
 		return err
-	}
-	if err := launchd.Kickstart(spec.Label); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: kickstart: %v\n", err)
 	}
 	settings := extract.CurrentSettings()
 	fmt.Printf("installed extractor:\n")
@@ -359,7 +367,7 @@ func installUpdater() error {
 		RunAtLoad:               true,
 		ThrottleIntervalSeconds: 30,
 	}
-	if err := launchd.Install(spec); err != nil {
+	if err := installAgent(spec); err != nil {
 		return err
 	}
 	fmt.Printf("installed updater:\n")

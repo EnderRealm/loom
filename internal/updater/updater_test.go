@@ -450,6 +450,29 @@ func TestVerifyRestartedWithoutBinaryMtime(t *testing.T) {
 	}
 }
 
+// TestAwaitRunning pins the check `loom install` exits non-zero on: a
+// bootstrapped-but-processless job gets one kickstart and then an error, a
+// fresh process on the new image passes.
+func TestAwaitRunning(t *testing.T) {
+	var kicked []string
+	stubRestartCheck(t, map[string]launchd.Process{
+		shipper.AgentLabel: {PID: 21, Started: time.Now()},
+	}, &kicked)
+	bin := freshBin(t)
+
+	err := AwaitRunning(AgentLabel, bin)
+	if err == nil || !strings.Contains(err.Error(), "no process") {
+		t.Fatalf("AwaitRunning(processless) = %v, want no process", err)
+	}
+	if !reflect.DeepEqual(kicked, []string{AgentLabel}) {
+		t.Errorf("kickstarts = %v, want exactly one for %s", kicked, AgentLabel)
+	}
+
+	if err := AwaitRunning(shipper.AgentLabel, bin); err != nil {
+		t.Fatalf("AwaitRunning(running) = %v", err)
+	}
+}
+
 func TestTickChecksumMismatchLeavesBinary(t *testing.T) {
 	rel := newFakeRelease(t, "v1.1.2", []byte("released binary"), true)
 	bin := installEnv(t, "1.1.1", rel, []byte("old binary"))

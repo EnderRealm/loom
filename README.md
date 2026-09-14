@@ -312,7 +312,7 @@ This:
 2. Creates `$LOOM_HOME/received/`
 3. Writes `~/Library/LaunchAgents/com.loom.receiver.plist` with `KeepAlive=true` (restarts on exit), `RunAtLoad=true` (starts immediately), and `LOOM_HOME` baked into `EnvironmentVariables`. The token is read from `~/.loom/receiver-token` at runtime, not the plist, so it's not exposed via the plist or `launchctl print`
 4. Validates the plist with `plutil -lint`
-5. Boots out any prior instance, bootstraps the new one, and `kickstart`s it
+5. Boots out any prior instance, bootstraps the new one, and waits for launchd to run a process for it — `kickstart`ing once if none appears, and failing the install by label if none comes up
 6. Polls `http://127.0.0.1:8765/healthz` for up to 10s to confirm it came up
 
 The plist runs the loom binary at the absolute path of whichever `loom` was on `$PATH` at install time. Rebuild to the same path and the next respawn picks up new code.
