@@ -12,7 +12,7 @@ Loom captures agent session transcripts, ships them to a central receiver, folds
 | `tui`        | v1, usable | Interactive dashboard for projects, sessions, and knowledge        |
 | `loom` CLI   | v1, usable | Unified entry point (`tui`, `summarize`, `install`, `status`, ...) |
 
-**Agents supported:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/**/rollout-<ts>-<uuid>.jsonl`).
+**Agents supported:** Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`) and Codex CLI (rollouts at `~/.codex/sessions/**/rollout-<ts>-<uuid>.jsonl`). Transport also captures Cursor CLI SQLite sessions at `~/.cursor/chats/<workspace-hash>/<uuid>/store.db`, including children; Cursor summary parsing is separate. See [Cursor capture format and evidence](docs/cursor-cli-capture.md).
 
 `extractors/` is a Python project (truth/decision extraction from session summaries) that operates over the durable knowledge store at `~/.loom/knowledge/` — its own git repo, see that store's `SCHEMA.md`. The TUI reads that store and the `loom extract` agent invokes `extract.py` against new sessions. Every write to the store — from the TUI's promote/reject/edit gestures and from the Python extractor alike — goes through one Go entry point that commits what it wrote and pushes the commit; see [`docs/knowledge-store-writes.md`](./docs/knowledge-store-writes.md). What the extraction path strips out of transcript text, where that text is allowed to flow, and what a consumer may trust it for are in [`docs/transcript-trust-and-redaction.md`](./docs/transcript-trust-and-redaction.md). Extraction is gated per project on a scope directory in that store, and which name a session resolves to — plus how to onboard a project that has none — is in [`docs/knowledge-scopes.md`](./docs/knowledge-scopes.md).
 
@@ -273,7 +273,7 @@ A session run from a throwaway working directory — a review lens started in an
 
 State lives per-user per-machine. Override the root with `LOOM_HOME=/some/path`.
 
-`<agent>` is `claude-code` or `codex-cli`. The two-stage shipper captures from the agent's source directory into local `staging/`, then ships staging deltas to the receiver — so the agent can clean up its own session files without losing data.
+`<agent>` is `claude-code`, `codex-cli`, or `cursor-cli`. The two-stage shipper captures from the agent's source directory into local `staging/`, then ships staging deltas to the receiver — so the agent can clean up its own session files without losing data. Cursor's mutable SQLite records become a lossless journal in staging; the other transcript sources retain their JSONL byte framing.
 
 A subagent transcript travels under the session that dispatched it: it stages at `staging/<agent>/<project>/<parent>/subagents/`, lands at `received/<agent>/<project>/<parent>/subagents/`, and carries a `.subagent.json` sidecar with what the agent recorded about the dispatch. Its cursor key `<key>` is `<parent>.<agent-id>`; for a transcript nested below `subagents/`, `<agent-id>` is its path under that directory joined with `.` (`workflows.wf_5daf2eee-720.agent-a0e0`), so it stays a single path component and two dispatches under one parent can never share a staging file or a cursor. A top-level session's `<key>` is its `<uuid>`.
 

@@ -265,9 +265,12 @@ func capturePass(counts *tickCounts) {
 		if err != nil {
 			log.Printf("fail stage=capture agent=%s class=io err=%q", agent, err)
 			counts.captureFailed++
-			continue
 		}
 		for _, s := range sessions {
+			if snapshot, ok := ad.(source.SnapshotAdapter); ok {
+				captureSnapshot(snapshot, s, gitCache, counts)
+				continue
+			}
 			// A subagent gets its own cursor, namespaced under its parent.
 			key := s.Key()
 			parent := s.ParentID()
@@ -753,11 +756,21 @@ func countUncapturedSessions() []uncapturedBucket {
 			continue
 		}
 		for _, s := range sessions {
-			size, err := source.Size(s.Path)
+			var size, off int64
+			var err error
+			if snapshot, ok := ad.(source.SnapshotAdapter); ok {
+				var records []source.SnapshotRecord
+				records, err = snapshot.ReadSnapshot(s)
+				if err == nil {
+					size, err = staging.SnapshotPending(staging.Path(agent, s.Project, s.ParentID(), s.SessionID), records)
+				}
+			} else {
+				size, err = source.Size(s.Path)
+				off, _ = cursor.Read(cursor.KindSource, agent, s.Key())
+			}
 			if err != nil {
 				continue
 			}
-			off, _ := cursor.Read(cursor.KindSource, agent, s.Key())
 			if size <= off {
 				continue
 			}

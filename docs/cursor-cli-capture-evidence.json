@@ -1,0 +1,353 @@
+{
+  "cursor_cli_version": "2026.09.10-fd3934a",
+  "verified_at": "2026-09-14T06:19:45Z",
+  "receiver_url": "http://127.0.0.1:8765",
+  "source_layout": "~/.cursor/chats/bfa6da08590fb98ec8c5b874ab312c59/<session>/store.db",
+  "private_evidence": "~/.loom/capture-evidence/cursor-cli-60ab",
+  "sessions": [
+    {
+      "session": "963ac97f-c33f-46de-9624-3e5946b61a0a",
+      "parent": null,
+      "records": 24,
+      "blobs": 22,
+      "source_value_bytes": 57580,
+      "received_bytes": 80244,
+      "journal_sha256": "95bd2e0f059fa9107538de7a184b981828328c82205183ce471e0b44f6c87dd7",
+      "comparison": "all keys, SQLite types and decoded bytes equal; staging equals received",
+      "received_path": "/Users/steve/.loom/received/cursor-cli/-private-tmp-loom-cursor-work_gzTD7K-probe/963ac97f-c33f-46de-9624-3e5946b61a0a.jsonl",
+      "source_snapshot": "~/.loom/capture-evidence/cursor-cli-60ab/sources/963ac97f-c33f-46de-9624-3e5946b61a0a",
+      "record_manifest": [
+        {
+          "kind": "blobs",
+          "key": "1ed9ea0079e3f45e16f54cf166281d2b075ac3bacffbada9440812e9572a38b1",
+          "value_type": "blob",
+          "sha256": "1ed9ea0079e3f45e16f54cf166281d2b075ac3bacffbada9440812e9572a38b1",
+          "bytes": 776
+        },
+        {
+          "kind": "blobs",
+          "key": "334f172201921d1969fee5cf0b26c6212b4106998c75fbd0fc0015e5041f2482",
+          "value_type": "blob",
+          "sha256": "334f172201921d1969fee5cf0b26c6212b4106998c75fbd0fc0015e5041f2482",
+          "bytes": 488
+        },
+        {
+          "kind": "blobs",
+          "key": "41447f3e107c1641644ed905003c47795093891e56b5e95205542478c80eff0e",
+          "value_type": "blob",
+          "sha256": "41447f3e107c1641644ed905003c47795093891e56b5e95205542478c80eff0e",
+          "bytes": 3885
+        },
+        {
+          "kind": "blobs",
+          "key": "4c83f18ac2cb168967a612afd6a1ac67033212542b942ae462eabd5add123f09",
+          "value_type": "blob",
+          "sha256": "4c83f18ac2cb168967a612afd6a1ac67033212542b942ae462eabd5add123f09",
+          "bytes": 1456
+        },
+        {
+          "kind": "blobs",
+          "key": "4d3b9967414e4c4e4e5eee419b6a21ff4795f998efee162c5f33bd8826fdba84",
+          "value_type": "blob",
+          "sha256": "4d3b9967414e4c4e4e5eee419b6a21ff4795f998efee162c5f33bd8826fdba84",
+          "bytes": 2260
+        },
+        {
+          "kind": "blobs",
+          "key": "518e13c6a355d7f5253de3cf65e9c167b8ad641f6b48b18541f811c58e160765",
+          "value_type": "blob",
+          "sha256": "518e13c6a355d7f5253de3cf65e9c167b8ad641f6b48b18541f811c58e160765",
+          "bytes": 106
+        },
+        {
+          "kind": "blobs",
+          "key": "57181214202a1f7c84707eaf0b77dca83ce12769afa69b4cd4c7b6201569f145",
+          "value_type": "blob",
+          "sha256": "57181214202a1f7c84707eaf0b77dca83ce12769afa69b4cd4c7b6201569f145",
+          "bytes": 136
+        },
+        {
+          "kind": "blobs",
+          "key": "65c3327137a500e6740fa968535c9b08357121a855e5e224fa6b7bbd31826eb3",
+          "value_type": "blob",
+          "sha256": "65c3327137a500e6740fa968535c9b08357121a855e5e224fa6b7bbd31826eb3",
+          "bytes": 209
+        },
+        {
+          "kind": "blobs",
+          "key": "693595ab2a2a4d58f3601e66ca1c3f4df6437546f91d27c47f77add3a2e9c37b",
+          "value_type": "blob",
+          "sha256": "693595ab2a2a4d58f3601e66ca1c3f4df6437546f91d27c47f77add3a2e9c37b",
+          "bytes": 5134
+        },
+        {
+          "kind": "blobs",
+          "key": "75d763025fe4006c98de6d6ef58690a1b91b282b130c4a9f1fe5ef0faa274463",
+          "value_type": "blob",
+          "sha256": "75d763025fe4006c98de6d6ef58690a1b91b282b130c4a9f1fe5ef0faa274463",
+          "bytes": 276
+        },
+        {
+          "kind": "blobs",
+          "key": "96d7f8ee35e083be8a90d45a6338e947565d6ec3e38f301ea3aa13382826c692",
+          "value_type": "blob",
+          "sha256": "96d7f8ee35e083be8a90d45a6338e947565d6ec3e38f301ea3aa13382826c692",
+          "bytes": 2496
+        },
+        {
+          "kind": "blobs",
+          "key": "a8414fbb7307afb1d5d0bd2587708a931573d6adbf434c0860467324e3384712",
+          "value_type": "blob",
+          "sha256": "a8414fbb7307afb1d5d0bd2587708a931573d6adbf434c0860467324e3384712",
+          "bytes": 742
+        },
+        {
+          "kind": "blobs",
+          "key": "ab279486501c524b4b119a9aefc9f3490d3e646ef5ada5596ca6b65a8b4611ea",
+          "value_type": "blob",
+          "sha256": "ab279486501c524b4b119a9aefc9f3490d3e646ef5ada5596ca6b65a8b4611ea",
+          "bytes": 768
+        },
+        {
+          "kind": "blobs",
+          "key": "aba269b887aae386bbb6c6d53d1576ebc83f0454ba238e5b8e127b95022b6fab",
+          "value_type": "blob",
+          "sha256": "aba269b887aae386bbb6c6d53d1576ebc83f0454ba238e5b8e127b95022b6fab",
+          "bytes": 618
+        },
+        {
+          "kind": "blobs",
+          "key": "ae634a927ac20ed10f1b173d1d1db4711ef039974576294ef6d8a62d6cd5385c",
+          "value_type": "blob",
+          "sha256": "ae634a927ac20ed10f1b173d1d1db4711ef039974576294ef6d8a62d6cd5385c",
+          "bytes": 327
+        },
+        {
+          "kind": "blobs",
+          "key": "af5c0697bc3822f5c985c834c12c3afa53c0373a27c2dc25a7b7a6ed173994d2",
+          "value_type": "blob",
+          "sha256": "af5c0697bc3822f5c985c834c12c3afa53c0373a27c2dc25a7b7a6ed173994d2",
+          "bytes": 708
+        },
+        {
+          "kind": "blobs",
+          "key": "b2fb4ec8accfb71c68b6f82fc5ff8b29a678d212fc5af18c157c9eb0c38f09dc",
+          "value_type": "blob",
+          "sha256": "b2fb4ec8accfb71c68b6f82fc5ff8b29a678d212fc5af18c157c9eb0c38f09dc",
+          "bytes": 2384
+        },
+        {
+          "kind": "blobs",
+          "key": "cc251cf640eee106bf1d053f0a81c6b5f86c2aacaa1192c9419151f89454ad0f",
+          "value_type": "blob",
+          "sha256": "cc251cf640eee106bf1d053f0a81c6b5f86c2aacaa1192c9419151f89454ad0f",
+          "bytes": 295
+        },
+        {
+          "kind": "blobs",
+          "key": "cd96f87fbc5dc3c8e26d071276772a2a529934190876b5d4748aee0acf96e61c",
+          "value_type": "blob",
+          "sha256": "cd96f87fbc5dc3c8e26d071276772a2a529934190876b5d4748aee0acf96e61c",
+          "bytes": 31495
+        },
+        {
+          "kind": "blobs",
+          "key": "d298a93fb889012f5f7a96d53de3941ba16f48283ec6d4df9b6168491a315c99",
+          "value_type": "blob",
+          "sha256": "d298a93fb889012f5f7a96d53de3941ba16f48283ec6d4df9b6168491a315c99",
+          "bytes": 139
+        },
+        {
+          "kind": "blobs",
+          "key": "d4a3be087834e4b8c82102f68727decd35c2d9bf65146ab49ef3bdd8b3b0a46d",
+          "value_type": "blob",
+          "sha256": "d4a3be087834e4b8c82102f68727decd35c2d9bf65146ab49ef3bdd8b3b0a46d",
+          "bytes": 556
+        },
+        {
+          "kind": "blobs",
+          "key": "ecbc3ba3ecf31509340b758db0160e1376258f22a27dbbf9a8bd8b7ee25ccf2d",
+          "value_type": "blob",
+          "sha256": "ecbc3ba3ecf31509340b758db0160e1376258f22a27dbbf9a8bd8b7ee25ccf2d",
+          "bytes": 1561
+        },
+        {
+          "kind": "file",
+          "key": "meta.json",
+          "value_type": "blob",
+          "sha256": "218c06d400a49bb5ad131d16710944f640068365c5f209465e503cf5c0c2a2f6",
+          "bytes": 149
+        },
+        {
+          "kind": "meta",
+          "key": "0",
+          "value_type": "text",
+          "sha256": "d4055ecbc3e94601fc8646cbab777cf25967b936bf2569d991860a3bff1ffff2",
+          "bytes": 616
+        }
+      ]
+    },
+    {
+      "session": "5aabb54a-05c7-403c-9721-1bf0448847c1",
+      "parent": "963ac97f-c33f-46de-9624-3e5946b61a0a",
+      "records": 21,
+      "blobs": 20,
+      "source_value_bytes": 46516,
+      "received_bytes": 65088,
+      "journal_sha256": "357f163737bc46f8de6a301ae3ba256219ae9b81363115cb74be1f8f72c4c01c",
+      "comparison": "all keys, SQLite types and decoded bytes equal; staging equals received",
+      "received_path": "/Users/steve/.loom/received/cursor-cli/-private-tmp-loom-cursor-work_gzTD7K-probe/963ac97f-c33f-46de-9624-3e5946b61a0a/subagents/5aabb54a-05c7-403c-9721-1bf0448847c1.jsonl",
+      "source_snapshot": "~/.loom/capture-evidence/cursor-cli-60ab/sources/5aabb54a-05c7-403c-9721-1bf0448847c1",
+      "record_manifest": [
+        {
+          "kind": "blobs",
+          "key": "0a6a946d4c547e146a945fae2a63be57259893d818efd17db8880459cf2e40fd",
+          "value_type": "blob",
+          "sha256": "0a6a946d4c547e146a945fae2a63be57259893d818efd17db8880459cf2e40fd",
+          "bytes": 1874
+        },
+        {
+          "kind": "blobs",
+          "key": "24b71886c609b25ef0a5096045dcb8279b076488966c2e8caf778d8dc840da65",
+          "value_type": "blob",
+          "sha256": "24b71886c609b25ef0a5096045dcb8279b076488966c2e8caf778d8dc840da65",
+          "bytes": 106
+        },
+        {
+          "kind": "blobs",
+          "key": "283bf003781972a4fcaedd3fdeae6fbd03dac3a53afcb48fa1a885121e0867bb",
+          "value_type": "blob",
+          "sha256": "283bf003781972a4fcaedd3fdeae6fbd03dac3a53afcb48fa1a885121e0867bb",
+          "bytes": 85
+        },
+        {
+          "kind": "blobs",
+          "key": "2c0b7577d26c4489fd59c94f25e1312b65c487554018337ef9c4ac7a5c57019f",
+          "value_type": "blob",
+          "sha256": "2c0b7577d26c4489fd59c94f25e1312b65c487554018337ef9c4ac7a5c57019f",
+          "bytes": 2261
+        },
+        {
+          "kind": "blobs",
+          "key": "4244959ab494ab4539a6cdcf104e69fef4c63e6ce7a21b21500e6c9eec3aa7ac",
+          "value_type": "blob",
+          "sha256": "4244959ab494ab4539a6cdcf104e69fef4c63e6ce7a21b21500e6c9eec3aa7ac",
+          "bytes": 1359
+        },
+        {
+          "kind": "blobs",
+          "key": "47bafcb62a3c006cea619ed86cc703910b539f9e2d3e11bcab63de8f4528bbb9",
+          "value_type": "blob",
+          "sha256": "47bafcb62a3c006cea619ed86cc703910b539f9e2d3e11bcab63de8f4528bbb9",
+          "bytes": 585
+        },
+        {
+          "kind": "blobs",
+          "key": "483beeb7842289f1dfdb879e9b21e8988b877a9c873098e2a65701930cfbe683",
+          "value_type": "blob",
+          "sha256": "483beeb7842289f1dfdb879e9b21e8988b877a9c873098e2a65701930cfbe683",
+          "bytes": 768
+        },
+        {
+          "kind": "blobs",
+          "key": "4a2f5d9dfbdc7de6b4d534d474ece22a1336a4078c187d7951d570e327994a2b",
+          "value_type": "blob",
+          "sha256": "4a2f5d9dfbdc7de6b4d534d474ece22a1336a4078c187d7951d570e327994a2b",
+          "bytes": 638
+        },
+        {
+          "kind": "blobs",
+          "key": "5338c13e7cd40c2d14d13cf3b5c61bd68a7ac7f0656b414a3b1610f3587dd947",
+          "value_type": "blob",
+          "sha256": "5338c13e7cd40c2d14d13cf3b5c61bd68a7ac7f0656b414a3b1610f3587dd947",
+          "bytes": 31226
+        },
+        {
+          "kind": "blobs",
+          "key": "53aeb2f23bb5a5738e68dfc9a0f7929837d92d5cfe66e6587c0b737b7e928866",
+          "value_type": "blob",
+          "sha256": "53aeb2f23bb5a5738e68dfc9a0f7929837d92d5cfe66e6587c0b737b7e928866",
+          "bytes": 80
+        },
+        {
+          "kind": "blobs",
+          "key": "66a98b5b2d421c67a1ba3c10652adada9ad938ad8eb993cc226d610842112b3f",
+          "value_type": "blob",
+          "sha256": "66a98b5b2d421c67a1ba3c10652adada9ad938ad8eb993cc226d610842112b3f",
+          "bytes": 429
+        },
+        {
+          "kind": "blobs",
+          "key": "71caf703a033ff051aff044c78eff2d04ff2a74bc4a3e8297ee7006a3266dc14",
+          "value_type": "blob",
+          "sha256": "71caf703a033ff051aff044c78eff2d04ff2a74bc4a3e8297ee7006a3266dc14",
+          "bytes": 817
+        },
+        {
+          "kind": "blobs",
+          "key": "72119ca88b97bf2b83af1838a3d519f07990f55b9689980a2eb2086f9390a13d",
+          "value_type": "blob",
+          "sha256": "72119ca88b97bf2b83af1838a3d519f07990f55b9689980a2eb2086f9390a13d",
+          "bytes": 327
+        },
+        {
+          "kind": "blobs",
+          "key": "80eea688a3f674fe57ec3207cf64a4c9b4907637417d43adf0d6b84cf381e58f",
+          "value_type": "blob",
+          "sha256": "80eea688a3f674fe57ec3207cf64a4c9b4907637417d43adf0d6b84cf381e58f",
+          "bytes": 2146
+        },
+        {
+          "kind": "blobs",
+          "key": "919e3e331604583a9fff453f4f965fc1126685fbdc99450a2e2ad25aaf437711",
+          "value_type": "blob",
+          "sha256": "919e3e331604583a9fff453f4f965fc1126685fbdc99450a2e2ad25aaf437711",
+          "bytes": 105
+        },
+        {
+          "kind": "blobs",
+          "key": "bf457d11ca2f8461c6c1ce7766ae617eac701625e359dddf2e5f5b66f694d6fe",
+          "value_type": "blob",
+          "sha256": "bf457d11ca2f8461c6c1ce7766ae617eac701625e359dddf2e5f5b66f694d6fe",
+          "bytes": 672
+        },
+        {
+          "kind": "blobs",
+          "key": "cd97090f11175a548168d261aaebd5409345e27374a010603172c21d1ad29988",
+          "value_type": "blob",
+          "sha256": "cd97090f11175a548168d261aaebd5409345e27374a010603172c21d1ad29988",
+          "bytes": 87
+        },
+        {
+          "kind": "blobs",
+          "key": "da1ecb402381ba83bead491951375053a43fdd4e52bb864d23ed1bed60bd7a82",
+          "value_type": "blob",
+          "sha256": "da1ecb402381ba83bead491951375053a43fdd4e52bb864d23ed1bed60bd7a82",
+          "bytes": 1155
+        },
+        {
+          "kind": "blobs",
+          "key": "e25c7690e8d5b3c6bbac548018b86c303c18309e2c60da029e16a4589f6a6a86",
+          "value_type": "blob",
+          "sha256": "e25c7690e8d5b3c6bbac548018b86c303c18309e2c60da029e16a4589f6a6a86",
+          "bytes": 361
+        },
+        {
+          "kind": "blobs",
+          "key": "fbc9d5d431ea6a627df848979b1b3143fe3eee07e7138c429e1c3d7b16056dc3",
+          "value_type": "blob",
+          "sha256": "fbc9d5d431ea6a627df848979b1b3143fe3eee07e7138c429e1c3d7b16056dc3",
+          "bytes": 295
+        },
+        {
+          "kind": "meta",
+          "key": "0",
+          "value_type": "text",
+          "sha256": "de738b226c108abe4ef885e0f9f564b6260a35f74e22c08321077e3efc850c4e",
+          "bytes": 1140
+        }
+      ],
+      "subagent_sidecar_matches": true
+    }
+  ]
+}
