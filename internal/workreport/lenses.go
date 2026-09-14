@@ -30,10 +30,22 @@ const (
 	// verdict.
 	AttemptFailed = "failed"
 	// AttemptResponded: a response landed but was malformed — cut short, not
-	// JSON, or naming no known lens or verdict.
+	// JSON, naming no known lens or verdict, or naming a known lens other
+	// than the one dispatched.
 	AttemptResponded = "responded"
 	// AttemptParsed: a whole verdict naming a known lens and verdict landed.
 	AttemptParsed = "parsed"
+)
+
+// Provenance values of a LensAttempt: where the paired response came from
+// when the walk could attribute it to the router.
+const (
+	// ProvenanceRouterResult: the router call's own result, the command
+	// being the router alone.
+	ProvenanceRouterResult = "router_result"
+	// ProvenanceReadBack: an exclusive read of the path the router alone
+	// redirected its output to.
+	ProvenanceReadBack = "read_back"
 )
 
 // SourceRef locates the transcript record a response was read from.
@@ -56,7 +68,15 @@ type LensAttempt struct {
 	Status  string `json:"status"`
 	// Dispatched is false for an attempt known only from its response — a
 	// Codex inlined pass, or a verdict read back with no dispatch on record.
-	Dispatched      bool   `json:"dispatched"`
+	Dispatched bool `json:"dispatched"`
+	// Routed is true when the dispatch was a call to the lens router rather
+	// than a subagent.
+	Routed bool `json:"routed"`
+	// Provenance is where the paired response came from when it was the
+	// router's own result or a read-back of the router's redirect; "" for
+	// a subagent's notification, an inlined pass, or no response. A routed
+	// attempt an inlined verdict answered has none.
+	Provenance      string `json:"provenance"`
 	DispatchID      string `json:"dispatch_id"`
 	DispatchTurnIdx int    `json:"dispatch_turn_idx"`
 	// ExecutionID names the recorded lens execution this dispatch joined,
@@ -89,11 +109,13 @@ func (a LensAttempt) Successful() bool {
 
 // LensExecution is a recorded lens execution (docs/execution-records.md) of
 // the run whose attempts are read: what the record declared about the lens
-// it ran, and the dispatch it named when it could.
+// it ran, and the dispatch it named when it could. Round and Attempt are 0
+// where the record carried none.
 type LensExecution struct {
 	ExecutionID string
 	Lens        string
 	Round       int
+	Attempt     int
 	DispatchID  string
 	StartedAt   time.Time
 }
@@ -304,15 +326,21 @@ const joinSlack = 5 * time.Second
 // inlines its passes; on Claude the assistant quoting a verdict is not a
 // lens answering.
 //
-// Each lens dispatch row joins at most one of execs, and each record joins
-// once: the record naming the row's call id, else — for a router call, whose
-// record cannot know its own call id — the earliest unjoined record of the
-// same lens naming no dispatch whose start falls in the call's window,
-// joinSlack either side. A turn whose assistant text holds no commitment
-// line — a Claude transcript since 2.1.268 keeps none — takes its round from
-// the records its dispatches joined instead: one line per joined row naming
-// the record's round and no lenses, applied the same way, so nothing derives
-// a missing attempt from a record. A text line, where one exists, wins.
+// Each tool row joins at most one of execs, and each record joins once: the
+// record naming the row's call id, else — for a router call, whose record
+// cannot know its own call id — the earliest unjoined record of the same
+// lens naming no dispatch whose start falls in the call's window, joinSlack
+// either side. A row a record names by dispatch id is a dispatch of the
+// record's lens whether or not its key argument reads as one, and its
+// attempt takes the record's round and attempt number where the record
+// carries them: the record is the producer's word, and the key-argument
+// heuristic and the commitment line are the fallback for rows without one.
+// A turn whose assistant text holds no commitment line — a Claude transcript
+// since 2.1.268 keeps none — takes the walk's round from the records its
+// dispatches joined instead: one line per joined row naming the record's
+// round and no lenses, applied the same way, so nothing derives a missing
+// attempt from a record. A text line, where one exists, still moves the
+// walk's round for the unjoined rows and inlined passes.
 func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, execs []LensExecution) []LensAttempt {
 	w := &lensWalk{
 		byDispatch: map[string]*LensAttempt{}, redirects: map[string]string{},
@@ -353,11 +381,7 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 		// whichever record any of the turn's rows joined.
 		recorded := len(w.pending) == 0
 		for _, c := range data.callsByTurn[t.idx] {
-			name := dispatchLens(c)
-			if name == "" {
-				continue
-			}
-			i := w.join(name, c)
+			i := w.join(dispatchLens(c), c)
 			if i < 0 {
 				continue
 			}
@@ -374,11 +398,13 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 				w.write(written[0])
 				written = written[1:]
 			}
-			if name := dispatchLens(c); name != "" {
+			if name := w.lensOf(c); name != "" {
 				w.dispatch(name, c, t.idx)
 				if c.toolKind == subagentKind || routerAlone(c.keyArg) {
 					for _, r := range data.lensesByCall[c.callID] {
-						w.respond(r)
+						if a := w.respond(r); a != nil && c.toolKind != subagentKind {
+							a.Provenance = ProvenanceRouterResult
+						}
 					}
 				}
 			} else if readsBack(c) {
@@ -475,14 +501,15 @@ func lensRank(name string) int {
 	return len(lensOrder)
 }
 
-// join picks the execution record a lens dispatch row takes, or -1: the
-// unjoined record naming the row's call id, else for a router call the
-// earliest unjoined record of the lens naming no dispatch that started in
-// the call's window — from joinSlack before the call to joinSlack after it
-// ended, or unbounded after when the call's duration is unknown — the
-// parsers write 0 where no result timestamp bounded the call. A subagent
-// row joins by dispatch id alone: its record names one. A row with no call
-// id joins nothing, since the join is kept by call id.
+// join picks the execution record a tool row takes, or -1: the unjoined
+// record naming the row's call id, whatever the row's key argument says,
+// else for a router call of lens name the earliest unjoined record of that
+// lens naming no dispatch that started in the call's window — from joinSlack
+// before the call to joinSlack after it ended, or unbounded after when the
+// call's duration is unknown — the parsers write 0 where no result timestamp
+// bounded the call. A subagent row, and a row the heuristic reads as no lens
+// dispatch, joins by dispatch id alone. A row with no call id joins nothing,
+// since the join is kept by call id.
 func (w *lensWalk) join(name string, c callRow) int {
 	if c.callID == "" {
 		return -1
@@ -492,7 +519,7 @@ func (w *lensWalk) join(name string, c callRow) int {
 			return i
 		}
 	}
-	if c.toolKind == subagentKind || c.startedAt.IsZero() {
+	if name == "" || c.toolKind == subagentKind || c.startedAt.IsZero() {
 		return -1
 	}
 	best := -1
@@ -513,6 +540,15 @@ func (w *lensWalk) join(name string, c callRow) int {
 	return best
 }
 
+// lensOf names the lens a tool row dispatched: the joined record's, where
+// a record names one, else what the key argument reads as.
+func (w *lensWalk) lensOf(c callRow) string {
+	if i, ok := w.joins[c.callID]; ok && w.execs[i].Lens != "" {
+		return w.execs[i].Lens
+	}
+	return dispatchLens(c)
+}
+
 // apply makes a commitment line's round current and records what it named.
 func (w *lensWalk) apply(c commitment) {
 	w.round = c.round
@@ -529,11 +565,12 @@ func (w *lensWalk) apply(c commitment) {
 	}
 }
 
-// latest is the highest-numbered attempt for a lens in a round, or nil.
+// latest is the highest-numbered attempt for a lens in a round, or nil; of
+// two numbered alike — records naming the same attempt — the later placed.
 func (w *lensWalk) latest(name string, round int) *LensAttempt {
 	var out *LensAttempt
 	for _, a := range w.attempts {
-		if a.Lens == name && a.Round == round && (out == nil || a.Attempt > out.Attempt) {
+		if a.Lens == name && a.Round == round && (out == nil || a.Attempt >= out.Attempt) {
 			out = a
 		}
 	}
@@ -575,15 +612,27 @@ func (w *lensWalk) advance(name string) {
 	}
 }
 
-// dispatch opens an attempt for a lens dispatch row. A row whose own result
-// was an error starts failed; a verdict in that result, paired right after,
+// dispatch opens an attempt for a lens dispatch row. A row that joined a
+// record takes the record's round and attempt number where it carries them,
+// over the walk's round and the next number in it; the walk's round still
+// advances on the row for everything after it. A row whose own result was
+// an error starts failed; a verdict in that result, paired right after,
 // overrides it.
 func (w *lensWalk) dispatch(name string, c callRow, turnIdx int) {
 	w.advance(name)
-	a := w.open(name, w.round, true, c.callID, turnIdx)
-	if i, ok := w.joins[c.callID]; ok {
-		a.ExecutionID = w.execs[i].ExecutionID
+	round := w.round
+	i, joined := w.joins[c.callID]
+	if joined && w.execs[i].Round > 0 {
+		round = w.execs[i].Round
 	}
+	a := w.open(name, round, true, c.callID, turnIdx)
+	if joined {
+		a.ExecutionID = w.execs[i].ExecutionID
+		if w.execs[i].Attempt > 0 {
+			a.Attempt = w.execs[i].Attempt
+		}
+	}
+	a.Routed = c.toolKind != subagentKind
 	if c.isError || (c.exitCode != nil && *c.exitCode != 0) {
 		a.Status = AttemptFailed
 	}
@@ -622,61 +671,88 @@ func (w *lensWalk) readBack(c callRow, r lensRow) {
 	}
 	if target != nil {
 		w.pair(target, r)
+		target.Provenance = ProvenanceReadBack
 	}
 }
 
 // respond places a response. One naming an attempt by dispatch id answers it,
 // or opens a further attempt on the same dispatch, in the dispatch's round,
-// when that one already answered — a task can notify more than once. A task
-// notification places only that way: one whose dispatch id is not one of
-// this run's lens attempts answers something else — another run's dispatch,
-// a task that is not a lens — and one naming no dispatch at all is not a
-// notification the harness posted but text quoting the marker — a pasted
-// ticket, a compaction summary — so neither is placed, and both stay in the
-// store as evidence only, as does a response naming no known lens.
+// when that one already answered — a task can notify more than once. One
+// naming a known lens other than the attempt's is the dispatch answered
+// wrong, not a further try: it opens nothing, and when the attempt already
+// answered it places nothing, staying in the store as evidence. A task
+// notification places only by dispatch id: one whose dispatch id is not one
+// of this run's lens attempts answers something else — another run's
+// dispatch, a task that is not a lens — and one naming no dispatch at all
+// is not a notification the harness posted but text quoting the marker — a
+// pasted ticket, a compaction summary — so neither is placed, and both stay
+// in the store as evidence only, as does a response naming no known lens.
 // Otherwise — an inlined pass, an assistant row on a runtime that inlines —
 // it answers the latest unanswered dispatched attempt of its lens in the
 // current round, else opens an undispatched one. Two more never come here: a
 // shell read-back, which readBack holds to its provenance, and a Claude user
 // row that is not a task notification — a compaction summary reproducing a
 // verdict, a human pasting one — since no lens answers as a plain user
-// message and placing it would supersede the real answer.
-func (w *lensWalk) respond(r lensRow) {
+// message and placing it would supersede the real answer. It returns the
+// attempt the response was placed on, or nil when it placed nothing.
+func (w *lensWalk) respond(r lensRow) *LensAttempt {
 	if a := w.byDispatch[r.dispatchID]; a != nil {
 		if a.ResponseID != "" {
+			if mismatched(a, r) {
+				return nil
+			}
+			routed := a.Routed
 			a = w.open(a.Lens, a.Round, true, a.DispatchID, a.DispatchTurnIdx)
+			a.Routed = routed
 		}
 		w.pair(a, r)
-		return
+		return a
 	}
 	if r.origin == summary.OriginTaskNotification {
-		return
+		return nil
 	}
 	if !lens.KnownLenses[r.lens] {
-		return
+		return nil
 	}
 	if a := w.latest(r.lens, w.round); a != nil && a.Status == AttemptDispatched {
 		w.pair(a, r)
-		return
+		return a
 	}
-	w.pair(w.open(r.lens, w.round, false, "", -1), r)
+	a := w.open(r.lens, w.round, false, "", -1)
+	w.pair(a, r)
+	return a
 }
 
-// pair records a response on an attempt.
+// mismatched reports whether a response names a known lens that is not the
+// attempt's: the dispatch came back with another lens's verdict. A response
+// naming no known lens is malformed on its own terms and is not this.
+func mismatched(a *LensAttempt, r lensRow) bool {
+	return lens.KnownLenses[r.lens] && r.lens != a.Lens
+}
+
+// pair records a response on an attempt. A mismatched response is recorded
+// where it landed — id, turn, source — and as responded with the mismatch
+// as its reason, and none of its verdict is copied: it is not an answer of
+// the dispatched lens, and never a verdict of the one it names.
 func (w *lensWalk) pair(a *LensAttempt, r lensRow) {
 	a.ResponseID = r.responseID
 	a.ResponseTurnIdx = r.turnIdx
+	a.Source = &SourceRef{Path: r.sourcePath, Line: r.sourceLine}
+	if a.Round < w.round {
+		a.Late = true
+	}
+	if mismatched(a, r) {
+		a.Status = AttemptResponded
+		a.Malformed = fmt.Sprintf("lens mismatch: response names %s, dispatch named %s", r.lens, a.Lens)
+		return
+	}
 	a.Verdict, a.Summary = r.verdict, r.summary
 	a.ContextKind, a.ContextState = r.contextKind, r.contextState
 	a.Contaminated = r.contaminated()
 	a.Malformed = r.reason
-	a.Source = &SourceRef{Path: r.sourcePath, Line: r.sourceLine}
 	if r.status == lens.StatusParsed {
 		a.Status = AttemptParsed
 	} else {
 		a.Status = AttemptResponded
-	}
-	if a.Round < w.round {
-		a.Late = true
 	}
 }

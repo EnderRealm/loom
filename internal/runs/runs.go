@@ -377,6 +377,7 @@ func lensExecutions(nodes []*Node) []workreport.LensExecution {
 			ExecutionID: n.ExecutionID,
 			Lens:        n.Lens,
 			Round:       intOf(n.Round),
+			Attempt:     intOf(n.Attempt),
 			DispatchID:  n.DispatchID,
 			StartedAt:   parseTime(n.StartedAt),
 		})

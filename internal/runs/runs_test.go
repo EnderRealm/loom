@@ -1027,10 +1027,14 @@ func TestRunsCarryLensAttempts(t *testing.T) {
 		t.Errorf("first attempt = %+v, want contract round 1 parsed", got)
 	}
 
-	// A record claiming the session takes the same invocation's attempts.
+	// A record claiming the session takes the same invocation's attempts,
+	// and a lens record naming one of its dispatches is that attempt's
+	// identity: the contract retry lands at the record's attempt number.
 	records := filepath.Join(t.TempDir(), "executions.jsonl")
 	if err := os.WriteFile(records, []byte(
 		`{"v":1,"kind":"run","run_id":"run-lens","ticket":"loom/lens-1234","runtime":"claude-code","agent":"claude-code","session_id":"lens-fixture","started_at":"2026-09-01T10:00:01Z"}`+"\n"+
+			`{"v":1,"kind":"execution","execution_id":"root-run-lens","run_id":"run-lens","execution_kind":"root","agent":"claude-code","session_id":"lens-fixture","started_at":"2026-09-01T10:00:01Z"}`+"\n"+
+			`{"v":1,"kind":"execution","execution_id":"lens-contract-r2-a3","run_id":"run-lens","parent_execution_id":"root-run-lens","execution_kind":"lens","lens":"contract","round":2,"attempt":3,"dispatch_id":"toolu_c3","started_at":"2026-09-01T10:20:00Z"}`+"\n"+
 			`{"v":1,"kind":"run","run_id":"run-bare","ticket":"loom/bare-0001","runtime":"weft","started_at":"2026-09-01T12:00:00Z"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1040,7 +1044,10 @@ func TestRunsCarryLensAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(recorded.Lenses) != 7 || recorded.Lenses[6].Status != workreport.AttemptMissing {
-		t.Errorf("recorded run lenses = %+v, want the same 7 attempts ending in the missing security lens", recorded.Lenses)
+		t.Fatalf("recorded run lenses = %+v, want the same 7 attempts ending in the missing security lens", recorded.Lenses)
+	}
+	if got := recorded.Lenses[4]; got.Lens != "contract" || got.Round != 2 || got.Attempt != 3 || got.ExecutionID != "lens-contract-r2-a3" || got.DispatchID != "toolu_c3" {
+		t.Errorf("contract retry = %+v, want round 2 attempt 3 under its record", got)
 	}
 	bare, err := Load(st.DB(), "run-bare")
 	if err != nil {

@@ -48,8 +48,11 @@ const codexLensScript = "codex-lens.sh"
 // the --lens argument it is always invoked with — rather than the script's name
 // anywhere in a command. A bare substring test let an `echo` mentioning the
 // script forge the evidence this report exists to measure. The match is
-// necessary but not sufficient: analyze also requires the call's recorded
-// output to carry a lens verdict.
+// necessary but not sufficient: the attempt model (dispatchLens) opens the
+// attempt on it, and the call counts as router evidence only once a verdict
+// with router provenance parsed on that attempt — the router's own result
+// when the command was the router alone, or an exclusive read-back of the
+// router's own redirect.
 var codexLensCallRe = regexp.MustCompile(regexp.QuoteMeta(codexLensScript) + `\b[^\n]*--lens\b`)
 
 // subagentKind is the normalized tool kind of a Claude subagent dispatch.
@@ -577,18 +580,6 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 			if lensSubagent(c) {
 				agentLens++
 			}
-			if codexLensCallRe.MatchString(strings.ToLower(c.keyArg)) {
-				// The command alone is still transcript content: an `echo` of
-				// the router's own invocation matches it. A real call's
-				// recorded output carries the verdict of the lens it routed,
-				// which an echo cannot produce.
-				for _, r := range data.lensesByCall[c.callID] {
-					if lens.KnownLenses[r.lens] {
-						lensRouter++
-						break
-					}
-				}
-			}
 			if strings.Contains(c.toolName, ticketEditTool) && !c.startedAt.IsZero() {
 				editTimes = append(editTimes, c.startedAt)
 			}
@@ -602,7 +593,13 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 	// One response reaches the model more than once — a task can notify
 	// twice, a run can re-quote a verdict — so a report is counted once per
 	// response id, and a superseded attempt's response still counts: it was
-	// reported.
+	// reported. A router call is evidence when its attempt parsed off a
+	// response with router provenance — the router's own result or a
+	// read-back of its redirect, superseded or not: the command alone is
+	// transcript content an `echo` can reproduce, a chained command's result
+	// can carry any file's quoted verdict, and an inlined verdict pairing
+	// with an unanswered routed attempt is the in-context pass answering,
+	// not the router.
 	counted := map[string]bool{}
 	var lastContract string
 	for _, a := range lensAttempts(run.Runtime, inv.idx, endIdx, data, nil) {
@@ -612,6 +609,9 @@ func analyze(inv invocationRow, endIdx int, endsAt time.Time, data *sessionData)
 		}
 		if a.Lens == lens.Contract && a.Successful() {
 			lastContract = a.ResponseID
+		}
+		if a.Routed && a.Status == AttemptParsed && a.Provenance != "" {
+			lensRouter++
 		}
 	}
 	// The last successful contract attempt is the one that stands.

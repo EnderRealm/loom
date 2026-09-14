@@ -66,10 +66,24 @@ lens in one review round. The run's turns are walked in order.
   security` — makes round N current and records the lenses it named.
 - A lens dispatch — a subagent row whose key argument reads as a lens
   dispatch (it says `lens` or `review`, the same test the fan-out count
-  applies) and names a lens, or a `codex-lens.sh --lens <name>` call — opens
-  the next attempt for that lens in the current round, `dispatched`. A
-  dispatch whose own result is an error and carries no verdict is `failed`.
-- A response pairs with its attempt by dispatch id. A `codex-lens.sh` call's
+  applies) and names a lens, or a `codex-lens.sh --lens <name>` call, or
+  any tool row a lens execution record names by `dispatch_id` — opens the
+  next attempt for that lens in the current round, `dispatched`; a router
+  call's attempt is `routed`. A dispatch whose own result is an error and
+  carries no verdict is `failed`. An attempt's `provenance` says where its
+  paired response came from when the walk could attribute it to the router
+  — `router_result` for a lone router call's own result, `read_back` for an
+  exclusive read of the router's redirect — and is empty otherwise: for a
+  subagent's notification, an inlined pass, or no response.
+- A response pairs with its attempt by dispatch id. One naming a known lens
+  other than the attempt's — a contract dispatch coming back with a quality
+  verdict — is the dispatch answered wrong, not a verdict of either lens:
+  the attempt is `responded` with the mismatch as its reason (`lens
+  mismatch: response names quality, dispatch named contract`), located by
+  the response's id and source but carrying none of its verdict, and it is
+  never successful. A mismatched response for a dispatch that already
+  answered places nothing — it neither supersedes the standing answer nor
+  opens a further attempt — and stays in the store as evidence. A `codex-lens.sh` call's
   own result pairs only when the command is the router alone: past the shell
   wrapper, one invocation — an env-assignment prefix and a `2> <path>`
   stderr redirect aside — with no `>`/`>>` stdout redirect and no `;`, `&&`,
@@ -122,22 +136,32 @@ lens in one review round. The run's turns are walked in order.
 - A recorded run's lens execution records (docs/execution-records.md) join
   its dispatches, each record to at most one dispatch and each dispatch to
   at most one record: a record naming a `dispatch_id` joins the row with
-  that call id; a record naming none — `codex-lens.sh` writes its own record
-  and cannot know its tool_use_id — joins a `codex-lens.sh` call of its lens
-  whose window holds the record's start, from five seconds before the call
-  began to five seconds after it ended (unbounded after, when the call's
-  duration is unknown), the earliest such record first. A subagent row joins
-  by dispatch id alone. The attempt carries the record's `execution_id`, and
-  the run report fills that attempt with the record's outcome and metrics
-  rather than looking one up by (lens, round, attempt).
+  that call id, whatever the row's key argument reads as; a record naming
+  none — `codex-lens.sh` writes its own record and cannot know its
+  tool_use_id — joins a `codex-lens.sh` call of its lens whose window holds
+  the record's start, from five seconds before the call began to five
+  seconds after it ended (unbounded after, when the call's duration is
+  unknown), the earliest such record first. A subagent row joins by
+  dispatch id alone. A joined record is the attempt's identity: the attempt
+  is of the record's lens, in the record's round and at the record's
+  attempt number where the record carries them, over the key-argument
+  heuristic, the commitment line's round and the next number in it — the
+  record is the producer's word, and the transcript walk is the fallback
+  for rows without one. Two records naming the same (lens, round, attempt)
+  are both kept, the later placed superseding the earlier. The attempt
+  carries the record's `execution_id`, and the run report fills that
+  attempt with the record's outcome and metrics rather than looking one up
+  by (lens, round, attempt).
 - A turn whose assistant text holds no commitment line — a Claude transcript
   since Claude Code 2.1.268 carries no text block from an assistant message
   that also called a tool, so no row holds the line — takes its round from
   the records its dispatches joined: one line per joined row naming the
   record's round and no lenses, applied the way a text line is, so the
   turn's subagent dispatches ahead of the router call land in that round
-  too, and no `missing` attempt is derived from a record. A text line, where
-  one exists, wins.
+  too, and no `missing` attempt is derived from a record. A text line,
+  where one exists, still governs the walk's current round for every row
+  that joined no record and for the inlined passes, and alone decides what
+  was committed to — the `missing` derivation reads only the lines.
 - After the walk, a lens a commitment line named with no attempt in that
   round gets one `missing` attempt; every attempt with a later attempt for
   the same lens and round is `superseded`; a response that landed after the
@@ -172,14 +196,22 @@ such by `context_kind`.
 | `missing` | Committed to in a round's line; nothing dispatched or answered. |
 | `dispatched` | On the record, unanswered — redirected to a file and never read back, or still running when the transcript ended. |
 | `failed` | The dispatch's own result was an error and carried no verdict. |
-| `responded` | A response landed but was malformed. |
+| `responded` | A response landed but was malformed, or named a known lens other than the one dispatched. |
 | `parsed` | A whole verdict naming a known lens and verdict landed. |
 
 An attempt is **successful** when it is `parsed` and not `superseded`: a
 whole response that no later attempt replaced. The compliance report's
 `contamination_reports` counts parsed responses reporting contamination once
 per response id, superseded or not, because each was reported; its
-`criteria_unverified` reads the last successful contract attempt's criteria.
+`criteria_unverified` reads the last successful contract attempt's criteria;
+and its router evidence — the `codex-lens.sh` call a Codex run stands on, or
+the routed security lens beside a Claude run's subagents — is a `routed`
+attempt that `parsed` off a response with router `provenance`, superseded or
+not: the dispatch happened and the router's own result or a read-back of its
+redirect answered it. The command naming the router is transcript content an
+`echo` can reproduce, a chained command's result can carry any file's quoted
+verdict, and an inlined verdict pairing with a redirected router call that
+was never read back is the in-context pass answering, so none counts.
 
 ## What this is not
 

@@ -464,7 +464,10 @@ func codexSession() *summary.SessionSummary {
 			StartedAt: base,
 		}},
 		ToolCalls: []summary.ToolCall{
-			{TurnIdx: 0, Kind: summary.KindCustom, ToolName: "exec", KeyArg: `const r = await tools.exec_command({"cmd":"/Users/steve/.codex/codex-lens.sh --lens security"})`, StartedAt: base.Add(time.Minute)},
+			// The bare `bash -lc` invocation the Codex parser emits: the
+			// attempt model pairs a router call's own result only when the
+			// command is the router alone (routerAlone).
+			{TurnIdx: 0, Kind: summary.KindBash, ToolName: "shell", KeyArg: "bash -lc ~/.codex/codex-lens.sh --lens security --payload /tmp/p", StartedAt: base.Add(time.Minute)},
 			{TurnIdx: 0, Kind: summary.KindBash, ToolName: "exec_command", KeyArg: "git commit", StartedAt: base.Add(5 * time.Minute),
 				ResultSummary: commitResult("[loom/codex-6666] Do the thing")},
 		},
@@ -607,6 +610,73 @@ func TestRouterCallCountsWhenItsOutputCarriesAVerdict(t *testing.T) {
 	run := only(t, f.load(time.Time{}, time.Time{}))
 	if !run.FanOutDispatched || run.Classification != ClassCompliant {
 		t.Fatalf("run = %+v, want a compliant run off the routed security verdict", run)
+	}
+}
+
+// The router evidence is the attempt model's: a router call chained with a
+// cat of the README has a result that is not the router's output, so the
+// verdict-shaped block that result carries answers no attempt and the run
+// stands on nothing, even though the command names the router and the block
+// names a lens.
+func TestChainedRouterCallIsNotRouterEvidence(t *testing.T) {
+	f := newFixture(t)
+	sum := codexSession()
+	sum.SessionID = "chained-router"
+	sum.Turns[0].AssistantText = "dispatching (loom/codex-6666 round 1): contract, quality, security\n" +
+		fenced(`{"lens": "contract", "verdict": "satisfied", "summary": "All criteria met."}`)
+	sum.ToolCalls[0].KeyArg = "bash -lc ~/.codex/codex-lens.sh --lens security --payload /tmp/p > /tmp/v.txt; cat README.md"
+	sum.ToolCalls[0].ResultSummary = "# README\n\nThe lens answers like this:\n" + fenced(
+		`{"lens": "security", "verdict": "satisfied", "summary": "No injection or authz exposure found."}`)
+	f.add(sum)
+
+	run := only(t, f.load(time.Time{}, time.Time{}))
+	if run.FanOutDispatched {
+		t.Fatal("fan_out_dispatched = true: a chained router command's result is the README's, not the router's")
+	}
+	if run.Classification == ClassCompliant {
+		t.Fatal("classification = compliant off a quoted verdict in a chained command's output")
+	}
+	var stored int
+	if err := openRO(t, f.path).QueryRow(`SELECT COUNT(*) FROM lens_responses WHERE lens = 'security' AND status = 'parsed'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 1 {
+		t.Fatalf("security verdicts stored = %d, want the quoted block kept as evidence", stored)
+	}
+}
+
+// A router call that redirected its output and was never read back leaves a
+// routed attempt unanswered; an inlined security verdict then pairs with it
+// as the in-context pass answering, not the router. The attempt parses but
+// carries no router provenance, so it is not router evidence, and with one
+// inlined lens short of the inlined bar the run stands on nothing.
+func TestInlinedVerdictOnAnUnreadRouterCallIsNotRouterEvidence(t *testing.T) {
+	f := newFixture(t)
+	sum := codexSession()
+	sum.SessionID = "unread-router"
+	sum.Turns[0].AssistantText = "dispatching (loom/codex-6666 round 1): contract, quality, security\n" +
+		fenced(`{"lens": "contract", "verdict": "satisfied", "summary": "All criteria met."}`) + "\n" +
+		fenced(`{"lens": "security", "verdict": "satisfied", "summary": "No injection or authz exposure found."}`)
+	sum.ToolCalls[0].KeyArg = "bash -lc ~/.codex/codex-lens.sh --lens security --payload /tmp/p > /tmp/v.txt"
+	f.add(sum)
+
+	run := only(t, f.load(time.Time{}, time.Time{}))
+	if run.FanOutDispatched {
+		t.Fatal("fan_out_dispatched = true: an inlined verdict on an unread router call is the in-context pass, not the router")
+	}
+	if run.Classification == ClassCompliant {
+		t.Fatal("classification = compliant off an inlined verdict standing in for the router's")
+	}
+	db := openRO(t, f.path)
+	attempts, err := Lenses(db, fixtureInvocation(t, db), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "contract/1/1/parsed quality/1/0/missing security/1/1/parsed"; got != want {
+		t.Fatalf("attempts = %v, want %v", got, want)
+	}
+	if a := attempt(t, attempts, lens.Security, 1, 1); !a.Routed || !a.Dispatched || a.Provenance != "" || a.ResponseTurnIdx != 0 {
+		t.Errorf("security = %+v, want routed, answered by the inlined verdict with no router provenance", a)
 	}
 }
 

@@ -249,7 +249,7 @@ func TestLensesModelRoundsAndRetries(t *testing.T) {
 	}
 
 	c1 := attempt(t, attempts, lens.Contract, 1, 1)
-	if !c1.Dispatched || c1.DispatchID != "toolu_c1" || c1.DispatchTurnIdx != 0 || c1.ResponseTurnIdx != 1 || c1.Late || c1.Superseded {
+	if !c1.Dispatched || c1.Routed || c1.Provenance != "" || c1.DispatchID != "toolu_c1" || c1.DispatchTurnIdx != 0 || c1.ResponseTurnIdx != 1 || c1.Late || c1.Superseded {
 		t.Errorf("contract r1 = %+v, want dispatched at turn 0, answered at turn 1, on time, standing", c1)
 	}
 	if c1.Source == nil || c1.Source.Line != 8 || !strings.HasSuffix(c1.Source.Path, "lens_responses.jsonl") {
@@ -269,8 +269,8 @@ func TestLensesModelRoundsAndRetries(t *testing.T) {
 	}
 
 	s1 := attempt(t, attempts, lens.Security, 1, 1)
-	if !s1.Dispatched || s1.DispatchID != "toolu_s1" || s1.ResponseTurnIdx != 0 || !s1.Successful() || s1.Contaminated {
-		t.Errorf("security r1 = %+v, want the router call's own result, successful and clean", s1)
+	if !s1.Dispatched || !s1.Routed || s1.Provenance != ProvenanceRouterResult || s1.DispatchID != "toolu_s1" || s1.ResponseTurnIdx != 0 || !s1.Successful() || s1.Contaminated {
+		t.Errorf("security r1 = %+v, want the router call's own result, routed, successful and clean", s1)
 	}
 
 	c2a := attempt(t, attempts, lens.Contract, 2, 1)
@@ -369,11 +369,11 @@ func TestCodexInlinedPassesAreUndispatchedAttempts(t *testing.T) {
 		t.Fatalf("attempts = %v, want %v", shape, want)
 	}
 	sec := attempt(t, attempts, lens.Security, 1, 1)
-	if sec.DispatchID != "call_sec" || !sec.Successful() || sec.Source == nil || sec.Source.Line != 5 {
+	if sec.DispatchID != "call_sec" || sec.Provenance != ProvenanceRouterResult || !sec.Successful() || sec.Source == nil || sec.Source.Line != 5 {
 		t.Errorf("security = %+v, want answered by call_sec's own output on line 5", sec)
 	}
 	quality := attempt(t, attempts, lens.Quality, 1, 1)
-	if quality.ContextState != "shared" || quality.Contaminated || !quality.Successful() || quality.Verdict != "findings" {
+	if quality.Provenance != "" || quality.ContextState != "shared" || quality.Contaminated || !quality.Successful() || quality.Verdict != "findings" {
 		t.Errorf("quality = %+v, want a successful findings verdict with a shared, uncontaminated context", quality)
 	}
 
@@ -504,7 +504,7 @@ func TestReadBackPairsByRedirectPathOnly(t *testing.T) {
 	if got := shapeOf(never); got != "security/1/1/dispatched" {
 		t.Fatalf("never-read run attempts = %s, want security/1/1/dispatched", got)
 	}
-	if a := never[0]; !a.Dispatched || a.DispatchID != "call_sec1" || a.ResponseID != "" || a.Source != nil || a.Successful() {
+	if a := never[0]; !a.Dispatched || a.DispatchID != "call_sec1" || a.Provenance != "" || a.ResponseID != "" || a.Source != nil || a.Successful() {
 		t.Errorf("never-read attempt = %+v, want dispatched by call_sec1 with no response", a)
 	}
 
@@ -516,7 +516,7 @@ func TestReadBackPairsByRedirectPathOnly(t *testing.T) {
 	if err := db.QueryRow(`SELECT response_id FROM lens_responses WHERE dispatch_id = 'call_cat'`).Scan(&catID); err != nil {
 		t.Fatal(err)
 	}
-	if a := read[0]; a.DispatchID != "call_sec2" || a.ResponseID != catID || a.Source == nil || a.Source.Line != 21 || !a.Successful() || a.Verdict != "satisfied" {
+	if a := read[0]; a.DispatchID != "call_sec2" || a.Provenance != ProvenanceReadBack || a.ResponseID != catID || a.Source == nil || a.Source.Line != 21 || !a.Successful() || a.Verdict != "satisfied" {
 		t.Errorf("read-back attempt = %+v, want call_sec2 answered by the cat result on line 21", a)
 	}
 	var stored int
@@ -869,5 +869,156 @@ func TestRecordsPlaceARoundWithNoCommitmentLine(t *testing.T) {
 		if a.ExecutionID != "" {
 			t.Errorf("attempt %+v joined the stray record", a)
 		}
+	}
+}
+
+// A response naming a known lens other than the one its dispatch named is
+// the dispatch answered wrong, not a verdict of either lens: the attempt is
+// responded with the mismatch as its reason, its verdict fields empty, and
+// it never stands as successful — so the compliance report reads no contract
+// criteria off it. A mismatched response for a dispatch that already
+// answered places nothing: the standing answer is neither superseded nor
+// joined by a further attempt.
+func TestMismatchedLensResponseNeverPairsAsAVerdict(t *testing.T) {
+	const ticket = "loom/lens-mismatch-0001"
+	at := func(min int) time.Time { return base.Add(time.Duration(min) * time.Minute) }
+	f := newFixture(t)
+	f.add(&summary.SessionSummary{
+		SessionID: "lens-mismatch",
+		Agent:     summary.AgentClaude,
+		StartTime: at(0),
+		EndTime:   at(30),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), StartedAt: at(0),
+				AssistantText: "dispatching (" + ticket + " round 1): contract, quality"},
+			// The contract dispatch comes back with a whole quality verdict,
+			// criteria and all.
+			{Idx: 1, UserMessage: notification("toolu_c", `{"lens": "quality", "verdict": "satisfied", "summary": "Fine.", "criteria": []}`),
+				AssistantText: "Contract in.", StartedAt: at(5)},
+			{Idx: 2, UserMessage: notification("toolu_q", `{"lens": "quality", "verdict": "findings", "summary": "One nit."}`),
+				AssistantText: "Quality in.", StartedAt: at(6)},
+			// The quality dispatch notifies again, this time with a contract
+			// verdict.
+			{Idx: 3, UserMessage: notification("toolu_q", `{"lens": "contract", "verdict": "satisfied", "summary": "All met.", "criteria": [{"id": "AC1", "status": "pass"}]}`),
+				AssistantText: "Odd.", StartedAt: at(7)},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "toolu_c", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 1", StartedAt: at(1)},
+			{TurnIdx: 0, CallID: "toolu_q", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens round 1", StartedAt: at(1)},
+		},
+	})
+	db := openRO(t, f.path)
+	attempts, err := Lenses(db, fixtureInvocation(t, db), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "contract/1/1/responded quality/1/1/parsed"; got != want {
+		t.Fatalf("attempts = %v, want %v", got, want)
+	}
+	c := attempt(t, attempts, lens.Contract, 1, 1)
+	if c.Malformed != "lens mismatch: response names quality, dispatch named contract" || c.Successful() || c.Superseded {
+		t.Errorf("contract = %+v, want responded with the mismatch as its reason, standing and not successful", c)
+	}
+	if c.ResponseID == "" || c.ResponseTurnIdx != 1 || c.Source == nil || c.Source.Line != 5 || c.Verdict != "" || c.Summary != "" {
+		t.Errorf("contract = %+v, want the response located and none of its verdict copied", c)
+	}
+	q := attempt(t, attempts, lens.Quality, 1, 1)
+	if q.Superseded || !q.Successful() || q.Verdict != "findings" || q.ResponseTurnIdx != 2 {
+		t.Errorf("quality = %+v, want the first notification standing as the successful verdict", q)
+	}
+	for _, a := range attempts {
+		if a.Source != nil && a.Source.Line == 9 {
+			t.Errorf("attempt %+v was placed by the second, mismatched notification on toolu_q", a)
+		}
+	}
+	var stored int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM lens_responses WHERE dispatch_id IN ('toolu_c', 'toolu_q') AND status = 'parsed'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 3 {
+		t.Errorf("stored responses = %d, want all three kept as evidence", stored)
+	}
+
+	run := only(t, f.load(time.Time{}, time.Time{}))
+	if run.CriteriaUnverified != nil {
+		t.Errorf("criteria_unverified = %d, want null: the mismatched quality verdict's empty criteria are not the contract's", *run.CriteriaUnverified)
+	}
+}
+
+// A dispatch a record names by dispatch id takes the record's identity: it
+// is a dispatch of the record's lens even when its key argument reads as no
+// lens dispatch, and its attempt lands in the record's round and attempt
+// number rather than the commitment line's round and the next number there.
+// The line still moves the walk's round for the rows the records leave
+// alone, and still derives what it committed to and never got.
+func TestRecordIdentityWinsForAJoinedDispatch(t *testing.T) {
+	const ticket = "loom/lens-records-0002"
+	at := func(min int) time.Time { return base.Add(time.Duration(min) * time.Minute) }
+	verdict := func(name string) string {
+		return `{"lens": "` + name + `", "verdict": "satisfied", "summary": "Fine."}`
+	}
+	f := newFixture(t)
+	f.add(&summary.SessionSummary{
+		SessionID: "lens-records",
+		Agent:     summary.AgentClaude,
+		StartTime: at(0),
+		EndTime:   at(30),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), StartedAt: at(0),
+				AssistantText: "dispatching (" + ticket + " round 1): contract, quality"},
+			{Idx: 1, UserMessage: notification("toolu_c", verdict("contract")), AssistantText: "Contract in.", StartedAt: at(5)},
+			{Idx: 2, UserMessage: notification("toolu_q", verdict("quality")), AssistantText: "Quality in.", StartedAt: at(6)},
+			{Idx: 3, UserMessage: "carry on", StartedAt: at(10),
+				AssistantText: "dispatching (" + ticket + " round 2): contract, quality"},
+			{Idx: 4, UserMessage: notification("toolu_c2", verdict("contract")), AssistantText: "Contract in.", StartedAt: at(15)},
+			{Idx: 5, UserMessage: notification("toolu_x", verdict("quality")), AssistantText: "Quality in.", StartedAt: at(16)},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "toolu_c", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 1", StartedAt: at(1)},
+			{TurnIdx: 0, CallID: "toolu_q", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Quality lens round 1", StartedAt: at(1)},
+			{TurnIdx: 3, CallID: "toolu_c2", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 2", StartedAt: at(11)},
+			// Described by neither lens nor review: only the record says
+			// what it was.
+			{TurnIdx: 3, CallID: "toolu_x", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Second opinion on the diff", StartedAt: at(11)},
+		},
+	})
+	db := openRO(t, f.path)
+	inv := fixtureInvocation(t, db)
+
+	// Without records the heuristic reads the transcript alone: toolu_x is
+	// no lens dispatch, and the line commits quality to round 2 unmet.
+	attempts, err := Lenses(db, inv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "contract/1/1/parsed quality/1/1/parsed contract/2/1/parsed quality/2/0/missing"; got != want {
+		t.Fatalf("attempts without records = %v, want %v", got, want)
+	}
+
+	// With records: the second contract dispatch is round 1's second try,
+	// whatever the line said, and toolu_x is the quality lens of round 2.
+	// The line's round-2 contract commitment is then met by nothing.
+	attempts, err = Lenses(db, inv, []LensExecution{
+		{ExecutionID: "lens-contract-r1-a1", Lens: "contract", Round: 1, Attempt: 1, DispatchID: "toolu_c", StartedAt: at(1)},
+		{ExecutionID: "lens-contract-r1-a2", Lens: "contract", Round: 1, Attempt: 2, DispatchID: "toolu_c2", StartedAt: at(11)},
+		{ExecutionID: "lens-quality-r2-a1", Lens: "quality", Round: 2, Attempt: 1, DispatchID: "toolu_x", StartedAt: at(11)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "contract/1/1/parsed contract/1/2/parsed quality/1/1/parsed contract/2/0/missing quality/2/1/parsed"; got != want {
+		t.Fatalf("attempts with records = %v, want %v", got, want)
+	}
+	if a := attempt(t, attempts, lens.Contract, 1, 1); a.ExecutionID != "lens-contract-r1-a1" || !a.Superseded {
+		t.Errorf("contract r1 a1 = %+v, want joined to its record and superseded by the second try", a)
+	}
+	if a := attempt(t, attempts, lens.Contract, 1, 2); a.ExecutionID != "lens-contract-r1-a2" || a.DispatchID != "toolu_c2" || !a.Successful() {
+		t.Errorf("contract r1 a2 = %+v, want toolu_c2 joined to its record and standing", a)
+	}
+	if a := attempt(t, attempts, lens.Quality, 2, 1); a.ExecutionID != "lens-quality-r2-a1" || a.DispatchID != "toolu_x" || !a.Dispatched || a.Routed || !a.Successful() || a.ResponseTurnIdx != 5 {
+		t.Errorf("quality r2 = %+v, want toolu_x as a quality subagent dispatch answered by its notification", a)
+	}
+	if a := attempt(t, attempts, lens.Quality, 1, 1); a.ExecutionID != "" || !a.Successful() {
+		t.Errorf("quality r1 = %+v, want unjoined and standing", a)
 	}
 }
