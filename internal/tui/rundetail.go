@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"loom/internal/runreport"
 	"loom/internal/runs"
@@ -51,8 +52,12 @@ type runDetailModel struct {
 	lenses []lensRef
 	lens   int
 
-	showResponse   bool
-	responseScroll int
+	showResponse    bool
+	responseScroll  int
+	showExecutions  bool
+	showHistory     bool
+	showDiagnostics bool
+	focusNodes      bool
 }
 
 // treeNode is one hierarchy line: the node, its depth, and whether it hangs
@@ -118,6 +123,7 @@ func (m *runDetailModel) setDetail(d *runreport.Detail, err error) {
 		return
 	}
 	first := m.detail == nil
+	lensName, lensKey := m.selectedLensIdentity()
 	m.err, m.staleErr = nil, nil
 	m.loadedAt = time.Now()
 	m.detail = d
@@ -130,11 +136,8 @@ func (m *runDetailModel) setDetail(d *runreport.Detail, err error) {
 	for _, n := range rep.Unresolved {
 		m.flatten(n, 0, true)
 	}
-	for g := range rep.Lenses {
-		for a := range rep.Lenses[g].Attempts {
-			m.lenses = append(m.lenses, lensRef{group: g, attempt: a})
-		}
-	}
+	m.rebuildLenses()
+	m.restoreLensSelection(lensName, lensKey)
 	if first {
 		m.node, m.lens = 0, 0
 		m.offset, m.responseScroll = 0, 0
@@ -193,6 +196,18 @@ func (m runDetailModel) update(msg tea.Msg) (runDetailModel, tea.Cmd) {
 		return m, nil
 	}
 	switch km.String() {
+	case "e":
+		m.showExecutions = !m.showExecutions
+		m.focusNodes = m.showExecutions
+		m.offset = 0
+	case "a":
+		m.showHistory = !m.showHistory
+		m.rebuildLenses()
+		m.focusNodes = false
+		m.offset = 0
+	case "d":
+		m.showDiagnostics = !m.showDiagnostics
+		m.offset = 0
 	case "up":
 		if m.offset > 0 {
 			m.offset--
@@ -209,21 +224,25 @@ func (m runDetailModel) update(msg tea.Msg) (runDetailModel, tea.Cmd) {
 	case "g":
 		m.offset = 0
 	case "j", "tab":
+		m.showExecutions, m.focusNodes = true, true
 		if m.node < len(m.nodes)-1 {
 			m.node++
-			m.scrollTo(m.lines(m.contentWidth()).nodeAt, m.node)
 		}
+		m.scrollTo(m.lines(m.contentWidth()).nodeAt, m.node)
 	case "k", "shift+tab":
+		m.showExecutions, m.focusNodes = true, true
 		if m.node > 0 {
 			m.node--
-			m.scrollTo(m.lines(m.contentWidth()).nodeAt, m.node)
 		}
+		m.scrollTo(m.lines(m.contentWidth()).nodeAt, m.node)
 	case "n", "]":
+		m.focusNodes = false
 		if m.lens < len(m.lenses)-1 {
 			m.lens++
 			m.scrollTo(m.lines(m.contentWidth()).lensAt, m.lens)
 		}
 	case "p", "[":
+		m.focusNodes = false
 		if m.lens > 0 {
 			m.lens--
 			m.scrollTo(m.lines(m.contentWidth()).lensAt, m.lens)
@@ -252,11 +271,7 @@ func (m *runDetailModel) scrollTo(at []int, i int) {
 }
 
 func (m runDetailModel) boxWidth() int {
-	w := m.width - 4
-	if w < 40 {
-		w = 40
-	}
-	return w
+	return max(3, min(132, m.width-4))
 }
 
 // contentWidth is what a line may take inside the border.
@@ -269,9 +284,9 @@ func (m runDetailModel) view() string {
 	title := StyleSection.Render("RUN") + "  " + white(sanitize(m.runID))
 	switch {
 	case m.loading:
-		return box.Render(title + "\n\n" + StyleDim.Render("  loading…"))
+		return box.Render(ansi.Wrap(title+"\n\n"+StyleDim.Render("  loading…"), m.contentWidth(), ""))
 	case m.err != nil:
-		return box.Render(title + "\n\n" + StyleWarning.Render("  "+truncate(sanitize(m.err.Error()), m.contentWidth()-2)))
+		return box.Render(ansi.Wrap(title+"\n\n"+StyleWarning.Render("  "+sanitize(m.err.Error())), m.contentWidth(), ""))
 	case m.detail == nil:
 		return box.Render(title)
 	}
@@ -284,6 +299,7 @@ func (m runDetailModel) view() string {
 
 // window is the rows of lines from off, with the count left below.
 func window(lines []string, off, rows int) string {
+	off = max(0, off)
 	if off > len(lines)-1 {
 		off = max(0, len(lines)-1)
 	}
@@ -327,70 +343,6 @@ func stampCell(iso string) string {
 		return StyleDim.Render(unavailable)
 	}
 	return white(t.Local().Format("2006-01-02 15:04:05"))
-}
-
-func (m runDetailModel) lines(width int) detailLines {
-	rep := m.detail.Report
-	var dl detailLines
-	add := func(s string) { dl.lines = append(dl.lines, s) }
-
-	dl.lines = append(dl.lines, m.headerLines(width)...)
-	add("")
-	dl.lines = append(dl.lines, m.timeLines(width)...)
-	add("")
-	dl.lines = append(dl.lines, m.totalsLines(width)...)
-	add("")
-
-	add(StyleSection.Render("HIERARCHY") + StyleDim.Render("  j/k select"))
-	if len(m.nodes) == 0 {
-		add(StyleDim.Render("  no executions"))
-	}
-	inUnresolved := false
-	for i, tn := range m.nodes {
-		if tn.unresolved && !inUnresolved {
-			inUnresolved = true
-			add("")
-			add(StyleSection.Render("UNRESOLVED") + StyleDim.Render("  attributed to no run; listed, not counted"))
-		}
-		dl.nodeAt = append(dl.nodeAt, len(dl.lines))
-		add(m.nodeLine(tn, i == m.node, width))
-	}
-	if len(rep.Diagnostics) > 0 {
-		add("")
-		add(StyleSection.Render("DIAGNOSTICS"))
-		for _, d := range rep.Diagnostics {
-			add("  " + StyleWarning.Render(sanitize(d.Code)) + "  " + StyleDim.Render(truncate(sanitize(d.ExecutionID), 40)) + "  " + white(truncate(sanitize(d.Detail), max(10, width-52))))
-		}
-	}
-	add("")
-
-	add(StyleSection.Render("STAGES"))
-	if len(rep.Stages) == 0 {
-		add(StyleDim.Render("  no stage executions"))
-	}
-	for _, st := range rep.Stages {
-		add("  " + white(fmt.Sprintf("%s/%d", sanitize(st.Stage), st.Occurrence)) + StyleDim.Render(fmt.Sprintf("  %s · %s", plural(len(st.Attempts), "attempt"), plural(st.Retries, "retry"))))
-		for _, a := range st.Attempts {
-			add("    " + StyleDim.Render(fmt.Sprintf("#%d", a.Attempt)) + "  " +
-				white(truncate(sanitize(a.ExecutionID), 32)) + "  " + m.outcomeCell(a.ExecutionID, a.Outcome, lipgloss.NewStyle()) + "  " +
-				msCell(a.DurationMs) + "  " + tokensCell(a.Metrics) + StyleDim.Render(" tok"))
-		}
-	}
-	add("")
-
-	add(StyleSection.Render("LENSES") + StyleDim.Render("  n/p select · enter response"))
-	if len(rep.Lenses) == 0 {
-		add(StyleDim.Render("  no lens attempts"))
-	}
-	for g, lg := range rep.Lenses {
-		add("  " + white(fmt.Sprintf("%s round %d", sanitize(lg.Lens), lg.Round)) + StyleDim.Render(fmt.Sprintf("  %s · %s", plural(len(lg.Attempts), "attempt"), plural(lg.Retries, "retry"))))
-		for a := range lg.Attempts {
-			dl.lensAt = append(dl.lensAt, len(dl.lines))
-			selected := m.lens < len(m.lenses) && m.lenses[m.lens] == lensRef{group: g, attempt: a}
-			add(m.lensLine(lg, lg.Attempts[a], selected, width))
-		}
-	}
-	return dl
 }
 
 func plural(n int, noun string) string {
@@ -769,7 +721,8 @@ func (m runDetailModel) responseView() string {
 	width := m.contentWidth()
 	var lines []string
 	for _, l := range strings.Split(raw, "\n") {
-		lines = append(lines, truncate(sanitize(l), width))
+		lines = append(lines, strings.Split(ansi.Hardwrap(sanitize(l), width, true), "\n")...)
 	}
-	return title + "\n\n" + window(lines, m.responseScroll, max(1, m.bodyRows()-2))
+	title = ansi.Wrap(title, width, "")
+	return title + "\n\n" + window(lines, m.responseScroll, max(1, m.bodyRows()-lipgloss.Height(title)-1))
 }

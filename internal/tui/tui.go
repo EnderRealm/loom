@@ -527,14 +527,18 @@ func (a App) View() string {
 	var b strings.Builder
 
 	// Header.
-	b.WriteString(" ")
-	b.WriteString(StyleBold.Foreground(colorWhite).Render("loom"))
-	b.WriteString("  ")
-	b.WriteString(StyleDim.Render("—"))
-	b.WriteString("  ")
-	b.WriteString(StyleDim.Render(config.Home()))
-	b.WriteString("  ")
-	b.WriteString(StyleDim.Render(fmt.Sprintf("projects: %d", len(a.dashboard.projects))))
+	if a.overlay == overlayRunDetail {
+		b.WriteString(StyleDim.Render(truncate(" loom  / runs / summary", a.width)))
+	} else {
+		b.WriteString(" ")
+		b.WriteString(StyleBold.Foreground(colorWhite).Render("loom"))
+		b.WriteString("  ")
+		b.WriteString(StyleDim.Render("—"))
+		b.WriteString("  ")
+		b.WriteString(StyleDim.Render(config.Home()))
+		b.WriteString("  ")
+		b.WriteString(StyleDim.Render(fmt.Sprintf("projects: %d", len(a.dashboard.projects))))
+	}
 	b.WriteString("\n")
 	b.WriteString(sep)
 	b.WriteString("\n")
@@ -564,6 +568,9 @@ func (a App) View() string {
 		body = a.runDetail.view()
 	}
 	b.WriteString(body)
+	if a.overlay == overlayRunDetail {
+		b.WriteString("\n")
+	}
 
 	// Footer: status or help.
 	b.WriteString(sep)
@@ -574,7 +581,11 @@ func (a App) View() string {
 		// long one cannot wrap the fullscreen layout.
 		b.WriteString(pad.Render(StyleWarning.Render(truncate(a.status, a.width-2))))
 	} else {
-		b.WriteString(pad.Render(StyleHelp.Render(a.helpLine())))
+		if a.overlay == overlayRunDetail {
+			b.WriteString(pad.Render(StyleHelp.Render(truncate(a.helpLine(), max(1, a.width-2)))))
+		} else {
+			b.WriteString(pad.Render(StyleHelp.Render(a.helpLine())))
+		}
 	}
 	return b.String()
 }
@@ -599,7 +610,13 @@ func (a App) helpLine() string {
 		if a.runDetail.showResponse {
 			return "↑↓ scroll  │  esc/q back"
 		}
-		return "↑↓ scroll  │  j/k node  │  n/p lens  │  enter response  │  r refresh  │  esc/q runs"
+		if a.width < 60 {
+			return "↑↓ scroll · enter open · esc back"
+		}
+		if a.width < 106 {
+			return "↑↓ scroll · n/p review · enter open · r refresh · esc back"
+		}
+		return "↑↓ scroll · n/p review · enter response · e executions · a history · d telemetry · r refresh · esc/q runs"
 	}
 	return "↑↓ select  │  enter open  │  s sort  │  w runs  │  a activity  │  c knowledge  │  r refresh  │  q quit"
 }

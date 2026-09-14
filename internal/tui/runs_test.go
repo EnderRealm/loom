@@ -406,11 +406,12 @@ func TestRunOptionOpensTheExactRun(t *testing.T) {
 		t.Fatal(app.runDetail.err)
 	}
 
+	app = press(app, "e", "a", "d")
 	v := app.View()
 	for _, want := range []string{
-		fixtureTicket, "Outcome", "completed", "Telemetry", "partial", "Last seen", "HIERARCHY",
+		fixtureTicket, "Outcome", "completed", "Telemetry", "partial", "Last seen", "Execution detail",
 		"stage work/1 #1", "stage work/1 #2", "lens security r1 #1", "subagent", "pending",
-		"STAGES", "work/1", "2 attempts · 1 retry", "review/1", "LENSES", "security round 1",
+		"Execution detail", "work/1", "2 attempts · 1 retry", "review/1", "Review history", "security round 1",
 		"parsed", "satisfied", "Failures", "tool", "api", "process", "other", "response",
 	} {
 		if !strings.Contains(v, want) {
@@ -536,6 +537,7 @@ func TestRunDetailTotalsRenderUnmeteredAsUnavailable(t *testing.T) {
 		Tree: &runs.Node{ExecutionID: "root", Kind: "stage", Stage: "work"},
 	}
 	m := newRunDetailModel("r", 0, 120, 60)
+	m.showDiagnostics, m.showExecutions = true, true
 	m.setDetail(&runreport.Detail{Report: rep, LensResponses: map[string]string{}}, nil)
 	lines := m.lines(m.contentWidth()).lines
 	rows := map[string]string{}
@@ -623,7 +625,8 @@ func TestRunScreensStripTerminalControls(t *testing.T) {
 	}
 	rep.Metrics.Total.PricingWarnings = []string{"warn" + csi}
 	body := map[string]string{runreport.LensKey(rep.Lenses[0].Lens, 1, 1): "one" + osc + "\ntwo" + csi + "\nthree"}
-	m := newRunDetailModel(rep.Run.RunID, 0, 120, 80)
+	m := newRunDetailModel(rep.Run.RunID, 0, 120, 100)
+	m.showDiagnostics, m.showExecutions, m.showHistory = true, true, true
 	m.setDetail(&runreport.Detail{Report: rep, LensResponses: body}, nil)
 	v := m.view()
 	for _, want := range []string{"loom/t", "claude", "weft", "loom", "gap", "root", "subagent", "code", "detail", "exec", "work", "security", "parsed", "satisfied", "fresh", "bad", "warn"} {
@@ -646,7 +649,7 @@ func TestRunScreensStripTerminalControls(t *testing.T) {
 	// freshness line; a failure with nothing loaded is the body.
 	m, _ = m.update(key("esc"))
 	m.setDetail(nil, errors.New("run not found: "+csi))
-	if v := m.view(); hasControl(v) || !strings.Contains(v, "run not found") || !strings.Contains(v, "HIERARCHY") {
+	if v := m.view(); hasControl(v) || !strings.Contains(v, "run not found") || !strings.Contains(v, "Execution detail") {
 		t.Errorf("stale view:\n%q", v)
 	}
 	fresh := newRunDetailModel("r", 0, 120, 80)
@@ -799,7 +802,7 @@ func TestRunDetailRefreshCoalescesIntoTheLoadInFlight(t *testing.T) {
 		t.Error("the tick after the load did not mark a refresh out")
 	}
 	// The last good body stays up while the refresh is out.
-	if v := app.View(); !strings.Contains(v, "refreshing…") || !strings.Contains(v, "stage-1") {
+	if v := app.View(); !strings.Contains(v, "refreshing…") || !strings.Contains(v, "Execution detail") {
 		t.Errorf("view during the refresh:\n%s", v)
 	}
 	// `r` during the refresh is coalesced too.
@@ -864,7 +867,7 @@ func TestRunDetailFailedRefreshKeepsTheBody(t *testing.T) {
 
 	app = updateWithin(t, app, loaded(nil, errors.New("summaries.db is busy"))).m.(App)
 	v := app.View()
-	for _, want := range []string{"stale", "last successful load " + stamp, "summaries.db is busy", "stage-1", "lens-1", "HIERARCHY"} {
+	for _, want := range []string{"stale", "last successful load " + stamp, "summaries.db is busy", "stage-1", "lens-1", "Execution detail"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("stale view lacks %q:\n%s", want, v)
 		}
@@ -904,31 +907,31 @@ func TestRunDetailFreshnessLine(t *testing.T) {
 	d := threeNodeDetail()
 	d.SweptAt = time.Now().Add(-2 * time.Minute)
 	m.setDetail(d, nil)
-	v := stripANSI(m.view())
+	v := stripANSI(strings.Join(m.headerLines(m.contentWidth()), "\n"))
 	if !strings.Contains(v, "stale") || !strings.Contains(v, "no local shipper state") {
 		t.Errorf("stale sweep, no shipper state:\n%s", v)
 	}
 	d.SweptAt = time.Now()
 	m.pipeline.shippedAt, m.pipeline.shippedKnown = time.Now().Add(-30*time.Second), true
 	m.setDetail(d, nil)
-	v = stripANSI(m.view())
+	v = stripANSI(strings.Join(m.headerLines(m.contentWidth()), "\n"))
 	if strings.Contains(v, "stale") || strings.Contains(v, "no local shipper state") || !strings.Contains(v, "shipped "+m.pipeline.shippedAt.Local().Format("15:04:05")+" (30s ago)") {
 		t.Errorf("fresh sweep, fresh shipper sync:\n%s", v)
 	}
 	m.pipeline.shippedAt = time.Now().Add(-time.Hour)
 	m.setDetail(d, nil)
-	v = stripANSI(m.view())
+	v = stripANSI(strings.Join(m.headerLines(m.contentWidth()), "\n"))
 	if !strings.Contains(v, "shipped "+m.pipeline.shippedAt.Local().Format("15:04:05")+" (1h ago) stale") {
 		t.Errorf("fresh sweep, stale shipper sync:\n%s", v)
 	}
 	d.SweptAt = time.Time{}
 	m.setDetail(d, nil)
-	if v := stripANSI(m.view()); !strings.Contains(v, "no sweep recorded") {
+	if v := stripANSI(strings.Join(m.headerLines(m.contentWidth()), "\n")); !strings.Contains(v, "no sweep recorded") {
 		t.Errorf("no sweep marker:\n%s", v)
 	}
 	d.SweepErr = errors.New("parse last sweep: bad marker")
 	m.setDetail(d, nil)
-	if v := stripANSI(m.view()); !strings.Contains(v, "swept —  parse last sweep: bad marker") || !strings.Contains(v, "HIERARCHY") {
+	if v := stripANSI(strings.Join(m.headerLines(m.contentWidth()), "\n")); !strings.Contains(v, "swept —  parse last sweep: bad marker") {
 		t.Errorf("unreadable sweep marker:\n%s", v)
 	}
 }
@@ -959,6 +962,7 @@ func TestRunDetailStaleThresholdsFollowConfiguredCadences(t *testing.T) {
 // transcript metered reads pending with tokens unavailable, never a number.
 func TestRunDetailTokensComeOnlyFromRecordedUsage(t *testing.T) {
 	m := newRunDetailModel("r", 0, 160, 60)
+	m.showDiagnostics, m.showExecutions = true, true
 	tokensRow := func() string {
 		for _, l := range m.lines(m.contentWidth()).lines {
 			if plain := stripANSI(l); strings.HasPrefix(plain, "Tokens") {
