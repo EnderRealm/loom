@@ -8,6 +8,13 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `loom summarize --strict` exits non-zero when any session in the one-shot
+  sweep errored, so a ticket criterion can be `verify: loom summarize
+  --force --strict` and `ticket_verify` reads the result from the exit code
+  it execs without a shell. Refused together with `--watch`. Without the
+  flag the exit code is unchanged. The README's "Verifying a sweep from a
+  ticket" section records why the flag rather than a wrapper script and
+  what listing `loom` in `verify_allow` grants.
 - Harness friction is counted. `summaries.db` schema v10 adds a `friction`
   table: one row per event the summarizer reads out of a session's
   transcript and its dispatched subagent transcripts, carrying the session

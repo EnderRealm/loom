@@ -10,6 +10,10 @@ import (
 var summarizeCmd = &cobra.Command{
 	Use:   "summarize",
 	Short: "Fold received sessions into the summary database",
+	// The strict exit is read by ticket verify lines; the error is printed
+	// once by Execute rather than twice with usage appended.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := summarize.Options{}
 		opts.ReceivedDir, _ = cmd.Flags().GetString("received")
@@ -19,6 +23,7 @@ var summarizeCmd = &cobra.Command{
 		opts.Watch, _ = cmd.Flags().GetBool("watch")
 		opts.Rebuild, _ = cmd.Flags().GetBool("rebuild")
 		opts.Interval, _ = cmd.Flags().GetDuration("interval")
+		opts.Strict, _ = cmd.Flags().GetBool("strict")
 		return summarize.Run(opts)
 	},
 }
@@ -32,6 +37,7 @@ func init() {
 	f.Bool("watch", false, "stay running and re-sweep on a ticker")
 	f.Bool("rebuild", false, "drop the summary DB and rebuild from received/")
 	f.Duration("interval", shipper.DefaultSummarizerInterval, "watch-mode sweep interval")
+	f.Bool("strict", false, "exit non-zero when any session errored; for ticket verify lines")
 
 	rootCmd.AddCommand(summarizeCmd)
 }

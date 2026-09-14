@@ -21,7 +21,7 @@ Daemons (run by launchd; manual invocation supported for debugging):
 
 Interactive:
   ui                           Open the dashboard (alias: tui)
-  summarize [--watch|--rebuild]  Fold received sessions into summaries.db
+  summarize [--watch|--rebuild|--strict]  Fold received sessions into summaries.db
 
 Knowledge:
   relevant --for-ticket <id>   Rank stored truths/decisions relevant to a ticket

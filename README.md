@@ -416,6 +416,7 @@ rm -f ~/.local/bin/loom
 | `loom receiver`               | Run the ingest server (`:8765` by default).                                 |
 | `loom summarize [--watch]`    | Fold received sessions into `~/.loom/summaries.db`.                         |
 | `loom summarize --rebuild`    | Drop and re-fold the summary DB; the upgrade path for schema bumps.         |
+| `loom summarize --strict`     | One-shot sweep that exits non-zero when any session errored; the form a ticket `verify:` line uses. |
 | `loom extract [--watch]`      | Run `extract.py` over summarized sessions that haven't been extracted yet.  |
 | `loom retrospect <ticket-id>` | Re-extract every session whose commits closed a ticket, truths + decisions. |
 | `loom work-report`            | `/work`-run compliance metrics from the summary DB, as JSON.                |
@@ -488,6 +489,20 @@ loom summarize --rebuild       # drops summaries.db and re-folds from received/
 ```
 
 Use this whenever the summarizer reports `summary db schema is outdated`. The DB is treated as a derived artifact — there's no migration path because there doesn't need to be one.
+
+### Verifying a sweep from a ticket
+
+A parser fix is honestly checked by a full sweep reporting zero errors, so a loom ticket's criterion is written:
+
+```yaml
+verify: loom summarize --force --strict
+```
+
+`ticket_verify` execs that line as a single argv with no shell, so a `| grep -c errored=0` over the log is literal text and never runs; the exit code is the only channel it reads, and the binary has to own it. Without `--strict` a sweep exits 0 whatever its `errored` count, and a bare `loom summarize` criterion would record `pass` on any corpus. `--strict` makes the one-shot sweep exit non-zero when any session errored; it is refused together with `--watch`, which has no exit to report.
+
+The flag was chosen over a `./scripts/verify-sweep.sh` wrapper: the wrapper would need a shell to grep the count out of the log, plus one more entry in the host's `verify_allow`, and with `bash` already listed on this host the narrowing buys nothing. Listing `loom` itself in the machine-local `verify_allow` in `~/.ticket/config.yaml` grants more than a sweep — `loom extract` spawns an agent, and the sweep writes `~/.loom/summaries.db` — but the DB is a disposable derived artifact rebuilt from `received/`, the list is already shell-wide through `bash`, and this is an attended single-user host, so neither adds reach a verify line does not already have. A machine wanting the narrower list drops `bash` and keeps `loom`, accepting `loom extract` as reachable, or replaces `loom` with a `./scripts/…` entry.
+
+A full forced sweep is ~36s on this host today (3204 sessions), inside tk's default 120s `verify_timeout`; raise loom's per-project `verify_timeout` in `~/.ticket/config.yaml` when the corpus outgrows it.
 
 ---
 

@@ -32,9 +32,19 @@ type Options struct {
 	Watch       bool
 	Rebuild     bool
 	Interval    time.Duration
+	Strict      bool
 }
 
 func Run(opts Options) error {
+	ctx, cancel := signalContext()
+	defer cancel()
+	return run(ctx, opts)
+}
+
+func run(ctx context.Context, opts Options) error {
+	if opts.Strict && opts.Watch {
+		return errors.New("--strict has no exit to report under --watch")
+	}
 	if opts.Rebuild {
 		if err := os.Remove(opts.DBPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove %s: %w", opts.DBPath, err)
@@ -59,12 +69,18 @@ func Run(opts Options) error {
 	}
 	defer st.Close()
 
-	ctx, cancel := signalContext()
-	defer cancel()
-
-	report(sweep(ctx, st, opts.ReceivedDir, opts.Force, opts.Verbose), opts.DBPath)
+	r := sweep(ctx, st, opts.ReceivedDir, opts.Force, opts.Verbose)
+	report(r, opts.DBPath)
 	markSweep(ctx, st)
 
+	// An interrupted sweep stopped walking, so its counts describe only the
+	// part of the tree it reached: a clean tally is not a clean tree.
+	if opts.Strict && ctx.Err() != nil {
+		return fmt.Errorf("strict: sweep interrupted after seen=%d errored=%d", r.seen, r.errored)
+	}
+	if opts.Strict && r.errored > 0 {
+		return fmt.Errorf("strict: errored=%d of seen=%d", r.errored, r.seen)
+	}
 	if !opts.Watch {
 		return nil
 	}
