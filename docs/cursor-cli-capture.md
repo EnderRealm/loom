@@ -86,10 +86,10 @@ journals under `cursor-cli/` with the paths in the manifest.
 
 The inspected source exposes no child cwd sidecar and no per-blob timestamp
 or CLI-version column. The installed CLI version was measured separately.
-Message, model and tool payloads inside blobs are retained opaque; this adapter
-does not claim those fields are absent. Parsing Cursor into the summary DB
-and TUI is outside this capture ticket; the summarizer currently walks only
-Claude, Codex and execution records.
+The transport retains message, model and tool payloads inside blobs whole.
+The summarizer decodes the conversation graph separately; see
+[Cursor session summaries](cursor-session-records.md) for mappings,
+measurement coverage and reporting semantics.
 
 `go test ./transport/...` covers capture through the receiver with live WAL
 writes, a fresh shipper process per pass, child project inheritance, large

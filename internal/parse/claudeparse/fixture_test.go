@@ -117,9 +117,11 @@ func TestPayloadDriftIsCountedAndParsingContinues(t *testing.T) {
 		t.Fatalf("Unknown len: got %d, want 2", len(s.Unknown))
 	}
 	u := s.Unknown[0]
-	wantSub := drift.UnmodeledPayloadMarker + ":header.isSidechain"
-	if u.Type != "assistant" || u.Subtype != wantSub {
-		t.Errorf("Unknown entry: got %s::%s, want assistant::%s", u.Type, u.Subtype, wantSub)
+	// JSON v1 includes the embedded Go type; JSON v2 reports the JSON path.
+	wantSub := drift.UnmodeledPayloadMarker + ":isSidechain"
+	legacySub := drift.UnmodeledPayloadMarker + ":header.isSidechain"
+	if u.Type != "assistant" || (u.Subtype != wantSub && u.Subtype != legacySub) {
+		t.Errorf("Unknown entry: got %s::%s, want assistant::%s or assistant::%s", u.Type, u.Subtype, wantSub, legacySub)
 	}
 	if u.Count != 2 {
 		t.Errorf("Unknown Count: got %d, want 2", u.Count)

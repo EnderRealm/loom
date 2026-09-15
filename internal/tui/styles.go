@@ -32,6 +32,7 @@ var (
 var agentColors = map[string]lipgloss.Color{
 	"claude-code": colorCyan,
 	"codex-cli":   colorMagenta,
+	"cursor-cli":  colorGreen,
 }
 
 func agentColor(agent string) lipgloss.Color {

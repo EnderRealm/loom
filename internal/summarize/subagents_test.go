@@ -392,11 +392,12 @@ func TestSubagentPayloadDriftSurfacesOnTheParent(t *testing.T) {
 			rows[0].durationMs.Int64)
 	}
 
+	// JSON v1 includes the embedded Go type; JSON v2 reports the JSON path.
 	var count int
 	if err := st.DB().QueryRow(`
 		SELECT COUNT(*) FROM unknown_records
-		WHERE session_id = 'sess-drift' AND type = 'assistant' AND subtype = ?`,
-		drift.UnmodeledPayloadMarker+":header.isSidechain").Scan(&count); err != nil {
+		WHERE session_id = 'sess-drift' AND type = 'assistant' AND subtype IN (?, ?)`,
+		drift.UnmodeledPayloadMarker+":isSidechain", drift.UnmodeledPayloadMarker+":header.isSidechain").Scan(&count); err != nil {
 		t.Fatalf("query unknown_records: %v", err)
 	}
 	if count != 1 {

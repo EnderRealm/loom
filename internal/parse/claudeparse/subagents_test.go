@@ -157,9 +157,11 @@ func TestSubagentPayloadDriftFoldsIntoTheParent(t *testing.T) {
 		t.Fatalf("Unknown len: got %d, want 1 (%+v)", len(s.Unknown), s.Unknown)
 	}
 	u := s.Unknown[0]
-	wantSub := drift.UnmodeledPayloadMarker + ":header.isSidechain"
-	if u.Type != "assistant" || u.Subtype != wantSub || u.Count != 1 {
-		t.Errorf("Unknown entry: got %s::%s x%d, want assistant::%s x1", u.Type, u.Subtype, u.Count, wantSub)
+	// JSON v1 includes the embedded Go type; JSON v2 reports the JSON path.
+	wantSub := drift.UnmodeledPayloadMarker + ":isSidechain"
+	legacySub := drift.UnmodeledPayloadMarker + ":header.isSidechain"
+	if u.Type != "assistant" || (u.Subtype != wantSub && u.Subtype != legacySub) || u.Count != 1 {
+		t.Errorf("Unknown entry: got %s::%s x%d, want assistant::%s or assistant::%s x1", u.Type, u.Subtype, u.Count, wantSub, legacySub)
 	}
 	wantSeen := time.Date(2026, 9, 1, 10, 4, 0, 0, time.UTC)
 	if !u.FirstSeen.Equal(wantSeen) {

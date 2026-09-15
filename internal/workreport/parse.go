@@ -31,7 +31,7 @@ func runtimeOf(agent string) Runtime {
 		return RuntimeClaude
 	case agent == string(summary.AgentCodex):
 		return RuntimeCodex
-	case strings.Contains(agent, "cursor"):
+	case agent == string(summary.AgentCursor):
 		return RuntimeCursor
 	default:
 		return RuntimeUnknown

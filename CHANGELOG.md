@@ -8,6 +8,11 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Cursor journals fold into session summaries, work runs and the TUI,
+  including child dispatch identities and complete lens responses. Schema
+  v11 records usage coverage and parent tool-call IDs; rebuild summaries
+  after upgrading. Unavailable Cursor billing counters and costs remain
+  NULL, with explicit telemetry gaps and unknown cache semantics.
 - `loom summarize --strict` exits non-zero when any session in the one-shot
   sweep errored, so a ticket criterion can be `verify: loom summarize
   --force --strict` and `ticket_verify` reads the result from the exit code

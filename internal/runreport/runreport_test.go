@@ -654,8 +654,8 @@ func TestOutcomeStandsApartFromTelemetryAndLateRecords(t *testing.T) {
 	if done.Time.WallMs == nil || *done.Time.WallMs != 30*60*1000 || done.Time.WallBasis != WallEnded {
 		t.Errorf("reconciled wall = %v %q", done.Time.WallMs, done.Time.WallBasis)
 	}
-	if done.Telemetry.State != StateComplete || len(done.Telemetry.Gaps) != 0 {
-		t.Errorf("reconciled telemetry = %+v, want complete", done.Telemetry)
+	if done.Telemetry.State != StatePartial || !reflect.DeepEqual(done.Telemetry.Gaps, []string{"execution stage-late-work-1-1 has no transcript", "execution stage-late-work-1-2 has no transcript"}) {
+		t.Errorf("reconciled telemetry = %+v, want missing stage transcripts named", done.Telemetry)
 	}
 	before, after := running.Metrics.Parent, done.Metrics.Parent
 	if before.Turns != after.Turns || before.ToolCalls != after.ToolCalls || before.LegacyActiveMs != after.LegacyActiveMs ||
@@ -669,7 +669,7 @@ func TestOutcomeStandsApartFromTelemetryAndLateRecords(t *testing.T) {
 	if done.Metrics.Total.Turns != 1 || done.Metrics.Total.TotalTokens != 870 || done.Metrics.Total.Executions != 3 {
 		t.Errorf("reconciled usage = %+v", done.Metrics.Total)
 	}
-	// The late stage attempts carry no transcript: listed, not gaps.
+	// Completed stage attempts without transcripts remain measurement gaps.
 	if !reflect.DeepEqual(done.Telemetry.ExecutionsWithoutTranscript, []string{"stage-late-work-1-1", "stage-late-work-1-2"}) {
 		t.Errorf("without transcript = %v", done.Telemetry.ExecutionsWithoutTranscript)
 	}
@@ -719,6 +719,9 @@ func TestHistoricalRunMetersSubagentRows(t *testing.T) {
 		t.Errorf("coder cost = %v, want 0.01775", coder.Metrics.CostUSD)
 	}
 	reviewer := execution(t, rep, "transcript:claude-code:hist:0:subagent:1")
+	if !reviewer.Metrics.TokenUsageUnavailable || !rep.Metrics.Total.TokenUsageUnavailable {
+		t.Error("missing historical subagent usage reported as measured tokens")
+	}
 	if reviewer.DurationMs != nil || len(reviewer.Metrics.TokensByRuntime) != 0 || reviewer.Metrics.CostUSD != nil {
 		t.Errorf("reviewer dispatch with no transcript = %+v, want nothing metered and no price", reviewer.Metrics)
 	}
@@ -795,6 +798,26 @@ func TestMissingRateLeavesMetricsReadable(t *testing.T) {
 // AC6: a child whose named session has not arrived leaves its own cost and
 // every scope it counts toward null with the cause, while the parent stays
 // priced; the session arriving prices it.
+func TestCompletedChildWithoutTranscriptIsTelemetryGap(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-no-child-transcript","ticket":"loom/m-0001","runtime":"claude-code","agent":"claude-code","session_id":"measured-root","started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-measured","run_id":"run-no-child-transcript","execution_kind":"root","agent":"claude-code","session_id":"measured-root","started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"child-no-transcript","run_id":"run-no-child-transcript","parent_execution_id":"root-measured","execution_kind":"subagent","started_at":"2026-09-10T12:01:00Z","ended_at":"2026-09-10T12:05:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	root := oneTurn(summary.AgentClaude, "measured-root", claudeModel, begin, begin.Add(time.Minute), 100, 0, 10, summary.KindRead, 200)
+	root.Turns[0].UserMessage = workInvocation("loom/m-0001")
+	writeSession(t, st, root)
+	rep := build(t, st, "run-no-child-transcript")
+	if rep.Telemetry.State != StatePartial || !reflect.DeepEqual(rep.Telemetry.Gaps, []string{"execution child-no-transcript has no transcript"}) {
+		t.Errorf("completed child telemetry = %+v", rep.Telemetry)
+	}
+	if rep.Metrics.Parent.TokenUsageUnavailable || !rep.Metrics.Total.TokenUsageUnavailable || !rep.Metrics.Total.ToolTimeUnavailable || rep.Metrics.Total.CostUSD != nil {
+		t.Errorf("missing child measurement availability = %+v", rep.Metrics)
+	}
+}
+
 func TestMissingSessionLeavesCostUnknown(t *testing.T) {
 	st, _ := openStore(t)
 	importLines(t, st,
@@ -814,12 +837,19 @@ func TestMissingSessionLeavesCostUnknown(t *testing.T) {
 		t.Errorf("child with missing session: cost %v pricing %+v warnings %v", child.CostUSD, child.Pricing, child.PricingWarnings)
 	}
 	for name, m := range map[string]Metrics{"descendants": rep.Metrics.Descendants, "total": rep.Metrics.Total} {
+		wire, _ := json.Marshal(m)
+		if !m.TokenUsageUnavailable || !strings.Contains(string(wire), `"total_tokens":null`) {
+			t.Errorf("%s missing transcript tokens encoded as measured: %s", name, wire)
+		}
 		if m.CostUSD != nil || m.Pricing.Available || !strings.Contains(strings.Join(m.PricingWarnings, "\n"), warn) {
 			t.Errorf("%s: cost %v pricing %+v warnings %v, want null with the cause", name, m.CostUSD, m.Pricing, m.PricingWarnings)
 		}
 	}
 	// 100·5 + 10·25 per million.
 	parent := rep.Metrics.Parent
+	if parent.TokenUsageUnavailable || tokens(t, rep.Metrics.Total, "claude-code").Total != parent.TotalTokens {
+		t.Error("missing child erased measured parent usage")
+	}
 	if parent.CostUSD == nil || *parent.CostUSD != 0.00075 || !parent.Pricing.Available || len(parent.PricingWarnings) != 0 {
 		t.Errorf("parent beside the missing session: cost %v pricing %+v warnings %v", deref(parent.CostUSD), parent.Pricing, parent.PricingWarnings)
 	}
@@ -834,6 +864,9 @@ func TestMissingSessionLeavesCostUnknown(t *testing.T) {
 		t.Errorf("child after its session arrived: cost %v pricing %+v warnings %v", deref(child.CostUSD), child.Pricing, child.PricingWarnings)
 	}
 	total := rep.Metrics.Total
+	if total.TokenUsageUnavailable || child.TokenUsageUnavailable {
+		t.Error("arriving transcript did not resolve token availability")
+	}
 	if total.CostUSD == nil || *total.CostUSD != 0.00225 || !total.Pricing.Available || len(total.PricingWarnings) != 0 {
 		t.Errorf("total after the session arrived: cost %v pricing %+v warnings %v", deref(total.CostUSD), total.Pricing, total.PricingWarnings)
 	}
@@ -869,6 +902,9 @@ func TestRecordWithoutSessionIsAGapUntilJoined(t *testing.T) {
 	}
 	if rep.Metrics.Parent.Turns != 0 || rep.Metrics.Descendants.Turns != 1 {
 		t.Errorf("unjoined scopes = parent %d turns descendants %d turns, want 0 and the lens's 1", rep.Metrics.Parent.Turns, rep.Metrics.Descendants.Turns)
+	}
+	if !rep.Metrics.Parent.TokenUsageUnavailable || !rep.Metrics.Total.TokenUsageUnavailable || rep.Metrics.Descendants.TokenUsageUnavailable {
+		t.Error("unnamed parent transcript availability was lost or erased measured descendants")
 	}
 
 	// The parent session, opened by the typed Codex invocation.

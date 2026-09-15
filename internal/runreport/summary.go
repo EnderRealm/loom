@@ -34,16 +34,18 @@ type Summary struct {
 	// ExecutionTimeMs is unmeasured, not zero, when nothing was timed.
 	// Metered is whether any transcript was metered for the scope: without
 	// one, ToolTimeMs, TotalTokens and ToolCalls are unknown, not zero.
-	ExecutionTimeMs   int64
-	TimedExecutions   int
-	UntimedExecutions int
-	ToolTimeMs        int64
-	Metered           bool
-	TotalTokens       int64
-	ToolCalls         int
-	Failures          int
-	Children          int
-	CostUSD           *float64
+	ExecutionTimeMs     int64
+	TimedExecutions     int
+	UntimedExecutions   int
+	ToolTimeMs          int64
+	ToolTimeUnavailable bool
+	Metered             bool
+	TotalTokens         int64
+	TokensUnavailable   bool
+	ToolCalls           int
+	Failures            int
+	Children            int
+	CostUSD             *float64
 	// LegacyActiveMs is the parent span's, cost-report's active_ms.
 	LegacyActiveMs int64
 }
@@ -52,26 +54,28 @@ type Summary struct {
 func SummaryOf(rep *Report) Summary {
 	total := rep.Metrics.Total
 	return Summary{
-		RunID:             rep.Run.RunID,
-		Ticket:            rep.Run.Ticket,
-		Runtime:           rep.Run.Runtime,
-		StartedAt:         parseTime(rep.Run.StartedAt),
-		Outcome:           rep.Run.Outcome,
-		TelemetryState:    rep.Telemetry.State,
-		Pending:           len(rep.Telemetry.ExecutionsPending),
-		LastObservedAt:    parseTime(rep.Run.LastObservedAt),
-		WallMs:            rep.Time.WallMs,
-		ExecutionTimeMs:   rep.Time.ExecutionTimeMs,
-		TimedExecutions:   total.ExecutionTimeCoverage.Timed,
-		UntimedExecutions: total.ExecutionTimeCoverage.Untimed,
-		ToolTimeMs:        rep.Time.ToolTimeMs,
-		Metered:           len(total.TokensByRuntime) > 0,
-		TotalTokens:       total.TotalTokens,
-		ToolCalls:         total.ToolCalls,
-		Failures:          total.Failures.Tool + total.Failures.API + total.Failures.Process + total.Failures.Other,
-		Children:          rep.Metrics.Descendants.Executions,
-		CostUSD:           total.CostUSD,
-		LegacyActiveMs:    rep.Time.LegacyActiveMs,
+		RunID:               rep.Run.RunID,
+		Ticket:              rep.Run.Ticket,
+		Runtime:             rep.Run.Runtime,
+		StartedAt:           parseTime(rep.Run.StartedAt),
+		Outcome:             rep.Run.Outcome,
+		TelemetryState:      rep.Telemetry.State,
+		Pending:             len(rep.Telemetry.ExecutionsPending),
+		LastObservedAt:      parseTime(rep.Run.LastObservedAt),
+		WallMs:              rep.Time.WallMs,
+		ExecutionTimeMs:     rep.Time.ExecutionTimeMs,
+		TimedExecutions:     total.ExecutionTimeCoverage.Timed,
+		UntimedExecutions:   total.ExecutionTimeCoverage.Untimed,
+		ToolTimeMs:          rep.Time.ToolTimeMs,
+		ToolTimeUnavailable: total.ToolTimeUnavailable || total.ToolTimeCoverage.Untimed > 0,
+		Metered:             len(total.TokensByRuntime) > 0,
+		TotalTokens:         total.TotalTokens,
+		TokensUnavailable:   total.TokenUsageUnavailable,
+		ToolCalls:           total.ToolCalls,
+		Failures:            total.Failures.Tool + total.Failures.API + total.Failures.Process + total.Failures.Other,
+		Children:            rep.Metrics.Descendants.Executions,
+		CostUSD:             total.CostUSD,
+		LegacyActiveMs:      rep.Time.LegacyActiveMs,
 	}
 }
 

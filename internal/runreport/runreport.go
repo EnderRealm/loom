@@ -15,6 +15,7 @@ package runreport
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -29,9 +30,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// schemaVersion is the summaries.db schema this report reads: the execution
-// tables arrived in 8 and the lens attempts it joins against in 9.
-const schemaVersion = 9
+// schemaVersion is the summaries.db schema this report reads. Version 11
+// distinguishes missing token usage from a measured zero.
+const schemaVersion = 11
 
 // Outcome values the report adds to the record's completed|failed|stopped.
 const (
@@ -54,6 +55,7 @@ const (
 const (
 	SpanInvocation = "invocation"
 	SpanSession    = "session"
+	SpanUnresolved = "unresolved"
 )
 
 // Placement values of an execution in the report.
@@ -163,12 +165,14 @@ type Telemetry struct {
 // per-scope figures, including the descendants' and the total, live under
 // Metrics.
 type Time struct {
-	WallMs                  *int64 `json:"wall_ms"`
-	WallBasis               string `json:"wall_basis"`
-	ExecutionTimeMs         int64  `json:"execution_time_ms"`
-	ToolTimeMs              int64  `json:"tool_time_ms"`
-	LegacyActiveMs          int64  `json:"legacy_active_ms"`
-	LegacyActiveMsSemantics string `json:"legacy_active_ms_semantics"`
+	WallMs                  *int64   `json:"wall_ms"`
+	WallBasis               string   `json:"wall_basis"`
+	ExecutionTimeMs         int64    `json:"execution_time_ms"`
+	ToolTimeMs              int64    `json:"tool_time_ms"`
+	ToolTimeCoverage        Coverage `json:"tool_time_coverage"`
+	ToolTimeUnavailable     bool     `json:"tool_time_unavailable"`
+	LegacyActiveMs          int64    `json:"legacy_active_ms"`
+	LegacyActiveMsSemantics string   `json:"legacy_active_ms_semantics"`
 }
 
 // Scopes separates what the root did itself from what ran under it. Total is
@@ -192,13 +196,18 @@ type Metrics struct {
 	// ToolCallsErrored is the tool_calls rows flagged is_error. On Claude the
 	// same event is also an error row of source tool_error, counted under
 	// Failures.Tool; the two are different tables' views of it, not a sum.
-	ToolCallsErrored int   `json:"tool_calls_errored"`
-	ToolTimeMs       int64 `json:"tool_time_ms"`
+	ToolCallsErrored int      `json:"tool_calls_errored"`
+	ToolTimeMs       int64    `json:"tool_time_ms"`
+	ToolTimeCoverage Coverage `json:"tool_time_coverage"`
+	// Missing transcript/tool records are separate from observed calls
+	// whose duration is unknown and counted by ToolTimeCoverage.Untimed.
+	ToolTimeUnavailable bool `json:"tool_time_unavailable"`
 	// TokensByRuntime keeps each runtime's buckets under its own cache
 	// semantics; TotalTokens sums each runtime's non-double-counted total.
-	TokensByRuntime map[string]*Tokens `json:"tokens_by_runtime"`
-	TotalTokens     int64              `json:"total_tokens"`
-	Failures        Failures           `json:"failures"`
+	TokensByRuntime       map[string]*Tokens `json:"tokens_by_runtime"`
+	TotalTokens           int64              `json:"total_tokens"`
+	TokenUsageUnavailable bool               `json:"token_usage_unavailable"`
+	Failures              Failures           `json:"failures"`
 	// HookSignals is the stop_hook rows: a hook told the agent to continue.
 	// Soft, and not a failure.
 	HookSignals int `json:"hook_signals"`
@@ -231,6 +240,7 @@ type Metrics struct {
 // Tokens is one runtime's usage. Total is input+output+cache_read+cache_write
 // under cache_separate and input+output under cache_read_included_in_input.
 type Tokens struct {
+	Unavailable    bool   `json:"unavailable,omitempty"`
 	Input          int64  `json:"input"`
 	Output         int64  `json:"output"`
 	CacheRead      int64  `json:"cache_read"`
@@ -238,6 +248,52 @@ type Tokens struct {
 	CacheWrite1h   int64  `json:"cache_write_1h"`
 	CacheSemantics string `json:"cache_semantics"`
 	Total          int64  `json:"total"`
+}
+
+// Unavailable counters are null on the wire. The internal numeric fields
+// remain useful for summing the measured part of a mixed-runtime scope.
+func (m Metrics) MarshalJSON() ([]byte, error) {
+	type plain Metrics
+	var tokens, toolTime *int64
+	if !m.TokenUsageUnavailable {
+		tokens = &m.TotalTokens
+	}
+	if !m.ToolTimeUnavailable && m.ToolTimeCoverage.Untimed == 0 {
+		toolTime = &m.ToolTimeMs
+	}
+	return json.Marshal(struct {
+		plain
+		TotalTokens *int64 `json:"total_tokens"`
+		ToolTimeMs  *int64 `json:"tool_time_ms"`
+	}{plain: plain(m), TotalTokens: tokens, ToolTimeMs: toolTime})
+}
+
+func (t Time) MarshalJSON() ([]byte, error) {
+	type plain Time
+	var toolTime *int64
+	if !t.ToolTimeUnavailable && t.ToolTimeCoverage.Untimed == 0 {
+		toolTime = &t.ToolTimeMs
+	}
+	return json.Marshal(struct {
+		plain
+		ToolTimeMs *int64 `json:"tool_time_ms"`
+	}{plain: plain(t), ToolTimeMs: toolTime})
+}
+
+func (t Tokens) MarshalJSON() ([]byte, error) {
+	type plain Tokens
+	if !t.Unavailable {
+		return json.Marshal(plain(t))
+	}
+	return json.Marshal(struct {
+		plain
+		Input        *int64 `json:"input"`
+		Output       *int64 `json:"output"`
+		CacheRead    *int64 `json:"cache_read"`
+		CacheWrite   *int64 `json:"cache_write"`
+		CacheWrite1h *int64 `json:"cache_write_1h"`
+		Total        *int64 `json:"total"`
+	}{plain: plain(t)})
 }
 
 // Failures is the error rows by class. Tool is tool_error, exec_error and
@@ -495,16 +551,29 @@ func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 			return nil, err
 		}
 		u.subagent, u.agent = row, b.run.Root.Transcript.Agent
+		b.gap(fmt.Sprintf("execution %s tool timing not recorded", n.ExecutionID))
 		if row == nil || !row.inputTokens.Valid {
 			b.gap(fmt.Sprintf("execution %s has no transcript usage", n.ExecutionID))
 		}
 		return u, nil
 	}
 	if n.Transcript == nil {
+		if u.counted && n != b.run.Root && n.Kind != runs.KindCommand {
+			b.gap(fmt.Sprintf("execution %s has no transcript", n.ExecutionID))
+		}
 		return u, nil
 	}
 	ref := *n.Transcript
-	if n == b.run.Root {
+	if b.run.InvocationUnresolved && b.run.Root != nil && b.run.Root.Transcript != nil && ref == *b.run.Root.Transcript {
+		u.startIdx, u.endIdx, u.counted = 0, -1, false
+		b.rootSpan = SpanUnresolved
+		b.gap(fmt.Sprintf("execution %s invocation attribution unresolved; session metrics not counted", n.ExecutionID))
+		return u, nil
+	}
+	if n == b.run.Root && b.run.Invocation != nil {
+		u.startIdx, u.endIdx = b.run.Invocation.TurnIdx, b.run.Invocation.EndIdx
+		b.rootSpan = SpanInvocation
+	} else if n == b.run.Root {
 		invocations, err := workreport.Invocations(b.db)
 		if err != nil {
 			return nil, err
@@ -528,6 +597,14 @@ func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 		return u, nil
 	}
 	u.data = data
+	if u.counted && !data.usageKnown {
+		b.gap(fmt.Sprintf("session %s/%s token usage not recorded", ref.Agent, ref.SessionID))
+	}
+	if u.counted {
+		for _, diagnostic := range data.diagnostics {
+			b.gap(fmt.Sprintf("session %s/%s parser diagnostic %s", ref.Agent, ref.SessionID, diagnostic))
+		}
+	}
 	return u, nil
 }
 
@@ -710,6 +787,8 @@ func (b *builder) time(last time.Time, scopes Scopes) Time {
 	t := Time{
 		ExecutionTimeMs:         scopes.Total.ExecutionTimeMs,
 		ToolTimeMs:              scopes.Total.ToolTimeMs,
+		ToolTimeCoverage:        scopes.Total.ToolTimeCoverage,
+		ToolTimeUnavailable:     scopes.Total.ToolTimeUnavailable,
 		LegacyActiveMs:          scopes.Parent.LegacyActiveMs,
 		LegacyActiveMsSemantics: LegacyActiveMsSemantics,
 	}
@@ -853,6 +932,9 @@ func durationOf(u *unit) *int64 {
 	}
 	start, end := parseTime(u.node.StartedAt), parseTime(u.node.EndedAt)
 	if start.IsZero() || end.IsZero() {
+		if ms := u.node.DurationMs; ms != nil && *ms >= 0 {
+			return ms
+		}
 		return nil
 	}
 	ms := end.Sub(start).Milliseconds()

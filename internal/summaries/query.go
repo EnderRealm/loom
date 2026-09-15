@@ -31,6 +31,7 @@ type SessionMetrics struct {
 	InputTokens     int64
 	OutputTokens    int64
 	CacheReadTokens int64
+	UsageKnown      bool
 	DurationMs      int64
 }
 
@@ -45,10 +46,12 @@ type ProjectMetrics struct {
 
 // ToolStat is one (project, tool_kind) aggregate.
 type ToolStat struct {
-	Kind   string
-	Calls  int
-	Errors int
-	AvgMs  int64
+	Kind       string
+	Calls      int
+	Errors     int
+	AvgMs      int64
+	TimedCalls int
+	TotalMs    int64
 }
 
 // View is the bundle a dashboard refresh consumes in one shot. Indexed
@@ -112,7 +115,7 @@ func loadSessions(db *sql.DB, v *View) error {
 	rows, err := db.Query(`
 		SELECT session_id, agent, project, cwd, cwd_raw, git_remote, model,
 		       turn_count, tool_call_count, error_count, compacted,
-		       input_tokens, output_tokens, cache_read_tokens, duration_ms
+		       input_tokens, output_tokens, cache_read_tokens, usage_known, duration_ms
 		FROM sessions
 	`)
 	if err != nil {
@@ -122,18 +125,21 @@ func loadSessions(db *sql.DB, v *View) error {
 
 	for rows.Next() {
 		var (
-			m         SessionMetrics
-			project   sql.NullString
-			cwd       sql.NullString
-			cwdRaw    sql.NullString
-			gitRemote sql.NullString
-			model     sql.NullString
-			compact   sql.NullInt64
+			m                    SessionMetrics
+			project              sql.NullString
+			cwd                  sql.NullString
+			cwdRaw               sql.NullString
+			gitRemote            sql.NullString
+			model                sql.NullString
+			compact              sql.NullInt64
+			usageKnown           sql.NullBool
+			input, output, cache sql.NullInt64
 		)
 		if err := rows.Scan(
 			&m.SessionID, &m.Agent, &project, &cwd, &cwdRaw, &gitRemote, &model,
 			&m.TurnCount, &m.ToolCallCount, &m.ErrorCount, &compact,
-			&m.InputTokens, &m.OutputTokens, &m.CacheReadTokens,
+			&input, &output, &cache,
+			&usageKnown,
 			&m.DurationMs,
 		); err != nil {
 			return err
@@ -154,6 +160,8 @@ func loadSessions(db *sql.DB, v *View) error {
 			m.Model = model.String
 		}
 		m.Compacted = compact.Valid && compact.Int64 != 0
+		m.UsageKnown = usageKnown.Valid && usageKnown.Bool
+		m.InputTokens, m.OutputTokens, m.CacheReadTokens = input.Int64, output.Int64, cache.Int64
 
 		v.BySession[SessionKey(m.Agent, m.SessionID)] = &m
 
@@ -178,7 +186,8 @@ func loadToolStats(db *sql.DB, v *View) error {
 		       COALESCE(tc.tool_kind, 'other') AS kind,
 		       COUNT(*) AS calls,
 		       SUM(tc.is_error) AS errors,
-		       CAST(ROUND(AVG(tc.duration_ms)) AS INTEGER) AS avg_ms
+		       COUNT(CASE WHEN tc.duration_ms >= 0 THEN tc.duration_ms END),
+		       SUM(CASE WHEN tc.duration_ms >= 0 THEN tc.duration_ms END)
 		FROM tool_calls tc
 		JOIN sessions s ON s.agent = tc.agent AND s.session_id = tc.session_id
 		WHERE s.project IS NOT NULL
@@ -192,12 +201,12 @@ func loadToolStats(db *sql.DB, v *View) error {
 
 	for rows.Next() {
 		var (
-			project sql.NullString
-			ts      ToolStat
-			errs    sql.NullInt64
-			avg     sql.NullInt64
+			project  sql.NullString
+			ts       ToolStat
+			errs     sql.NullInt64
+			duration sql.NullInt64
 		)
-		if err := rows.Scan(&project, &ts.Kind, &ts.Calls, &errs, &avg); err != nil {
+		if err := rows.Scan(&project, &ts.Kind, &ts.Calls, &errs, &ts.TimedCalls, &duration); err != nil {
 			return err
 		}
 		if !project.Valid {
@@ -206,8 +215,9 @@ func loadToolStats(db *sql.DB, v *View) error {
 		if errs.Valid {
 			ts.Errors = int(errs.Int64)
 		}
-		if avg.Valid {
-			ts.AvgMs = avg.Int64
+		ts.TotalMs = duration.Int64
+		if ts.TimedCalls > 0 {
+			ts.AvgMs = (ts.TotalMs + int64(ts.TimedCalls)/2) / int64(ts.TimedCalls)
 		}
 		v.ToolStats[project.String] = append(v.ToolStats[project.String], ts)
 	}

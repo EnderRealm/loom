@@ -197,6 +197,9 @@ var runSortColumns = []runSortColumn{
 		return moreInt64(a.ToolTimeMs, b.ToolTimeMs, func() bool { return runOrder(a, b) })
 	}},
 	{"TOKENS", func(a, b runreport.Summary) bool {
+		if a.TokensUnavailable != b.TokensUnavailable {
+			return !a.TokensUnavailable
+		}
 		return moreInt64(a.TotalTokens, b.TotalTokens, func() bool { return runOrder(a, b) })
 	}},
 	{"TOOLS", func(a, b runreport.Summary) bool {
@@ -536,8 +539,12 @@ func (m runsModel) renderRow(s runreport.Summary, selected bool) string {
 	tokensCell := padRightBg(muted.Render(unavailable), colRunTokens, bg)
 	toolsCell := padRightBg(muted.Render(unavailable), colRunTools, bg)
 	if s.Metered {
-		toolTimeCell = padRightBg(gray.Render(humanShortDuration(s.ToolTimeMs)), colRunToolTime, bg)
-		tokensCell = padRightBg(white.Render(compactInt(int(s.TotalTokens))), colRunTokens, bg)
+		if !s.ToolTimeUnavailable {
+			toolTimeCell = padRightBg(gray.Render(humanShortDuration(s.ToolTimeMs)), colRunToolTime, bg)
+		}
+		if !s.TokensUnavailable {
+			tokensCell = padRightBg(white.Render(compactInt(int(s.TotalTokens))), colRunTokens, bg)
+		}
 		toolsCell = padRightBg(gray.Render(compactInt(s.ToolCalls)), colRunTools, bg)
 	}
 

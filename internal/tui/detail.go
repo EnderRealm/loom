@@ -395,7 +395,11 @@ func (m detailModel) renderPatterns(width int) string {
 			}
 			b.WriteString(padRight(errCell, 14))
 
-			b.WriteString(StyleDim.Render(humanShortDuration(ts.AvgMs)))
+			if ts.TimedCalls == 0 {
+				b.WriteString(StyleDim.Render(unavailable))
+			} else {
+				b.WriteString(StyleDim.Render(humanShortDuration(ts.AvgMs)))
+			}
 			b.WriteString("\n")
 		}
 		// Shaved-off remainder line so users know when there's more.

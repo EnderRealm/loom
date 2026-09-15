@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -34,12 +35,13 @@ const (
 	OriginTranscript = "transcript"
 )
 
-// Kind values a synthesized node carries; recorded nodes carry the
+// Kind values used by tree and report readers; recorded nodes carry the
 // execution_kind their record declared.
 const (
 	KindRoot     = "root"
 	KindSubagent = "subagent"
 	KindLens     = "lens"
+	KindCommand  = "command"
 )
 
 // TranscriptBasis values: how a run came by its Transcript. Empty when the
@@ -96,6 +98,7 @@ type Node struct {
 	Kind              string         `json:"kind"`
 	Transcript        *TranscriptRef `json:"transcript"`
 	DispatchID        string         `json:"dispatch_id"`
+	DispatchIDs       []string       `json:"dispatch_ids,omitempty"`
 	Stage             string         `json:"stage"`
 	StageOccurrence   *int           `json:"stage_occurrence"`
 	Lens              string         `json:"lens"`
@@ -103,9 +106,12 @@ type Node struct {
 	Attempt           *int           `json:"attempt"`
 	StartedAt         string         `json:"started_at"`
 	EndedAt           string         `json:"ended_at"`
-	Outcome           string         `json:"outcome"`
-	Source            *SourceRef     `json:"source"`
-	Children          []*Node        `json:"children"`
+	// DurationMs is an observed dispatch duration when transcript bounds
+	// are unavailable; it never supplies synthetic timestamps.
+	DurationMs *int64     `json:"duration_ms,omitempty"`
+	Outcome    string     `json:"outcome"`
+	Source     *SourceRef `json:"source"`
+	Children   []*Node    `json:"children"`
 }
 
 // Diagnostic is one thing the importer or the loader could not resolve.
@@ -123,21 +129,24 @@ type Diagnostic struct {
 // only from the executions naming it and carries an unresolved_run
 // diagnostic.
 type Run struct {
-	RunID           string         `json:"run_id"`
-	Ticket          string         `json:"ticket"`
-	Runtime         string         `json:"runtime"`
-	Transcript      *TranscriptRef `json:"transcript"`
-	TranscriptBasis string         `json:"transcript_basis"`
-	StartedAt       string         `json:"started_at"`
-	EndedAt         string         `json:"ended_at"`
-	Outcome         string         `json:"outcome"`
-	ReportingCutoff string         `json:"reporting_cutoff"`
-	Producer        string         `json:"producer"`
-	Origin          string         `json:"origin"`
-	Source          *SourceRef     `json:"source"`
-	Root            *Node          `json:"root"`
-	Unresolved      []*Node        `json:"unresolved"`
-	Diagnostics     []Diagnostic   `json:"diagnostics"`
+	RunID                string         `json:"run_id"`
+	Ticket               string         `json:"ticket"`
+	Runtime              string         `json:"runtime"`
+	Transcript           *TranscriptRef `json:"transcript"`
+	TranscriptBasis      string         `json:"transcript_basis"`
+	InvocationUnresolved bool           `json:"invocation_unresolved,omitempty"`
+	// Transcript recognition establishes turn identity even without timestamps.
+	Invocation      *workreport.Invocation `json:"-"`
+	StartedAt       string                 `json:"started_at"`
+	EndedAt         string                 `json:"ended_at"`
+	Outcome         string                 `json:"outcome"`
+	ReportingCutoff string                 `json:"reporting_cutoff"`
+	Producer        string                 `json:"producer"`
+	Origin          string                 `json:"origin"`
+	Source          *SourceRef             `json:"source"`
+	Root            *Node                  `json:"root"`
+	Unresolved      []*Node                `json:"unresolved"`
+	Diagnostics     []Diagnostic           `json:"diagnostics"`
 	// Lenses is the run's review attempts (workreport.LensAttempt), read from
 	// its transcript's lens responses. Null for a run with no transcript, and
 	// for a recorded run whose session holds no /work invocation spanning
@@ -327,10 +336,16 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 		return nil, err
 	}
 	attach(run, nodes)
+	if run.Transcript == nil {
+		run.Transcript = declaredRootTranscript(nodes)
+		if run.Transcript != nil {
+			run.TranscriptBasis = BasisDeclared
+		}
+	}
 	var inv workreport.Invocation
 	var ok bool
 	if run.Transcript != nil {
-		inv, ok = SpanningInvocation(invocations, row.agent, row.sessionID, parseTime(row.startedAt))
+		inv, ok = SpanningInvocation(invocations, run.Transcript.Agent, run.Transcript.SessionID, parseTime(row.startedAt))
 	} else {
 		var n int
 		inv, n = inferJoin(invocations, row)
@@ -362,6 +377,24 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 			return nil, err
 		}
 	}
+	if run.Root != nil && run.Root.Transcript != nil {
+		ref := *run.Root.Transcript
+		if _, matched := SpanningInvocation(invocations, ref.Agent, ref.SessionID, parseTime(row.startedAt)); !matched {
+			count := 0
+			for _, candidate := range invocations {
+				if candidate.Agent == ref.Agent && candidate.SessionID == ref.SessionID {
+					count++
+				}
+			}
+			if count > 0 {
+				run.InvocationUnresolved = true
+				run.Diagnostics = append(run.Diagnostics, Diagnostic{
+					Code: DiagAmbiguousJoin, RunID: run.RunID, ExecutionID: run.Root.ExecutionID,
+					Detail: fmt.Sprintf("invocation attribution unresolved: session=%s/%s invocations=%d", ref.Agent, ref.SessionID, count),
+				})
+			}
+		}
+	}
 	return run, nil
 }
 
@@ -385,6 +418,16 @@ func lensExecutions(nodes []*Node) []workreport.LensExecution {
 	return out
 }
 
+// Match attach's root choice before inferring identity from ticket and time.
+func declaredRootTranscript(nodes []*Node) *TranscriptRef {
+	for _, n := range nodes {
+		if n.ParentExecutionID == "" && n.Kind == KindRoot {
+			return n.Transcript
+		}
+	}
+	return nil
+}
+
 // inferJoin finds the /work invocation a record naming no transcript belongs
 // to: same runtime, same ticket, both named, and a span holding the run's
 // start. It returns the last match and how many there were; only a count of
@@ -397,13 +440,11 @@ func inferJoin(invocations []workreport.Invocation, row runRow) (workreport.Invo
 	var match workreport.Invocation
 	n := 0
 	for _, inv := range invocations {
-		if inv.Agent != row.runtime || inv.Ticket != row.ticket || inv.StartedAt.IsZero() || startedAt.Before(inv.StartedAt) {
+		if inv.Agent != row.runtime || inv.Ticket != row.ticket || !invocationContainsTime(inv, startedAt) {
 			continue
 		}
-		if inv.EndsAt.IsZero() || startedAt.Before(inv.EndsAt) {
-			match = inv
-			n++
-		}
+		match = inv
+		n++
 	}
 	return match, n
 }
@@ -423,15 +464,27 @@ func SpanningInvocation(invocations []workreport.Invocation, agent, sessionID st
 	if len(inSession) == 1 {
 		return inSession[0], true
 	}
+	var match workreport.Invocation
+	n := 0
 	for _, inv := range inSession {
-		if startedAt.IsZero() || inv.StartedAt.IsZero() || startedAt.Before(inv.StartedAt) {
-			continue
-		}
-		if inv.EndsAt.IsZero() || startedAt.Before(inv.EndsAt) {
-			return inv, true
+		if invocationContainsTime(inv, startedAt) {
+			match = inv
+			n++
 		}
 	}
-	return workreport.Invocation{}, false
+	return match, n == 1
+}
+
+func invocationContainsTime(inv workreport.Invocation, at time.Time) bool {
+	if at.IsZero() || inv.StartedAt.IsZero() || at.Before(inv.StartedAt) {
+		return false
+	}
+	if inv.EndsAt.IsZero() {
+		// A missing next-invocation timestamp is an unknown boundary;
+		// only the final invocation can have an open-ended time span.
+		return inv.EndIdx == math.MaxInt
+	}
+	return at.Before(inv.EndsAt)
 }
 
 // loadExecutions reads a run's executions in the order children are listed:
@@ -613,7 +666,7 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 	var out []Run
 	for _, inv := range invocations {
 		ref := TranscriptRef{inv.Agent, inv.SessionID}
-		if recorded[ref] || !inRange(inv.StartedAt, since, until) {
+		if recorded[invocationKey(inv)] || !inRange(inv.StartedAt, since, until) {
 			continue
 		}
 		id := fmt.Sprintf("transcript:%s:%s:%d", inv.Agent, inv.SessionID, inv.TurnIdx)
@@ -631,6 +684,7 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 			Runtime:         inv.Agent,
 			Transcript:      &ref,
 			TranscriptBasis: BasisTranscript,
+			Invocation:      &inv,
 			StartedAt:       root.StartedAt,
 			EndedAt:         root.EndedAt,
 			Origin:          OriginTranscript,
@@ -651,25 +705,38 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 	return out, nil
 }
 
-// recordedSessions is the set of transcripts a run record claims, by naming
-// one or by the join inferJoin settles for a record naming none. A session so
-// claimed is not re-recognized from its transcript: the record wins.
-func recordedSessions(db *sql.DB, invocations []workreport.Invocation) (map[TranscriptRef]bool, error) {
+// recordedSessions is the set of invocations claimed by run or root identity,
+// else by an unambiguous ticket/time join. Only that invocation is suppressed.
+func recordedSessions(db *sql.DB, invocations []workreport.Invocation) (map[string]bool, error) {
 	rows, err := loadRunRows(db, time.Time{}, time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	out := map[TranscriptRef]bool{}
+	out := map[string]bool{}
 	for _, row := range rows {
-		if ref := transcriptRef(row.agent, row.sessionID); ref != nil {
-			out[*ref] = true
+		ref := transcriptRef(row.agent, row.sessionID)
+		if ref == nil {
+			nodes, err := loadExecutions(db, row.runID)
+			if err != nil {
+				return nil, err
+			}
+			ref = declaredRootTranscript(nodes)
+		}
+		if ref != nil {
+			if inv, ok := SpanningInvocation(invocations, ref.Agent, ref.SessionID, parseTime(row.startedAt)); ok {
+				out[invocationKey(inv)] = true
+			}
 			continue
 		}
 		if inv, n := inferJoin(invocations, row); n == 1 {
-			out[TranscriptRef{inv.Agent, inv.SessionID}] = true
+			out[invocationKey(inv)] = true
 		}
 	}
 	return out, nil
+}
+
+func invocationKey(inv workreport.Invocation) string {
+	return fmt.Sprintf("%s\x00%s\x00%d", inv.Agent, inv.SessionID, inv.TurnIdx)
 }
 
 // attachSubagentRows adds one child per subagents row whose dispatching turn
@@ -699,49 +766,117 @@ func attachSubagentRows(db *sql.DB, run *Run, inv workreport.Invocation) error {
 	return rows.Err()
 }
 
-// attachCodexChildren adds the Codex sessions whose session_meta names the
-// run's session as their parent thread. That names the session, not the
-// run: when the session holds several runs the child is listed unresolved
-// with an ambiguous_parent diagnostic rather than placed by time.
+// attachCodexChildren adds sessions whose metadata names a parent thread.
+// Cursor also supplies dispatch identities, so each edge can be resolved
+// against its immediate parent and descendants followed transitively.
 func attachCodexChildren(db *sql.DB, run *Run, inv workreport.Invocation, runsInSession int) error {
-	rows, err := db.Query(`
-		SELECT agent, session_id, start_time, end_time FROM sessions
-		WHERE parent_session_id = ? AND start_time IS NOT NULL
-		ORDER BY start_time, session_id`, inv.SessionID)
-	if err != nil {
-		return fmt.Errorf("query child sessions: %w", err)
+	dispatchColumn := "NULL"
+	if workreport.SchemaVersionOf(db) >= 11 {
+		dispatchColumn = "parent_tool_call_id"
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			ref                TranscriptRef
-			startTime, endTime sql.NullString
-		)
-		if err := rows.Scan(&ref.Agent, &ref.SessionID, &startTime, &endTime); err != nil {
+	queue := []*Node{run.Root}
+	seen := map[TranscriptRef]bool{*run.Root.Transcript: true}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		if err := attachChildSessions(db, run, inv, runsInSession, dispatchColumn, parent, seen, &queue); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func attachChildSessions(db *sql.DB, run *Run, inv workreport.Invocation, runsInSession int, dispatchColumn string, parent *Node, seen map[TranscriptRef]bool, queue *[]*Node) error {
+	type childRow struct {
+		ref                  TranscriptRef
+		start, end, dispatch sql.NullString
+		resolved             bool
+		turnIdx              int
+		durationMs           *int64
+		dispatchIDs          []string
+	}
+	var children []childRow
+	if parent.Transcript.Agent == "cursor-cli" && dispatchColumn != "NULL" {
+		cursorChildren, err := workreport.CursorChildren(db, parent.Transcript.SessionID)
+		if err != nil {
+			return fmt.Errorf("query Cursor children: %w", err)
+		}
+		for _, c := range cursorChildren {
+			children = append(children, childRow{
+				ref:   TranscriptRef{Agent: "cursor-cli", SessionID: c.SessionID},
+				start: sql.NullString{String: c.StartedAt}, end: sql.NullString{String: c.EndedAt},
+				dispatch: sql.NullString{String: c.DispatchID}, resolved: c.Resolved, turnIdx: c.TurnIdx, durationMs: c.DurationMs,
+				dispatchIDs: c.DispatchIDs,
+			})
+		}
+	} else {
+		rows, err := db.Query(`
+		SELECT agent, session_id, start_time, end_time, `+dispatchColumn+` FROM sessions
+		WHERE parent_session_id = ? AND (start_time IS NOT NULL OR agent = 'cursor-cli')
+		AND (agent <> 'cursor-cli' OR ? = 'cursor-cli')
+		ORDER BY start_time, session_id`, parent.Transcript.SessionID, parent.Transcript.Agent)
+		if err != nil {
+			return fmt.Errorf("query child sessions: %w", err)
+		}
+		for rows.Next() {
+			var c childRow
+			if err := rows.Scan(&c.ref.Agent, &c.ref.SessionID, &c.start, &c.end, &c.dispatch); err != nil {
+				rows.Close()
+				return err
+			}
+			children = append(children, c)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	for _, c := range children {
+		ref := c.ref
+		if seen[ref] {
+			run.Diagnostics = append(run.Diagnostics, Diagnostic{
+				Code: DiagCyclicParent, Detail: "parent_session_id=" + parent.Transcript.SessionID,
+				RunID: run.RunID, ExecutionID: fmt.Sprintf("transcript:%s:%s", ref.Agent, ref.SessionID),
+			})
+			continue
 		}
 		child := &Node{
 			ExecutionID: fmt.Sprintf("transcript:%s:%s", ref.Agent, ref.SessionID),
 			RunID:       run.RunID,
 			Kind:        KindSubagent,
 			Transcript:  &ref,
-			StartedAt:   startTime.String,
-			EndedAt:     endTime.String,
+			StartedAt:   c.start.String,
+			EndedAt:     c.end.String,
+			DispatchID:  c.dispatch.String,
+			DispatchIDs: c.dispatchIDs,
+			DurationMs:  c.durationMs,
 		}
-		if runsInSession == 1 {
-			child.ParentExecutionID = run.Root.ExecutionID
-			run.Root.Children = append(run.Root.Children, child)
+		placed := runsInSession == 1
+		if ref.Agent == "cursor-cli" {
+			placed = c.resolved
+			if placed && parent == run.Root && (c.turnIdx < inv.TurnIdx || c.turnIdx > inv.EndIdx) {
+				continue
+			}
+		}
+		seen[ref] = true
+		if ref.Agent == "cursor-cli" {
+			*queue = append(*queue, child)
+		}
+		if placed {
+			child.ParentExecutionID = parent.ExecutionID
+			parent.Children = append(parent.Children, child)
 			continue
 		}
 		run.Unresolved = append(run.Unresolved, child)
 		run.Diagnostics = append(run.Diagnostics, Diagnostic{
 			Code:        DiagAmbiguousParent,
-			Detail:      fmt.Sprintf("parent_session_id=%s runs=%d", inv.SessionID, runsInSession),
+			Detail:      fmt.Sprintf("parent_session_id=%s dispatch_id=%s runs=%d", parent.Transcript.SessionID, c.dispatch.String, runsInSession),
 			RunID:       run.RunID,
 			ExecutionID: child.ExecutionID,
 		})
 	}
-	return rows.Err()
+	return nil
 }
 
 func transcriptRef(agent, sessionID string) *TranscriptRef {

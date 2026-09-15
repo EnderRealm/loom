@@ -214,16 +214,16 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		    model_provider, model, personality, custom_title, agent_name,
 		    pr_url, start_time, end_time, duration_ms, turn_count,
 		    tool_call_count, error_count, compacted, input_tokens,
-		    output_tokens, cache_read_tokens, source_path, source_size,
-		    source_mtime, summarized_at, parent_session_id, spawn_depth
+		    output_tokens, cache_read_tokens, usage_known, source_path, source_size,
+		    source_mtime, summarized_at, parent_session_id, spawn_depth, parent_tool_call_id
 		) VALUES (
 		    ?, ?, ?, ?, ?, ?,
 		    ?, ?,
 		    ?, ?, ?, ?, ?,
 		    ?, ?, ?, ?, ?,
 		    ?, ?, ?, ?,
-		    ?, ?, ?, ?,
-		    ?, ?, ?, ?
+		    ?, ?, ?, ?, ?,
+		    ?, ?, ?, ?, ?
 		)
 	`,
 		agent, sum.SessionID, source.Project, sum.Cwd, source.CwdRaw, source.GitRemote,
@@ -233,11 +233,12 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 		sum.PRURL, isoOrNull(sum.StartTime), isoOrNull(sum.EndTime),
 		durationMs, len(sum.Turns),
 		len(sum.ToolCalls), errCount, boolToInt(sum.Compacted),
-		sum.InputTokens,
-		sum.OutputTokens, sum.CacheReadTokens,
+		usageValue(sum.UsageUnavailable, sum.InputTokens),
+		usageValue(sum.UsageUnavailable, sum.OutputTokens), usageValue(sum.UsageUnavailable, sum.CacheReadTokens),
+		boolToInt(!sum.UsageUnavailable),
 		source.Path, source.Size,
 		isoOrNull(source.Mtime), time.Now().UTC().Format(time.RFC3339Nano),
-		strOrNull(sum.ParentSessionID), spawnDepth,
+		strOrNull(sum.ParentSessionID), spawnDepth, strOrNull(sum.ParentToolCallID),
 	)
 	if err != nil {
 		return fmt.Errorf("insert sessions: %w", err)
@@ -319,8 +320,8 @@ func writeTurns(ctx context.Context, tx *sql.Tx,
 			t.AssistantText, t.ReasoningChars, t.StopReason,
 			string(t.CompletionStatus),
 			strOrNull(t.Model), strOrNull(t.Effort), strOrNull(t.CLIVersion),
-			t.InputTokens, t.OutputTokens,
-			t.CacheReadTokens, t.CacheCreationTokens, t.CacheCreation1hTokens,
+			usageValue(sum.UsageUnavailable, t.InputTokens), usageValue(sum.UsageUnavailable, t.OutputTokens),
+			usageValue(sum.UsageUnavailable, t.CacheReadTokens), usageValue(sum.UsageUnavailable, t.CacheCreationTokens), usageValue(sum.UsageUnavailable, t.CacheCreation1hTokens),
 			strOrNull(t.Speed), boolToInt(t.Mixed), isoOrNull(t.StartedAt),
 			isoOrNull(t.EndedAt), ms,
 		); err != nil {
@@ -337,8 +338,8 @@ func writeToolCalls(ctx context.Context, tx *sql.Tx,
 		INSERT INTO tool_calls (
 		    agent, session_id, turn_idx, seq, call_id, tool_kind, tool_name,
 		    key_arg, started_at, duration_ms, exit_code, is_error,
-		    result_summary
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		    result_summary, child_session_id, child_duration_ms, child_resume_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -351,13 +352,20 @@ func writeToolCalls(ctx context.Context, tx *sql.Tx,
 		if _, err := stmt.ExecContext(ctx,
 			agent, sum.SessionID, tc.TurnIdx, i, tc.CallID, string(tc.Kind),
 			tc.ToolName, tc.KeyArg, isoOrNull(tc.StartedAt),
-			tc.DurationMs, exit, boolToInt(tc.IsError),
-			tc.ResultSummary,
+			usageValue(tc.DurationUnavailable, tc.DurationMs), exit, boolToInt(tc.IsError),
+			tc.ResultSummary, strOrNull(tc.ChildSessionID), tc.ChildDurationMs, strOrNull(tc.ChildResumeID),
 		); err != nil {
 			return fmt.Errorf("insert tool_call %d: %w", i, err)
 		}
 	}
 	return nil
+}
+
+func usageValue(unavailable bool, value int64) any {
+	if unavailable {
+		return nil
+	}
+	return value
 }
 
 // writeCommits derives git commits from the session's bash tool output and
@@ -436,7 +444,7 @@ func writeCompactions(ctx context.Context, tx *sql.Tx,
 	for i, c := range sum.Compactions {
 		if _, err := stmt.ExecContext(ctx,
 			agent, sum.SessionID, i, isoOrNull(c.Time), c.Anchor,
-			c.TokensBefore, c.TokensAfter,
+			usageValue(c.UsageUnavailable, c.TokensBefore), usageValue(c.UsageUnavailable, c.TokensAfter),
 		); err != nil {
 			return err
 		}

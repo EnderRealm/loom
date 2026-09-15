@@ -16,6 +16,7 @@ type Agent string
 const (
 	AgentClaude Agent = "claude-code"
 	AgentCodex  Agent = "codex-cli"
+	AgentCursor Agent = "cursor-cli"
 )
 
 // SessionSummary is the normalized view of one session transcript.
@@ -44,12 +45,17 @@ type SessionSummary struct {
 	// session and for every Claude session, whose subagents are folded into
 	// the parent's Subagents instead. SpawnDepth is the depth the same record
 	// carries and is meaningful only when ParentSessionID is set.
-	ParentSessionID string
-	SpawnDepth      int
+	ParentSessionID  string
+	ParentToolCallID string
+	SpawnDepth       int
 
 	InputTokens     int64
 	OutputTokens    int64
 	CacheReadTokens int64
+	// UsageUnavailable distinguishes a measured zero from a producer that did not
+	// expose billing usage. Cursor's store currently carries context-window
+	// occupancy, which is not a billable input/output counter.
+	UsageUnavailable bool
 
 	Compacted bool
 
@@ -149,16 +155,23 @@ const (
 
 // ToolCall is a single tool invocation by the model.
 type ToolCall struct {
-	TurnIdx       int
-	CallID        string
-	Kind          ToolKind
-	ToolName      string
-	KeyArg        string
-	StartedAt     time.Time
-	DurationMs    int64
-	ExitCode      *int
-	IsError       bool
-	ResultSummary string
+	TurnIdx             int
+	CallID              string
+	Kind                ToolKind
+	ToolName            string
+	KeyArg              string
+	StartedAt           time.Time
+	DurationMs          int64
+	DurationUnavailable bool
+	ExitCode            *int
+	IsError             bool
+	ResultSummary       string
+	// Child identity and duration reported by a structured dispatch result,
+	// independent of whether the child's own transcript has arrived.
+	ChildSessionID  string
+	ChildDurationMs *int64
+	// Existing child explicitly named by Cursor TaskArgs.resume.
+	ChildResumeID string
 }
 
 // ErrorEvent is anything the producer flagged as a failure.
@@ -171,10 +184,11 @@ type ErrorEvent struct {
 
 // Compaction marks where conversation history was compacted.
 type Compaction struct {
-	Time         time.Time
-	Anchor       string
-	TokensBefore int64
-	TokensAfter  int64
+	Time             time.Time
+	Anchor           string
+	TokensBefore     int64
+	TokensAfter      int64
+	UsageUnavailable bool
 }
 
 // TokenCount is a usage observation. Claude embeds usage on each assistant

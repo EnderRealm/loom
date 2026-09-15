@@ -592,8 +592,8 @@ func TestCostReportRefusesAPrePricingSchema(t *testing.T) {
 	db.Close()
 
 	_, err = LoadCost(f.path, time.Time{}, time.Time{})
-	if err == nil || !strings.Contains(err.Error(), "want 7") {
-		t.Fatalf("LoadCost on a v5 DB = %v, want an error naming schema 7", err)
+	if err == nil || !strings.Contains(err.Error(), "want 11") {
+		t.Fatalf("LoadCost on a v5 DB = %v, want an error naming schema 11", err)
 	}
 	_, err = Load(f.path, time.Time{}, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "want 9") {

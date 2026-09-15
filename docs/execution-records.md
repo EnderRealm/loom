@@ -29,7 +29,7 @@ again when it ends.
 | --- | --- |
 | `run_id` | Producer-generated, unique per invocation — a UUID. Two invocations in one session get two ids. Required. |
 | `ticket` | Qualified ticket id, `project/slug`. |
-| `runtime` | `claude-code`, `codex-cli` or `weft`. |
+| `runtime` | `claude-code`, `codex-cli`, `cursor-cli` or `weft`. |
 | `agent`, `session_id` | The originating transcript, identified the way loom ships it: the agent name and the session id in the file name. Optional for `weft`, which has no transcript of its own. |
 | `producer` | Who wrote the record and at what version, e.g. `warp/work@1.4.0`. |
 | `started_at`, `ended_at` | RFC 3339. `ended_at` is absent while the run is in progress. |
@@ -49,7 +49,7 @@ starts, and again when it ends.
 | `parent_execution_id` | The execution that created this one. Absent on the run's root execution and nowhere else. |
 | `execution_kind` | `root` (the run's own session), `subagent` (a dispatched agent), `lens` (a review lens), `stage` (a Weft stage attempt) or `command` (a process with no transcript, such as a test gate). |
 | `agent`, `session_id` | The transcript this execution *is*, when it has one. A `command` has none. |
-| `dispatch_id` | The parent's tool call that created this execution — Claude's `tool_use_id`, Codex's `call_id`. Optional. |
+| `dispatch_id` | The parent's tool call that created this execution — Claude's `tool_use_id`, Codex's `call_id`, Cursor's `toolCallId`. Optional. |
 | `stage`, `stage_occurrence` | For a `stage`: which stage (`work`, `review`) and which pass through it, counting from 1. |
 | `lens`, `round` | For a `lens`: which lens and which review round, counting from 1. |
 | `attempt` | Which try this is at the same stage occurrence or lens round, counting from 1. A retry is a new execution with the next attempt. |

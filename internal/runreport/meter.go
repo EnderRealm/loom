@@ -30,11 +30,12 @@ type turnRow struct {
 }
 
 type callRow struct {
-	turnIdx    int
-	toolKind   string
-	durationMs int64
-	isError    bool
-	startedAt  time.Time
+	turnIdx       int
+	toolKind      string
+	durationMs    int64
+	durationKnown bool
+	isError       bool
+	startedAt     time.Time
 }
 
 type errorRow struct {
@@ -47,10 +48,12 @@ type errorRow struct {
 // off are dropped at load, as cost.go does: scanning their NULL to 0 would
 // charge them to whichever span holds turn 0.
 type sessionData struct {
-	agent  string
-	turns  []turnRow
-	calls  []callRow
-	errors []errorRow
+	agent       string
+	usageKnown  bool
+	diagnostics []string
+	turns       []turnRow
+	calls       []callRow
+	errors      []errorRow
 }
 
 // subagentRow is a historical dispatch's own row in the parent's subagents
@@ -72,15 +75,15 @@ type subagentRow struct {
 // loadSession reads one session's metered rows, or nil when the sessions
 // table does not hold it: an absent session is a gap, not an empty one.
 func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
-	var one int
-	err := db.QueryRow(`SELECT 1 FROM sessions WHERE agent = ? AND session_id = ?`, agent, sessionID).Scan(&one)
+	var usageKnown bool
+	err := db.QueryRow(`SELECT usage_known FROM sessions WHERE agent = ? AND session_id = ?`, agent, sessionID).Scan(&usageKnown)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query session: %w", err)
 	}
-	data := &sessionData{agent: agent}
+	data := &sessionData{agent: agent, usageKnown: usageKnown}
 
 	turns, err := db.Query(`
 		SELECT idx, user_message, model, effort, cli_version, speed, wall_clock_ms,
@@ -138,6 +141,7 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 			continue
 		}
 		c.turnIdx, c.toolKind, c.durationMs, c.isError = int(turnIdx.Int64), kind.String, duration.Int64, isError.Bool
+		c.durationKnown = duration.Valid && duration.Int64 >= 0
 		c.startedAt = parseTime(startedAt.String)
 		data.calls = append(data.calls, c)
 	}
@@ -166,7 +170,31 @@ func loadSession(db *sql.DB, agent, sessionID string) (*sessionData, error) {
 		e.turnIdx, e.source, e.ts = int(turnIdx.Int64), source.String, parseTime(ts.String)
 		data.errors = append(data.errors, e)
 	}
-	return data, errs.Err()
+	if err := errs.Err(); err != nil {
+		return nil, err
+	}
+	errs.Close()
+	if agent == string(summary.AgentCursor) {
+		rows, err := db.Query(`SELECT type, subtype, count FROM unknown_records WHERE agent = ? AND session_id = ? ORDER BY type, subtype`, agent, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("query Cursor diagnostics: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var typ, subtype string
+			var count int
+			if err := rows.Scan(&typ, &subtype, &count); err != nil {
+				return nil, err
+			}
+			if typ != "usage" {
+				data.diagnostics = append(data.diagnostics, fmt.Sprintf("%s:%s count=%d", typ, subtype, count))
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return data, nil
 }
 
 // loadSubagentRow reads one dispatch's row off its parent's transcript, or
@@ -240,6 +268,13 @@ func (m *meter) add(u *unit, transcript bool) {
 		m.m.ExecutionTimeCoverage.Untimed++
 	}
 	m.observe(parseTime(u.node.StartedAt), parseTime(u.node.EndedAt))
+	if u.startIdx > u.endIdx {
+		m.p.Warn(u.node.ExecutionID + ": invocation attribution unresolved")
+		m.priced = false
+		m.m.TokenUsageUnavailable = true
+		m.m.ToolTimeUnavailable = true
+		return
+	}
 	if !transcript {
 		return
 	}
@@ -250,11 +285,27 @@ func (m *meter) add(u *unit, transcript bool) {
 		// The transcript is named but not folded: its cost is unknown, not zero.
 		m.p.Warn(u.node.ExecutionID + ": session not in summaries.db")
 		m.priced = false
+		m.m.TokenUsageUnavailable = true
+		m.m.ToolTimeUnavailable = true
+	case u.data == nil && u.node.Kind != runs.KindCommand:
+		m.p.Warn(u.node.ExecutionID + ": no transcript")
+		m.priced = false
+		m.m.TokenUsageUnavailable = true
+		m.m.ToolTimeUnavailable = true
 	case u.data != nil:
 		ref := *u.node.Transcript
 		if !m.sessions[ref] {
 			m.sessions[ref] = true
 			m.m.Transcripts++
+		}
+		if !u.data.usageKnown {
+			m.p.Warn(u.node.ExecutionID + ": token usage not recorded")
+			m.priced = false
+			m.m.TokenUsageUnavailable = true
+			if m.m.TokensByRuntime[u.data.agent] == nil {
+				m.m.TokensByRuntime[u.data.agent] = &Tokens{CacheSemantics: cacheSemantics(u.data.agent)}
+			}
+			m.m.TokensByRuntime[u.data.agent].Unavailable = true
 		}
 		m.addSpan(u)
 	}
@@ -293,8 +344,10 @@ func (m *meter) addSpan(u *unit) {
 			m.m.LegacyActiveMs += t.wallClockMs
 		}
 		m.observe(t.startedAt, t.endedAt)
-		m.addTokens(data.agent, fmt.Sprintf("%s turn %d", u.node.ExecutionID, t.idx), t.model, t.speed, t.usageMixed,
-			t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreation, t.cacheCreation1h)
+		if data.usageKnown {
+			m.addTokens(data.agent, fmt.Sprintf("%s turn %d", u.node.ExecutionID, t.idx), t.model, t.speed, t.usageMixed,
+				t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreation, t.cacheCreation1h)
+		}
 	}
 	for _, c := range data.calls {
 		if !inSpan(c.turnIdx) {
@@ -309,9 +362,12 @@ func (m *meter) addSpan(u *unit) {
 		if c.isError {
 			m.m.ToolCallsErrored++
 		}
-		if c.durationMs >= 0 {
+		if c.durationKnown {
+			m.m.ToolTimeCoverage.Timed++
 			m.m.ToolTimeMs += c.durationMs
 			m.m.LegacyActiveMs += c.durationMs
+		} else {
+			m.m.ToolTimeCoverage.Untimed++
 		}
 		m.observe(c.startedAt)
 	}
@@ -339,10 +395,14 @@ func (m *meter) addSpan(u *unit) {
 // addSubagent meters a historical dispatch from its row: its usage under the
 // parent runtime's semantics, or nothing when no transcript was folded.
 func (m *meter) addSubagent(u *unit) {
+	// Historical dispatch rows retain usage and elapsed duration, not the
+	// tool records needed to compute this execution's tool time.
+	m.m.ToolTimeUnavailable = true
 	s := u.subagent
 	if !s.inputTokens.Valid {
 		m.p.Warn(u.node.ExecutionID + ": no transcript")
 		m.priced = false
+		m.m.TokenUsageUnavailable = true
 		return
 	}
 	m.addTokens(u.agent, u.node.ExecutionID, s.model.String, s.speed.String, s.usageMixed.Bool,

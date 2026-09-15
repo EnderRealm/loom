@@ -459,7 +459,9 @@ func (m runDetailModel) timeLines(width int) []string {
 		wall += StyleDim.Render("  no start, or no end and nothing observed")
 	}
 	toolTime := StyleDim.Render(unavailable + "  no transcript metered")
-	if len(total.TokensByRuntime) > 0 {
+	if total.ToolTimeUnavailable || total.ToolTimeCoverage.Untimed > 0 {
+		toolTime = StyleDim.Render(unavailable + "  tool timing incomplete")
+	} else if len(total.TokensByRuntime) > 0 {
 		toolTime = white(humanShortDuration(tm.ToolTimeMs)) + StyleDim.Render("  over every counted execution")
 	}
 	// Legacy is the parent span's transcript figure alone: with the root
@@ -575,7 +577,7 @@ func (m runDetailModel) outcomeCell(id, outcome string, sel lipgloss.Style) stri
 // metered for it: a missing session or a transcript-less command has no
 // count, not a count of zero.
 func tokensCell(x runreport.Metrics) string {
-	if len(x.TokensByRuntime) == 0 {
+	if len(x.TokensByRuntime) == 0 || x.TokenUsageUnavailable {
 		return StyleDim.Render(unavailable)
 	}
 	return white(compactInt(int(x.TotalTokens)))
@@ -624,7 +626,7 @@ func (m runDetailModel) nodeLine(tn treeNode, selected bool, width int) string {
 		dur = sel.Foreground(colorWhite).Render(humanShortDuration(*em.DurationMs))
 	}
 	tokens := sel.Foreground(colorMuted).Render(unavailable)
-	if len(em.Metrics.TokensByRuntime) > 0 {
+	if len(em.Metrics.TokensByRuntime) > 0 && !em.Metrics.TokenUsageUnavailable {
 		tokens = sel.Foreground(colorWhite).Render(compactInt(int(em.Metrics.TotalTokens)))
 	}
 	counted := sel.Foreground(colorMuted).Render("counted")

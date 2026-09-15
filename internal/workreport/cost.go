@@ -2,6 +2,7 @@ package workreport
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -15,7 +16,7 @@ import (
 // per-turn cache-creation tokens and speed, and each subagent's own usage
 // (schema 7; see the schemaVersion doc comment in internal/summaries/schema.go).
 // A database without them cannot price a run, so it cannot answer this report.
-const costSchemaVersion = 7
+const costSchemaVersion = 11
 
 // fastSpeed is the usage.speed value Claude records for fast-mode requests,
 // which are priced at the model's fast rates.
@@ -27,12 +28,13 @@ const unknownToolKind = "unknown"
 
 // CostRun is what one /work run cost.
 type CostRun struct {
-	Ticket    string  `json:"ticket"`
-	SessionID string  `json:"session_id"`
-	Agent     string  `json:"agent"`
-	Runtime   Runtime `json:"runtime"`
-	InvokedAt string  `json:"invoked_at"`
-	Committed bool    `json:"committed"`
+	TokenUsageUnavailable bool    `json:"token_usage_unavailable"`
+	Ticket                string  `json:"ticket"`
+	SessionID             string  `json:"session_id"`
+	Agent                 string  `json:"agent"`
+	Runtime               Runtime `json:"runtime"`
+	InvokedAt             string  `json:"invoked_at"`
+	Committed             bool    `json:"committed"`
 	// WallClockMs is invocation to commit — the time actually felt, idle
 	// included. Null when the run did not commit, so an abandoned run cannot
 	// run its span to the session end and inflate the trend.
@@ -82,6 +84,20 @@ type CostRun struct {
 	CostUSD         *float64 `json:"cost_usd"`
 	SubagentCostUSD *float64 `json:"subagent_cost_usd"`
 	PricingWarnings []string `json:"pricing_warnings"`
+}
+
+func (r CostRun) MarshalJSON() ([]byte, error) {
+	type plain CostRun
+	if !r.TokenUsageUnavailable {
+		return json.Marshal(plain(r))
+	}
+	return json.Marshal(struct {
+		plain
+		InputTokens         *int64 `json:"input_tokens"`
+		OutputTokens        *int64 `json:"output_tokens"`
+		CacheReadTokens     *int64 `json:"cache_read_tokens"`
+		CacheCreationTokens *int64 `json:"cache_creation_tokens"`
+	}{plain: plain(r)})
 }
 
 // CostReport is the whole document. Like Report it carries no generation
@@ -198,10 +214,12 @@ type costCallRow struct {
 }
 
 type costSubagentRow struct {
-	seq           int
-	parentTurnIdx int
-	agentType     string
-	durationMs    sql.NullInt64
+	seq               int
+	usageUnavailable  bool
+	transcriptMissing bool
+	parentTurnIdx     int
+	agentType         string
+	durationMs        sql.NullInt64
 	// The usage columns are NULL together when the dispatch had no
 	// transcript; inputTokens.Valid is the "usage recorded" marker.
 	model           sql.NullString
@@ -218,9 +236,11 @@ type costSubagentRow struct {
 // loader of its own rather than loadSession's: cost needs the metered columns
 // and none of the transcript text the compliance parser reads.
 type costSessionData struct {
-	turns     []costTurnRow
-	calls     []costCallRow
-	subagents []costSubagentRow
+	usageKnown         bool
+	turns              []costTurnRow
+	calls              []costCallRow
+	subagents          []costSubagentRow
+	unresolvedChildren int
 	// errors is the turn_idx of every error row that hangs off a turn.
 	errors  []int
 	commits []commitRow
@@ -228,6 +248,9 @@ type costSessionData struct {
 
 func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, error) {
 	data := &costSessionData{}
+	if err := db.QueryRow(`SELECT usage_known FROM sessions WHERE agent = ? AND session_id = ?`, agent, sessionID).Scan(&data.usageKnown); err != nil {
+		return nil, fmt.Errorf("query session usage coverage: %w", err)
+	}
 
 	turns, err := db.Query(`
 		SELECT idx, user_message, model, effort, cli_version, speed,
@@ -333,6 +356,11 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 	if err := subagents.Err(); err != nil {
 		return nil, err
 	}
+	if runtimeOf(agent) == RuntimeCursor {
+		if err := loadCursorCostChildren(db, sessionID, data); err != nil {
+			return nil, err
+		}
+	}
 
 	errs, err := db.Query(`
 		SELECT turn_idx FROM errors WHERE agent = ? AND session_id = ?
@@ -361,6 +389,26 @@ func loadCostSession(db *sql.DB, agent, sessionID string) (*costSessionData, err
 		return nil, err
 	}
 	return data, nil
+}
+
+// Creation and resume dispatches must identify one owning invocation.
+func loadCursorCostChildren(db *sql.DB, sessionID string, data *costSessionData) error {
+	children, err := CursorChildren(db, sessionID)
+	if err != nil {
+		return fmt.Errorf("query Cursor child costs: %w", err)
+	}
+	for _, c := range children {
+		if !c.Resolved {
+			data.unresolvedChildren++
+			continue
+		}
+		s := costSubagentRow{seq: len(data.subagents), parentTurnIdx: c.TurnIdx, usageUnavailable: true, transcriptMissing: c.TranscriptMissing}
+		if c.DurationMs != nil {
+			s.durationMs = sql.NullInt64{Int64: *c.DurationMs, Valid: true}
+		}
+		data.subagents = append(data.subagents, s)
+	}
+	return nil
 }
 
 // appendDistinct adds v to list unless it is empty or already there, so the
@@ -474,11 +522,12 @@ func RoundUSD(x float64) *float64 {
 // at table's rates in force at the invocation.
 func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionData, table *pricing.Table) CostRun {
 	run := CostRun{
-		Ticket:          inv.ticket,
-		SessionID:       inv.sessionID,
-		Agent:           inv.agent,
-		Runtime:         runtimeOf(inv.agent),
-		ToolCallsByKind: map[string]int{},
+		TokenUsageUnavailable: !data.usageKnown,
+		Ticket:                inv.ticket,
+		SessionID:             inv.sessionID,
+		Agent:                 inv.agent,
+		Runtime:               runtimeOf(inv.agent),
+		ToolCallsByKind:       map[string]int{},
 	}
 	if !inv.startedAt.IsZero() {
 		run.InvokedAt = inv.startedAt.Format(time.RFC3339)
@@ -491,6 +540,14 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 	subagentsPriced := priced
 	if !priced {
 		p.Warn("invocation time unknown")
+	}
+	if !data.usageKnown {
+		p.Warn("token usage not recorded")
+		priced = false
+	}
+	if data.unresolvedChildren > 0 {
+		p.Warn(fmt.Sprintf("Cursor child dispatch attribution unavailable: %d sessions", data.unresolvedChildren))
+		subagentsPriced = false
 	}
 
 	var cost float64
@@ -571,6 +628,15 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		subject := fmt.Sprintf("subagent %d", s.seq)
 		if s.agentType != "" {
 			subject += " (" + s.agentType + ")"
+		}
+		if s.usageUnavailable {
+			if s.transcriptMissing {
+				p.Warn(subject + ": no transcript")
+			} else {
+				p.Warn(subject + ": token usage not recorded")
+			}
+			subagentsPriced = false
+			continue
 		}
 		// A dispatch with no transcript has no usage to price; unlike an
 		// unmeasured duration it makes the whole figure null, since a sum

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -518,21 +519,29 @@ func walkAgentSlugSessions(root string, fn func(agent, slug, sid, path string, i
 				continue
 			}
 			slug := s.Name()
-			files, err := os.ReadDir(filepath.Join(root, agent, slug))
-			if err != nil {
-				continue
-			}
-			for _, f := range files {
-				if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
-					continue
-				}
-				sid := strings.TrimSuffix(f.Name(), ".jsonl")
-				path := filepath.Join(root, agent, slug, f.Name())
-				info, err := os.Stat(path)
+			projectDir := filepath.Join(root, agent, slug)
+			err = filepath.WalkDir(projectDir, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
-					continue
+					return nil
 				}
-				fn(agent, slug, sid, path, info)
+				if d.IsDir() {
+					if path != projectDir && agent != "cursor-cli" {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if !strings.HasSuffix(d.Name(), ".jsonl") {
+					return nil
+				}
+				info, err := d.Info()
+				if err != nil {
+					return nil
+				}
+				fn(agent, slug, strings.TrimSuffix(d.Name(), ".jsonl"), path, info)
+				return nil
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -689,13 +698,12 @@ func attachSummary(p *Project, d *summaries.View) {
 				merged[ts.Kind] = &cp
 				continue
 			}
-			// Weighted-average duration by call count, summed counts.
-			totalCalls := cur.Calls + ts.Calls
-			if totalCalls > 0 {
-				cur.AvgMs = (cur.AvgMs*int64(cur.Calls) +
-					ts.AvgMs*int64(ts.Calls)) / int64(totalCalls)
+			cur.TimedCalls += ts.TimedCalls
+			cur.TotalMs += ts.TotalMs
+			if cur.TimedCalls > 0 {
+				cur.AvgMs = (cur.TotalMs + int64(cur.TimedCalls)/2) / int64(cur.TimedCalls)
 			}
-			cur.Calls = totalCalls
+			cur.Calls += ts.Calls
 			cur.Errors += ts.Errors
 		}
 		p.Compactions += d.CompactionsByProject[slug]

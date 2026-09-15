@@ -140,7 +140,9 @@ func (m runDetailModel) summaryLines(width int) []string {
 	}
 	tokens, calls := unavailable, unavailable
 	if len(total.TokensByRuntime) > 0 {
-		tokens = compactInt(int(total.TotalTokens))
+		if !total.TokenUsageUnavailable {
+			tokens = compactInt(int(total.TotalTokens))
+		}
 		calls = compactInt(total.ToolCalls)
 	}
 	tokenNote, callNote := "Tokens incl. cache", "Tool calls"
@@ -172,7 +174,11 @@ func (m runDetailModel) summaryLines(width int) []string {
 	}
 	activity := plural(total.Executions, "execution")
 	if len(total.TokensByRuntime) > 0 {
-		activity += "  ·  " + elapsedCell(&rep.Time.ToolTimeMs) + " in tools"
+		var toolTime *int64
+		if !total.ToolTimeUnavailable && total.ToolTimeCoverage.Untimed == 0 {
+			toolTime = &rep.Time.ToolTimeMs
+		}
+		activity += "  ·  " + elapsedCell(toolTime) + " in tools"
 	}
 	if len(rep.Metrics.Parent.TokensByRuntime) > 0 {
 		activity += "  ·  " + plural(total.HumanInteractions, "human interaction")

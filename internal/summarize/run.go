@@ -20,6 +20,7 @@ import (
 
 	"loom/internal/parse/claudeparse"
 	"loom/internal/parse/codexparse"
+	"loom/internal/parse/cursorparse"
 	"loom/internal/parse/summary"
 	"loom/internal/summaries"
 )
@@ -131,6 +132,8 @@ func sweep(ctx context.Context, st *summaries.Store, receivedDir string,
 		filepath.Join(receivedDir, "claude-code"), force, verbose, &r)
 	walkAgent(ctx, st, summary.AgentCodex,
 		filepath.Join(receivedDir, "codex-cli"), force, verbose, &r)
+	walkAgent(ctx, st, summary.AgentCursor,
+		filepath.Join(receivedDir, "cursor-cli"), force, verbose, &r)
 	walkExecutions(ctx, st, filepath.Join(receivedDir, summaries.ExecutionsAgent), force, &r)
 	r.duration = time.Since(start)
 	return r
@@ -205,7 +208,7 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		// folded into their parent's summary, so walking them here would
 		// file each one a second time as a standalone session.
 		if d.IsDir() {
-			if d.Name() == "subagents" {
+			if agent == summary.AgentClaude && d.Name() == "subagents" {
 				return fs.SkipDir
 			}
 			return nil
@@ -219,7 +222,7 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 			r.errored++
 			return nil
 		}
-		project := filepath.Base(filepath.Dir(path))
+		project := projectSlug(root, path)
 		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		cwdRaw, gitRemote := readMetaSidecar(path)
 		// A background dispatch outlives the parent's last record, so a
@@ -272,6 +275,8 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		sum, err = claudeparse.ParseWithSubagents(f, collectSubagents(source.Path))
 	case summary.AgentCodex:
 		sum, err = codexparse.Parse(f)
+	case summary.AgentCursor:
+		sum, err = cursorparse.Parse(f)
 	}
 	if err != nil {
 		return err
@@ -288,6 +293,20 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 			len(sum.Errors), len(sum.Subagents), len(sum.Unknown))
 	}
 	return nil
+}
+
+// projectSlug returns the first path component below an agent root. Cursor
+// children live below <project>/<parent>/subagents/, so filepath.Dir(path)
+// would otherwise mislabel every child as project "subagents".
+func projectSlug(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.Base(filepath.Dir(path))
+	}
+	if i := strings.IndexRune(rel, filepath.Separator); i >= 0 {
+		return rel[:i]
+	}
+	return filepath.Base(filepath.Dir(path))
 }
 
 func report(r sweepResult, dbPath string) {

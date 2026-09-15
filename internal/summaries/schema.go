@@ -4,6 +4,10 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 11: sessions gains usage_known so producers that expose no
+// billing counters remain distinct from sessions that measured zero tokens;
+// tool_calls gains child identity, duration and explicit resume associations.
+//
 // schemaVersion 10: adds friction — one row per harness-friction event a
 // session's transcript or its dispatched subagent transcripts carried: a hook
 // ask or deny, a permission the user or the auto-mode classifier refused, a
@@ -65,7 +69,7 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 10
+const schemaVersion = 11
 
 // commitsSchemaVersion is the version that introduced the commits table.
 // Deliberately pinned rather than tracked to schemaVersion: readers that need
@@ -108,12 +112,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     input_tokens      INTEGER,
     output_tokens     INTEGER,
     cache_read_tokens INTEGER,
+    usage_known      INTEGER NOT NULL,
     source_path       TEXT,
     source_size       INTEGER,
     source_mtime      TEXT,
     summarized_at     TEXT,
     parent_session_id TEXT,
     spawn_depth       INTEGER,
+    parent_tool_call_id TEXT,
     PRIMARY KEY (agent, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
@@ -161,6 +167,9 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     exit_code      INTEGER,
     is_error       INTEGER,
     result_summary TEXT,
+    child_session_id TEXT,
+    child_duration_ms INTEGER,
+    child_resume_id TEXT,
     PRIMARY KEY (agent, session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_kind ON tool_calls(tool_kind);

@@ -48,7 +48,7 @@ const (
 )
 
 var (
-	runtimes       = map[string]bool{"claude-code": true, "codex-cli": true, "weft": true}
+	runtimes       = map[string]bool{"claude-code": true, "codex-cli": true, "cursor-cli": true, "weft": true}
 	outcomes       = map[string]bool{"completed": true, "failed": true, "stopped": true}
 	executionKinds = map[string]bool{"root": true, "subagent": true, "lens": true, "stage": true, "command": true}
 )
