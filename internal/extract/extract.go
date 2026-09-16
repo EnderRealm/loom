@@ -266,6 +266,10 @@ func belowMinTurns(s summaries.SessionSource, minTurns int) bool {
 	return s.TurnCount < minTurns
 }
 
+func supportedAgent(agent string) bool {
+	return agent == string(summary.AgentClaude) || agent == string(summary.AgentCursor)
+}
+
 func sweep(ctx context.Context, opts Options) sweepResult {
 	r := sweepResult{pendingScopes: map[string]int{}, unresolvedReasons: map[string]int{}}
 
@@ -298,13 +302,9 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 		if st.visited(s.Agent, s.SessionID) {
 			continue
 		}
-		if s.Agent != string(summary.AgentClaude) {
-			// extractors/preprocess.py dispatches on Claude Code's top-level
-			// record types; a codex rollout's session_meta/response_item
-			// envelope preprocesses to an empty transcript, so extracting one
-			// would spend a full round trip on nothing.
+		if !supportedAgent(s.Agent) {
 			r.skipped++
-			markSkip(st, s, fmt.Sprintf("unsupported agent %q (preprocess.py reads claude-code jsonl only)", s.Agent))
+			markSkip(st, s, fmt.Sprintf("unsupported agent %q (supported: claude-code, cursor-cli)", s.Agent))
 			continue
 		}
 		if belowMinTurns(s, opts.MinTurns) {

@@ -59,7 +59,7 @@ because a dispatch's prompt and its result already appear in the parent
 session's own transcript. Nothing about the trust model changes for them.
 
 **Leg (a) — the Go summarizer.** `internal/parse/claudeparse` and
-`internal/parse/codexparse` fold `~/.loom/received/` into `~/.loom/summaries.db`
+`internal/parse/codexparse` and `internal/parse/cursorparse` fold `~/.loom/received/` into `~/.loom/summaries.db`
 on the receiver host, whose turns hold verbatim user and assistant text and
 whose tool calls hold an 800-char result summary. Nothing on this path is
 redacted. It does not need to be: the DB's readers are all local to that host
@@ -70,7 +70,8 @@ this artifact goes no further. `summaries.db` is not shipped anywhere and never
 handed to a model.
 
 **Leg (b) — the extractor.** `extract.py` reads either a raw jsonl or a markdown
-summary, runs `preprocess()` over the raw case, optionally passes the result
+summary, runs `preprocess()` over the raw case (Cursor journals first pass
+through the local Go parser bridge, which returns full unredacted records), optionally passes the result
 through the summarizer LLM, and feeds it to the truth or decision extractor
 prompt. The candidates land in `_candidates/` in the knowledge store — its own
 git repo — where the TUI's review screen promotes or rejects them. A promoted

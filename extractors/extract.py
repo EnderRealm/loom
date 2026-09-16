@@ -41,6 +41,7 @@ sys.path.insert(0, str(LOOM_ROOT / "extractors"))
 from knowledge_store import (StoreWriteError, append_change, apply_changes,
                              knowledge_root, write_change)
 from preprocess import preprocess as preprocess_jsonl
+from transcript import load_transcript
 from redact import log_redaction, redact, redact_with_report
 from resolve_project import (NAME_PATTERN, describe as describe_project,
                              resolve_project)
@@ -87,7 +88,7 @@ INPUT_GUIDANCE_SUMMARY = """You will receive a session artifact. Most often it i
 
 `### Outcome` holds the session's self-assessment of what landed vs what didn't."""
 
-INPUT_GUIDANCE_RAW = """You will receive a **pre-processed conversation transcript** from a Claude Code session. The format uses labeled blocks:
+INPUT_GUIDANCE_RAW = """You will receive a **pre-processed conversation transcript** from a supported agent session. The format uses labeled blocks:
 
 - **ASSISTANT:** — Claude's visible analysis, recommendations, and discoveries. Look here for architectural claims, root cause analyses, mechanism descriptions, and corrections ("I had that wrong", "this means...").
 - **USER:** — Human input. Short messages are decisions/corrections ("no", "Let's do B", "that's wrong"). Longer blocks may be skill prompts or injected context — skim those for structure but don't extract candidates from boilerplate.
@@ -227,7 +228,7 @@ def _extract_session_id(input_path: Path) -> str:
     try:
         for line in input_path.read_text().splitlines()[:20]:
             if line.startswith("session_id:"):
-                return line.split(":", 1)[1].strip()
+                return line.split(":", 1)[1].strip().strip('"\'')
     except Exception:
         pass
 
@@ -261,7 +262,7 @@ def build_prompt(template: str, refs: list[dict], input_text: str, today: str, i
     # they are redacted, so a marker in a promoted truth cannot close the span.
     ref_block = fence_input(EXAMPLE_DELIMITER.join(r["raw"] for r in refs))
     guidance = INPUT_GUIDANCE_RAW if input_format == "raw" else INPUT_GUIDANCE_SUMMARY
-    session_value = session_id or "<session uuid from input frontmatter>"
+    session_value = redact(session_id) if session_id else "<session uuid from input frontmatter>"
     return (
         template
         .replace("{INPUT_GUIDANCE}", guidance)
@@ -458,89 +459,80 @@ SCOPE_MISMATCH_ENTRY_RE = re.compile(r"^[ \t]*-?[ \t]*[\"']?scope_mismatch[\"']?
 MAX_SOURCE_TICKETS = 32
 
 
-def _ticket_ids_from_jsonl(path: Path) -> list[str]:
+def _ticket_ids_from_jsonl(path: Path, records: list[dict] | None = None) -> list[str]:
     """Scan a raw session jsonl for ticket ids in git commit confirmations."""
     ids: list[str] = []
     seen: set[str] = set()
     rejected: set[str] = set()
     bash_tool_use_ids: set[str] = set()
-    # Session jsonl is UTF-8 by construction; name it rather than inheriting
-    # the locale's encoding, so `replace` only ever absorbs genuine corruption.
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            if not raw.strip():
+    if records is None:
+        records = load_transcript(path)["records"]
+    for record in records:
+        rtype = record.get("type", "")
+        if rtype not in ("assistant", "user"):
+            continue
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
                 continue
-            try:
-                record = json.loads(raw)
-            except json.JSONDecodeError:
+            btype = block.get("type", "")
+            if rtype == "assistant" and btype == "tool_use":
+                if block.get("name") == "Bash" and isinstance(block.get("id"), str):
+                    bash_tool_use_ids.add(block["id"])
                 continue
-            if not isinstance(record, dict):
+            # Only Bash results carry git output; a commit-shaped line in
+            # any other tool's result is quoted text, not a commit.
+            if rtype != "user" or btype != "tool_result":
                 continue
-            rtype = record.get("type", "")
-            if rtype not in ("assistant", "user"):
+            if block.get("tool_use_id") not in bash_tool_use_ids:
                 continue
-            message = record.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
+            text = block.get("content", "")
+            # Same part shapes preprocess.py's _process_user normalizes:
+            # text blocks and bare strings.
+            if isinstance(text, list):
+                parts = []
+                for part in text:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        parts.append(part.get("text", ""))
+                    elif isinstance(part, str):
+                        parts.append(part)
+                text = "\n".join(parts)
+            if not isinstance(text, str):
                 continue
-            for block in content:
-                if not isinstance(block, dict):
+            for line in text.split("\n"):
+                commit = COMMIT_LINE_RE.match(line.strip())
+                if not commit:
                     continue
-                btype = block.get("type", "")
-                if rtype == "assistant" and btype == "tool_use":
-                    if block.get("name") == "Bash" and isinstance(block.get("id"), str):
-                        bash_tool_use_ids.add(block["id"])
+                marker = COMMIT_MARKER_RE.match(commit.group(3))
+                if not marker:
                     continue
-                # Only Bash results carry git output; a commit-shaped line in
-                # any other tool's result is quoted text, not a commit.
-                if rtype != "user" or btype != "tool_result":
+                ticket_id = marker.group(1)
+                if not TICKET_ID_RE.match(ticket_id):
+                    # Say so rather than dropping it silently: otherwise a
+                    # session whose markers were all rejected logs exactly
+                    # like one that committed nothing, and the transcript
+                    # is the only evidence on an unattended path.
+                    if ticket_id not in rejected:
+                        rejected.add(ticket_id)
+                        print(f"[extract] warning: ignoring malformed ticket "
+                              f"marker {ticket_id[:80]!r}", file=sys.stderr)
                     continue
-                if block.get("tool_use_id") not in bash_tool_use_ids:
+                if ticket_id in seen:
                     continue
-                text = block.get("content", "")
-                # Same part shapes preprocess.py's _process_user normalizes:
-                # text blocks and bare strings.
-                if isinstance(text, list):
-                    parts = []
-                    for part in text:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            parts.append(part.get("text", ""))
-                        elif isinstance(part, str):
-                            parts.append(part)
-                    text = "\n".join(parts)
-                if not isinstance(text, str):
-                    continue
-                for line in text.split("\n"):
-                    commit = COMMIT_LINE_RE.match(line.strip())
-                    if not commit:
-                        continue
-                    marker = COMMIT_MARKER_RE.match(commit.group(3))
-                    if not marker:
-                        continue
-                    ticket_id = marker.group(1)
-                    if not TICKET_ID_RE.match(ticket_id):
-                        # Say so rather than dropping it silently: otherwise a
-                        # session whose markers were all rejected logs exactly
-                        # like one that committed nothing, and the transcript
-                        # is the only evidence on an unattended path.
-                        if ticket_id not in rejected:
-                            rejected.add(ticket_id)
-                            print(f"[extract] warning: ignoring malformed ticket "
-                                  f"marker {ticket_id[:80]!r}", file=sys.stderr)
-                        continue
-                    if ticket_id in seen:
-                        continue
-                    seen.add(ticket_id)
-                    ids.append(ticket_id)
-                    if len(ids) >= MAX_SOURCE_TICKETS:
-                        print(f"[extract] warning: {path} hit the "
-                              f"{MAX_SOURCE_TICKETS}-ticket cap — later ids ignored",
-                              file=sys.stderr)
-                        return ids
+                seen.add(ticket_id)
+                ids.append(ticket_id)
+                if len(ids) >= MAX_SOURCE_TICKETS:
+                    print(f"[extract] warning: {path} hit the "
+                          f"{MAX_SOURCE_TICKETS}-ticket cap — later ids ignored",
+                          file=sys.stderr)
+                    return ids
     return ids
 
 
-def extract_ticket_ids(input_path: Path) -> list[str]:
+def extract_ticket_ids(input_path: Path, records: list[dict] | None = None) -> list[str]:
     """Ticket ids cited by the commits an input session landed, first seen first.
 
     Only raw jsonl carries commit data, so the caller gates on the resolved
@@ -554,7 +546,7 @@ def extract_ticket_ids(input_path: Path) -> list[str]:
     degrades to no ticket ids.
     """
     try:
-        return _ticket_ids_from_jsonl(input_path)
+        return _ticket_ids_from_jsonl(input_path, records)
     except Exception as e:
         print(f"[extract] warning: could not derive ticket ids from {input_path}: {e}",
               file=sys.stderr)
@@ -1020,6 +1012,55 @@ PRESETS = {
 }
 
 
+def summary_with_provenance(text: str, session_id: str, scope: str,
+                            source_runtime: str, ticket_ids: list[str]) -> str:
+    # Replace the legacy model-authored metadata section: a second, invented
+    # session id would contradict the authoritative source frontmatter.
+    text = re.sub(r"(?ms)^### Metadata[^\n]*\n.*?(?=^### |\Z)", "", text)
+    provenance = {"session_id": session_id, "project": scope,
+                  "source_runtime": source_runtime, "source_tickets": ticket_ids}
+    metadata = "\n".join(f"{key}: {json.dumps(value)}" for key, value in provenance.items())
+    metadata, counts, chars = redact_with_report(metadata)
+    log_redaction("summary provenance", counts, chars)
+    return "---\n" + metadata + "\n---\n\n" + text
+
+
+def summary_provenance(path: Path) -> tuple[str | None, list[str]]:
+    """Read optional JSON-valued provenance written by summary_with_provenance.
+
+    Legacy summaries have neither field. Hand-edited metadata has the same
+    validation and collection bound as ticket citations read from raw input.
+    """
+    match = re.match(r"^---\n(.*?)\n---(?:\n|$)", path.read_text(), re.DOTALL)
+    fields = {}
+    if match:
+        for line in match.group(1).splitlines():
+            key, _, value = line.partition(":")
+            if key not in ("source_runtime", "source_tickets"):
+                continue
+            try:
+                fields[key] = json.loads(value)
+            except json.JSONDecodeError:
+                print(f"[extract] warning: ignoring malformed summary {key}", file=sys.stderr)
+    runtime = fields.get("source_runtime")
+    if runtime not in ("claude-code", "cursor-cli"):
+        runtime = None
+    tickets = fields.get("source_tickets", [])
+    if not isinstance(tickets, list):
+        print("[extract] warning: ignoring malformed summary source_tickets", file=sys.stderr)
+        return runtime, []
+    valid = []
+    for ticket in tickets:
+        if not isinstance(ticket, str) or not TICKET_ID_RE.match(ticket) or redact(ticket) != ticket:
+            print("[extract] warning: ignoring invalid summary ticket citation", file=sys.stderr)
+            continue
+        if ticket not in valid:
+            valid.append(ticket)
+        if len(valid) >= MAX_SOURCE_TICKETS:
+            break
+    return runtime, valid
+
+
 def main():
     p = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
@@ -1083,10 +1124,13 @@ def main():
     if not input_path.exists():
         sys.exit(f"input not found: {input_path}")
 
-    # Authoritative session id derived from the input file (filename for raw
-    # jsonl, frontmatter for summaries). Model-emitted ids are overridden with
-    # this value at emission.
-    session_id = _extract_session_id(input_path)
+    input_format = args.input_format
+    if input_format == "auto":
+        input_format = "raw" if str(input_path).endswith(".jsonl") else "summary"
+    transcript = load_transcript(input_path) if input_format == "raw" else None
+    session_id = transcript["session_id"] if transcript else _extract_session_id(input_path)
+    source_runtime, ticket_ids = ((transcript["source_runtime"], []) if transcript
+                                  else summary_provenance(input_path))
 
     # Resolve type-specific config (prompt, directories, sentinel)
     tcfg = TYPE_CONFIG[args.extract_type]
@@ -1134,27 +1178,16 @@ def main():
     # For prompt building, always use training refs as few-shot examples.
     refs = training_refs
 
-    # Determine input format
-    input_format = args.input_format
-    if input_format == "auto":
-        input_format = "raw" if str(input_path).endswith(".jsonl") else "summary"
-
-    # Tickets the session's commits cited, derived from the raw jsonl. Emitted
-    # into every candidate's sources block as a citation back to the intent.
-    # Must be derived here: only raw input carries commit data, and the
-    # --summarize block below reassigns input_format to "summary" once it has
-    # replaced the transcript with its summary.
-    ticket_ids: list[str] = []
+    # Raw input derives citations from commits before preprocessing truncates
+    # their evidence. Retained summaries carry the previously derived ids.
     if input_format == "raw":
-        ticket_ids = extract_ticket_ids(input_path)
-        print(f"[extract] source tickets: {', '.join(ticket_ids) if ticket_ids else 'none found'}", file=sys.stderr)
-    else:
-        print("[extract] source tickets: n/a (summary input carries no commits)", file=sys.stderr)
+        ticket_ids = extract_ticket_ids(input_path, transcript["records"])
+    print(f"[extract] source tickets: {', '.join(ticket_ids) if ticket_ids else 'none found'}", file=sys.stderr)
 
     # Pre-process raw jsonl into a conversation thread
     if input_format == "raw":
         print(f"[extract] pre-processing raw jsonl...", file=sys.stderr)
-        input_text = preprocess_jsonl(str(input_path))
+        input_text = preprocess_jsonl(str(input_path), records=transcript["records"])
         print(f"[extract] preprocessed: {len(input_text):,} chars", file=sys.stderr)
     else:
         # Policy enforcement point: summary input bypasses preprocess(), so the
@@ -1178,6 +1211,9 @@ def main():
         summary_text = call_llm(sum_prompt, sum_provider, sum_model, sum_reasoning)
         sum_secs = time.time() - sum_start
         print(f"[extract] summary: {len(summary_text):,} chars in {sum_secs:.1f}s", file=sys.stderr)
+
+        summary_text = summary_with_provenance(summary_text, session_id, args.scope,
+                                               source_runtime, ticket_ids)
 
         # Save intermediate summary if raw-out path is set
         raw_path = args.raw_out
@@ -1300,6 +1336,9 @@ def main():
         if args.json_out:
             Path(args.json_out).write_text(json.dumps({
                 "input": str(input_path),
+                "session_id": session_id,
+                "source_runtime": source_runtime,
+                "source_tickets": ticket_ids,
                 "scope": args.scope,
                 "provider": args.provider,
                 "model": args.model,
@@ -1343,6 +1382,9 @@ def main():
     if args.json_out:
         Path(args.json_out).write_text(json.dumps({
             "input": str(input_path),
+            "session_id": session_id,
+            "source_runtime": source_runtime,
+            "source_tickets": ticket_ids,
             "scope": args.scope,
             "provider": args.provider,
             "model": args.model,

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -78,35 +79,42 @@ type jsonPart struct {
 
 type callEvidence struct {
 	name, keyArg, result          string
+	args                          any
 	isError                       bool
 	line                          int
 	hasArgs, hasResult, ambiguous bool
 }
 
 type state struct {
-	s         *summary.SessionSummary
-	blobs     map[string]entry
-	metaRaw   []byte
-	fileRaw   []byte
-	unknown   map[string]*summary.UnknownRecord
-	calls     map[string]callEvidence
-	models    map[string][]string
-	seenTurns map[string]bool
-	seenSteps map[string]bool
+	s          *summary.SessionSummary
+	transcript *Transcript
+	blobs      map[string]entry
+	metaRaw    []byte
+	fileRaw    []byte
+	unknown    map[string]*summary.UnknownRecord
+	calls      map[string]callEvidence
+	models     map[string][]string
+	seenTurns  map[string]bool
+	seenSteps  map[string]bool
 }
 
 // Parse consumes a cursor-store-v1 journal. The journal is replayed before
 // references are followed, so repeated folding is idempotent and sees the
 // same latest SQLite state the transport captured.
 func Parse(r io.Reader) (*summary.SessionSummary, error) {
+	return parse(r, nil)
+}
+
+func parse(r io.Reader, transcript *Transcript) (*summary.SessionSummary, error) {
 	st := &state{
-		s:         &summary.SessionSummary{Agent: summary.AgentCursor, ModelProvider: "cursor"},
-		blobs:     map[string]entry{},
-		unknown:   map[string]*summary.UnknownRecord{},
-		calls:     map[string]callEvidence{},
-		models:    map[string][]string{},
-		seenTurns: map[string]bool{},
-		seenSteps: map[string]bool{},
+		transcript: transcript,
+		s:          &summary.SessionSummary{Agent: summary.AgentCursor, ModelProvider: "cursor"},
+		blobs:      map[string]entry{},
+		unknown:    map[string]*summary.UnknownRecord{},
+		calls:      map[string]callEvidence{},
+		models:     map[string][]string{},
+		seenTurns:  map[string]bool{},
+		seenSteps:  map[string]bool{},
 	}
 	if err := st.replay(r); err != nil {
 		return nil, err
@@ -336,10 +344,20 @@ func (st *state) readJSONEvidence(root []wireField) {
 					}
 					ce := st.calls[part.ToolCallID]
 					arg := keyArg(part.ToolName, part.Args)
-					if ce.hasArgs && (ce.name != part.ToolName || ce.keyArg != arg) {
+					var args any
+					if len(part.Args) > 0 {
+						decoder := json.NewDecoder(bytes.NewReader(part.Args))
+						decoder.UseNumber()
+						if err := decoder.Decode(&args); err != nil {
+							st.addUnknown("message", "invalid_tool_arguments", st.s.StartTime)
+							continue
+						}
+					}
+					if ce.hasArgs && (ce.name != part.ToolName || !reflect.DeepEqual(ce.args, args)) {
 						ce.ambiguous = true
 					}
 					ce.name, ce.keyArg, ce.hasArgs = part.ToolName, arg, true
+					ce.args = args
 					st.calls[part.ToolCallID] = ce
 				case "tool-result":
 					if msg.Role != "tool" || part.ToolCallID == "" {
@@ -525,6 +543,7 @@ func (st *state) foldUser(t *summary.Turn, id string) {
 	if t.StartedAt.IsZero() {
 		t.StartedAt = millis(int64(firstVarint(f, 26)))
 	}
+	st.appendRecord("user", t.UserMessage)
 	st.recordLenses(t.UserMessage, summary.OriginUser, "", e.line, t.Idx, t.StartedAt)
 }
 
@@ -554,6 +573,7 @@ func (st *state) foldStep(t *summary.Turn, id string) {
 		}
 		st.checkFields("assistant_message", m, map[int]int{1: 2, 2: 0, 3: 0})
 		appendText(&t.AssistantText, firstString(m, 1))
+		st.appendRecord("assistant", []map[string]any{{"type": "text", "text": firstString(m, 1)}})
 		end := millis(int64(firstVarint(m, 3)))
 		if end.IsZero() {
 			end = millis(int64(firstVarint(m, 2)))
@@ -638,6 +658,7 @@ func (st *state) foldTool(t *summary.Turn, raw []byte) {
 	if task := fieldBytes(f, 19); len(task) > 0 {
 		st.foldTaskResult(&call, task[0])
 	}
+	st.appendTool(call, ce)
 	st.s.ToolCalls = append(st.s.ToolCalls, call)
 	if ce.isError {
 		st.s.Errors = append(st.s.Errors, summary.ErrorEvent{TurnIdx: t.Idx, Source: "tool_error", Message: truncate(ce.result), Time: end})

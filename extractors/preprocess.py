@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-process a Claude Code session JSONL into a filtered conversation thread
+"""Pre-process a Claude Code or Cursor session JSONL into a filtered conversation thread
 suitable for truth extraction.
 
 Reads a raw session transcript (*.jsonl) and emits a text thread that preserves
@@ -28,7 +28,6 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -36,28 +35,25 @@ from pathlib import Path
 from redact import (drop_partial_marker, log_redaction,
                     redact_to_sentinels, reveal)
 
+from transcript import load_transcript
+
 DEFAULT_MAX_RESULT_CHARS = 500
 
 
-def preprocess(jsonl_path: str, max_result_chars: int = DEFAULT_MAX_RESULT_CHARS) -> str:
+def preprocess(jsonl_path: str, max_result_chars: int = DEFAULT_MAX_RESULT_CHARS,
+               records: list[dict] | None = None) -> str:
     """Read a session jsonl and return a filtered conversation thread as text."""
     path = Path(jsonl_path)
     if not path.exists():
         raise FileNotFoundError(f"not found: {path}")
 
-    lines = path.read_text().splitlines()
+    if records is None:
+        records = load_transcript(path)["records"]
     blocks = []
     counts = Counter()
     chars = 0
 
-    for line_no, raw in enumerate(lines, 1):
-        if not raw.strip():
-            continue
-        try:
-            record = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-
+    for record in records:
         rtype = record.get("type", "")
 
         if rtype == "assistant":
@@ -220,13 +216,15 @@ def _summarize_tool_input(name: str, inp: dict) -> tuple[str, Counter, int]:
     """
     counts = Counter()
     chars = 0
+    if not isinstance(inp, dict):
+        return _short_val(inp)
     if name in ("Bash",):
         cmd, counts, chars = redact_to_sentinels(inp.get("command", ""))
         if len(cmd) > 120:
             cmd = drop_partial_marker(cmd[:120]) + "..."
         return cmd, counts, chars
     elif name in ("Read",):
-        return inp.get("file_path", "?"), counts, chars
+        return inp.get("file_path", inp.get("path", "?")), counts, chars
     elif name in ("Grep",):
         pattern = inp.get("pattern", "?")
         path = inp.get("path", ".")
@@ -234,9 +232,9 @@ def _summarize_tool_input(name: str, inp: dict) -> tuple[str, Counter, int]:
     elif name in ("Glob",):
         return inp.get("pattern", "?"), counts, chars
     elif name in ("Edit",):
-        return inp.get("file_path", "?"), counts, chars
+        return inp.get("file_path", inp.get("path", "?")), counts, chars
     elif name in ("Write",):
-        return inp.get("file_path", "?"), counts, chars
+        return inp.get("file_path", inp.get("path", "?")), counts, chars
     elif name in ("Agent",):
         desc = inp.get("description", "?")
         return desc, counts, chars

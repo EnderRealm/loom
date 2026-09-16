@@ -112,3 +112,41 @@ multiple invocations and long review responses; their provenance is recorded
 under `internal/parse/cursorparse/testdata/README.md`. Integration tests run
 the received-tree sweep through storage, execution import, reports and TUI
 readers, including repeat imports and a full rebuild.
+
+## Knowledge extraction
+
+The sweep, explicit backfill and ticket retrospect accept `cursor-cli` sources.
+The watermark, idle/minimum-turn checks, scope resolution and visit ledger keep
+their existing meanings. Enabling Cursor does not reset the ledger or spend on
+historical sessions automatically. Retrospect deliberately ignores the ledger;
+its repeated runs produce candidate siblings just as Claude runs do. Promotion
+remains a human action.
+
+`extractors/preprocess.py` detects `cursor-store-v1` and invokes the local
+`loom extract cursor-input <journal>` parser bridge. `LOOM_BIN` selects that
+binary, otherwise it is found on PATH; the Go extraction runner pins it to its
+own executable. Upgrade the binary along with the Python scripts. An old or
+missing binary fails preprocessing before a model is called.
+
+The bridge reuses the summary parser's journal replay and ordered conversation
+graph, including compaction archives, and emits full conversation records only
+to the local Python caller. This output is **unredacted**. It must not be sent
+to a model or shared store directly. The existing Python preprocessor redacts
+arguments and results before truncation, keeps error results whole, and applies
+the whole-thread redaction pass. Missing or conflicting evidence is reported on
+stderr as Cursor parser diagnostics; a journal without an identifiable
+conversation fails. No protobuf decoder or Cursor package is loaded by Python.
+
+Direct extraction and `--summarize` use the same decoded records. Source session
+identity comes from the journal, and ticket citations come from matched shell
+commit confirmations before result truncation. Scope still comes from the
+existing project resolver or explicit `--scope`, never from the source runtime.
+The configured `--provider` and `--model` are unchanged by Cursor input.
+
+With `--json-out`, retained result JSON names `session_id`, `source_runtime`,
+`source_tickets`, input and scope. The intermediate `.summary.txt` has an
+authoritative provenance frontmatter block; candidate sources are overridden
+with the same session and ticket identities. Keep these host-local artifacts
+with the extraction stderr when collecting end-to-end evidence. The unattended
+runner still removes its temporary results after recording the outcome in
+`extract.state` and `extractor.log`.

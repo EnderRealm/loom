@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"loom/internal/parse/summary"
 	"loom/internal/summaries"
 )
 
@@ -200,9 +199,9 @@ func planBackfill(st *state, sessions []summaries.SessionSource, opts Options) b
 			excluded[reasonVisited]++
 			continue
 		}
-		if s.Agent != string(summary.AgentClaude) {
+		if !supportedAgent(s.Agent) {
 			excluded[reasonAgent]++
-			logSkip(s, fmt.Sprintf("unsupported agent %q (preprocess.py reads claude-code jsonl only)", s.Agent))
+			logSkip(s, fmt.Sprintf("unsupported agent %q (supported: claude-code, cursor-cli)", s.Agent))
 			continue
 		}
 		if belowMinTurns(s, opts.MinTurns) {

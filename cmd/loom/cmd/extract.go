@@ -66,6 +66,7 @@ func newExtractCmd() *cobra.Command {
 	// the LaunchAgent's threshold is retunable without a rebuilt plist.
 	f.Int("min-turns", extract.DefaultMinTurns(), "skip sessions with fewer turns than this (0 disables the threshold)")
 
+	cmd.AddCommand(newCursorInputCmd())
 	return cmd
 }
 

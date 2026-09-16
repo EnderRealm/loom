@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"loom/internal/knowledge/store"
-	"loom/internal/parse/summary"
 	"loom/internal/summaries"
 )
 
@@ -106,11 +105,9 @@ func Retrospect(opts RetrospectOptions) error {
 		if ctx.Err() != nil {
 			break
 		}
-		if s.Agent != string(summary.AgentClaude) {
-			// extractors/preprocess.py reads Claude Code's record types only; a
-			// codex rollout preprocesses to an empty transcript.
+		if !supportedAgent(s.Agent) {
 			skipped++
-			logSkip(s, fmt.Sprintf("unsupported agent %q (preprocess.py reads claude-code jsonl only)", s.Agent))
+			logSkip(s, fmt.Sprintf("unsupported agent %q (supported: claude-code, cursor-cli)", s.Agent))
 			continue
 		}
 		if _, err := os.Stat(s.SourcePath); err != nil {
