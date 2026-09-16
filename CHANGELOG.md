@@ -6,8 +6,31 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-09-15 — Cursor sessions and run reporting
+
+### Upgrade
+
+- This release requires `summaries.db` schema **11**. Stop the summarizer
+  and extractor, upgrade the binary, and run `loom summarize --rebuild`
+  before restarting those services. The rebuild recreates the disposable
+  database from received transcripts; it does not change the knowledge
+  store. Older databases are refused until rebuilt.
+- Upgrade the checkout providing `extractors/` to this release alongside
+  the binary. Python extractor scripts are not included in release
+  archives; Cursor preprocessing requires the new local parser bridge.
+- Codex model rates are not added in this release. Cursor journals expose
+  context-window occupancy rather than billing usage, so their token costs
+  remain unavailable.
+
 ### Added
 
+- Lossless Cursor CLI capture and shipping preserve parent and child
+  session journals, changed records and deletions for replay by the
+  receiver and summarizer.
+- Cursor knowledge extraction is available through the sweep, backfill
+  and ticket retrospect. It shares the Go session parser and existing
+  redaction, scope and visit-ledger rules, and retains source session,
+  runtime and ticket provenance in extraction results and candidates.
 - Cursor journals fold into session summaries, work runs and the TUI,
   including child dispatch identities and complete lens responses. Schema
   v11 records usage coverage and parent tool-call IDs; rebuild summaries
@@ -41,8 +64,18 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   no threshold, no extraction trigger, no model call anywhere in the path.
   A v9 database reads as outdated until `loom summarize --rebuild`.
 
+### Changed
+
+- The TUI run detail puts outcomes, key metrics and items needing
+  attention ahead of execution and review detail.
+
 ### Fixed
 
+- `loom install` fails when launchd accepts a job but never spawns it,
+  and the updater reports failed agent restarts.
+- Lens reporting retains Codex verdicts written to files, checks response
+  lens identity against its dispatch, and derives router evidence from
+  the joined attempt records.
 - `run-report` places a Claude run's lens attempts in their rounds again.
   Round attribution read the `dispatching (<ticket> round N): …` line out
   of the turn's assistant text, and since Claude Code 2.1.268 the
