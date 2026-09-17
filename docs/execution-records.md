@@ -189,3 +189,39 @@ fi
 Values with a `"` or a backslash in them would need escaping; ids and ticket
 names carry neither, and a record loom cannot parse is skipped with a
 diagnostic rather than fatal.
+
+### Registry destination and hostname changes
+
+The shipper keeps the registry's first project in
+`transport/executions-project`. A hostname change does not move that stream:
+source and ship cursors continue to describe the same staging and receiver file.
+An upgrade adopts a single existing staging destination. Multiple destinations
+or a staging/source-offset mismatch stop registry capture and shipping with a
+reconciliation error. Other transcript streams continue independently.
+
+`loom shipper health` reads current staging, flags duplicate cursor keys and
+out-of-range offsets as pending, and reports captured execution bytes beyond the
+acknowledged ship offset.
+
+For an existing split, preserve access to the current receiver files and run:
+
+```
+loom shipper reconcile-executions <original-project> <received-root>
+loom shipper once
+```
+
+Run with the fixed shipper deployed; stop an older daemon before repairing.
+`received-root` is the receiver's local storage directory (or a current complete
+snapshot containing every affected project), not a single transcript. The command
+holds the shipper lock, requires receiver bytes and its `.offset` to match the
+acknowledged source prefix, verifies every staged fragment against the captured
+source, and refuses an alternate destination that already received records.
+It saves source, receiver, offsets, and staging bytes under
+`transport/executions-reconcile-*` before restoring the canonical staging file
+and removing the preserved fragments from active staging. Source, receiver and
+both cursors stay unchanged; normal shipping delivers the missing suffix.
+
+A partial repair fails closed while staging remains split; rerunning the same
+command completes it. Keep its printed backup directory until the receiver and
+run report have been checked. A mismatched receiver, changed source, or already
+populated alternate destination requires investigation, not a cursor reset.

@@ -255,11 +255,15 @@ func Daemon(ctx context.Context) error {
 // ---------- capture pass ----------
 
 func capturePass(counts *tickCounts) {
+	captureAdapters(counts, source.Adapters())
+}
+
+func captureAdapters(counts *tickCounts, adapters []source.Adapter) {
 	// One git-remote resolution per cwd per tick. Saves a fork+exec per
 	// session when many sessions share the same repo.
 	gitCache := map[string]string{}
 
-	for _, ad := range source.Adapters() {
+	for _, ad := range adapters {
 		agent := ad.Agent()
 		sessions, err := ad.List()
 		if err != nil {
@@ -267,6 +271,15 @@ func capturePass(counts *tickCounts) {
 			counts.captureFailed++
 		}
 		for _, s := range sessions {
+			if agent == source.ExecutionsAgent {
+				project, err := registryDestination(s.Project)
+				if err != nil {
+					log.Printf("fail stage=capture agent=%s err=%q", agent, err)
+					counts.captureFailed++
+					continue
+				}
+				s.Project = project
+			}
 			if snapshot, ok := ad.(source.SnapshotAdapter); ok {
 				captureSnapshot(snapshot, s, gitCache, counts)
 				continue
@@ -380,6 +393,13 @@ func shipPass(cfg *Config, counts *tickCounts) {
 			log.Printf("fail stage=ship agent=%s class=io err=%q", agent, err)
 			counts.addFail(classIO)
 			continue
+		}
+		if agent == source.ExecutionsAgent && len(entries) > 0 {
+			if _, err := registryDestination(entries[0].Project); err != nil {
+				log.Printf("fail stage=ship agent=%s err=%q", agent, err)
+				counts.addFail(classIO)
+				continue
+			}
 		}
 		for _, e := range entries {
 			shipOne(cfg, e, counts)
@@ -561,40 +581,19 @@ func refreshPending(state *notify.State) {
 		return
 	}
 	for _, agent := range agents {
-		sessions, err := cursor.ListSessions(cursor.KindShip, agent)
-		if err != nil {
-			continue
-		}
-		seen := map[string]bool{}
-		for _, key := range sessions {
-			seen[key] = true
-		}
 		entries, err := staging.List(agent)
 		if err != nil {
 			continue
 		}
+		occurrences := map[string]int{}
 		for _, e := range entries {
-			seen[e.Key()] = true
+			occurrences[e.Key()]++
 		}
-		for key := range seen {
-			var ent *staging.Entry
-			for i := range entries {
-				if entries[i].Key() == key {
-					ent = &entries[i]
-					break
-				}
-			}
-			if ent == nil {
-				continue
-			}
-			parent := ent.ParentID()
-			size, err := staging.Size(agent, ent.Project, parent, ent.SessionID)
-			if err != nil {
-				continue
-			}
-			shipOff, _ := cursor.Read(cursor.KindShip, agent, key)
-			if shipOff < size {
-				pending[notify.SessionKey(agent, key)] = true
+		for _, e := range entries {
+			size, sizeErr := source.Size(e.Path)
+			shipOff, cursorErr := cursor.Read(cursor.KindShip, agent, e.Key())
+			if sizeErr != nil || cursorErr != nil || shipOff != size || occurrences[e.Key()] > 1 {
+				pending[notify.SessionKey(agent, e.Key())] = true
 			}
 		}
 	}
@@ -683,6 +682,7 @@ func PrintHealth(w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read notify state: %w", err)
 	}
+	refreshPending(state)
 	now := time.Now().UTC()
 
 	if state.LastSuccessTS.IsZero() {
@@ -701,6 +701,11 @@ func PrintHealth(w io.Writer) error {
 		printPendingByProject(w, state.PendingSessions)
 	}
 
+	captured, captureErr := cursor.Read(cursor.KindSource, source.ExecutionsAgent, registrySession)
+	shipped, shipErr := cursor.Read(cursor.KindShip, source.ExecutionsAgent, registrySession)
+	if captureErr == nil && shipErr == nil && captured > shipped {
+		fmt.Fprintf(w, "  unshipped registry:   %d captured bytes (%s)\n", captured-shipped, humanBytes(captured-shipped))
+	}
 	uncap := countUncapturedSessions()
 	if len(uncap) == 0 {
 		fmt.Fprintln(w, "  uncaptured sessions:  0")

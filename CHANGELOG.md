@@ -6,6 +6,17 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-09-16 — Stable execution registry shipping
+
+### Fixed
+
+- Execution registry shipping retains its first destination across hostname
+  changes. Split staging stops with a reconciliation error instead of silently
+  stranding records, and health reports the pending execution bytes.
+- `loom shipper reconcile-executions` preserves and checks source, staging,
+  receiver and offsets before restoring a split registry to its original
+  destination. Normal shipping then delivers the retained suffix.
+
 ## [1.9.0] — 2026-09-15 — Cursor sessions and run reporting
 
 ### Upgrade

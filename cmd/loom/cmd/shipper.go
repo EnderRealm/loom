@@ -18,7 +18,8 @@ var shipperCmd = &cobra.Command{
 
   loom shipper once     ship any new session bytes and exit
   loom shipper daemon   stay running, ship every interval_seconds or interval_minutes (config.json)
-  loom shipper health   show last-sync / pending-session state`,
+  loom shipper health   show last-sync / pending-session state
+  loom shipper reconcile-executions <project> <received-root>   reconcile a split registry`,
 }
 
 var shipperOnceCmd = &cobra.Command{
@@ -26,6 +27,15 @@ var shipperOnceCmd = &cobra.Command{
 	Short: "Ship any new session bytes and exit",
 	Run: func(cmd *cobra.Command, args []string) {
 		shipper.Once()
+	},
+}
+
+var shipperReconcileCmd = &cobra.Command{
+	Use:   "reconcile-executions <project> <received-root>",
+	Short: "Preserve and reconcile split execution staging against local receiver bytes",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return shipper.ReconcileExecutions(args[0], args[1], cmd.OutOrStdout())
 	},
 }
 
@@ -48,6 +58,6 @@ var shipperHealthCmd = &cobra.Command{
 }
 
 func init() {
-	shipperCmd.AddCommand(shipperOnceCmd, shipperDaemonCmd, shipperHealthCmd)
+	shipperCmd.AddCommand(shipperOnceCmd, shipperDaemonCmd, shipperHealthCmd, shipperReconcileCmd)
 	rootCmd.AddCommand(shipperCmd)
 }
