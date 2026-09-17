@@ -241,6 +241,100 @@ func tokens(t *testing.T, m Metrics, runtime string) Tokens {
 	return *tok
 }
 
+func TestReportingCutoffBoundsDeclaredRootSpan(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		runID   = "run-cutoff"
+		ticket  = "loom/cutoff-0001"
+		session = "sess-cutoff"
+	)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"`+runID+`","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:00:00Z","ended_at":"2026-09-10T10:10:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T10:10:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-cutoff","run_id":"`+runID+`","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:00:00Z","ended_at":"2026-09-10T10:10:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	sum := &summary.SessionSummary{
+		SessionID: session,
+		Agent:     summary.AgentClaude,
+		StartTime: begin,
+		EndTime:   begin.Add(40 * time.Minute),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), AssistantText: "working", StartedAt: begin, EndedAt: begin.Add(time.Minute), Model: claudeModel, InputTokens: 100, OutputTokens: 10},
+			{Idx: 1, UserMessage: "finish the run", AssistantText: "done", StartedAt: begin.Add(10 * time.Minute), EndedAt: begin.Add(12 * time.Minute), Model: claudeModel, InputTokens: 200, OutputTokens: 20},
+			{Idx: 2, UserMessage: "follow-up one", AssistantText: "later", StartedAt: begin.Add(20 * time.Minute), EndedAt: begin.Add(21 * time.Minute), Model: claudeModel, InputTokens: 300, OutputTokens: 30},
+			{Idx: 3, UserMessage: "follow-up two", AssistantText: "later still", StartedAt: begin.Add(30 * time.Minute), EndedAt: begin.Add(31 * time.Minute), Model: claudeModel, InputTokens: 400, OutputTokens: 40},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, Kind: summary.KindRead, ToolName: "Read", StartedAt: begin.Add(time.Minute), DurationMs: 100},
+			{TurnIdx: 1, Kind: summary.KindBash, ToolName: "Bash", StartedAt: begin.Add(11 * time.Minute), DurationMs: 200},
+			{TurnIdx: 2, Kind: summary.KindRead, ToolName: "Read", StartedAt: begin.Add(20 * time.Minute), DurationMs: 300},
+			{TurnIdx: 3, Kind: summary.KindRead, ToolName: "Read", StartedAt: begin.Add(30 * time.Minute), DurationMs: 400},
+		},
+	}
+	writeSession(t, st, sum)
+
+	first := build(t, st, runID)
+	second := build(t, st, runID)
+	for _, rep := range []*Report{first, second} {
+		parent := rep.Metrics.Parent
+		if parent.Turns != 2 || parent.ToolCalls != 2 || parent.TotalTokens != 330 || parent.HumanInteractions != 1 {
+			t.Errorf("parent after cutoff = %d turns %d calls %d tokens %d human interactions, want 2/2/330/1",
+				parent.Turns, parent.ToolCalls, parent.TotalTokens, parent.HumanInteractions)
+		}
+		if rep.Time.RootSpan != RootSpanInvocationCutoff {
+			t.Errorf("time.root_span = %q, want %q", rep.Time.RootSpan, RootSpanInvocationCutoff)
+		}
+	}
+	if !reflect.DeepEqual(first.Metrics.Parent, second.Metrics.Parent) {
+		t.Errorf("subsequent read changed parent metrics:\n%+v\n%+v", first.Metrics.Parent, second.Metrics.Parent)
+	}
+
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-next","ticket":"loom/next-0001","runtime":"claude-code","agent":"claude-code","session_id":"sess-next","started_at":"2026-09-10T11:00:00Z","ended_at":"2026-09-10T11:30:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T11:30:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-next","run_id":"run-next","execution_kind":"root","agent":"claude-code","session_id":"sess-next","started_at":"2026-09-10T11:00:00Z","ended_at":"2026-09-10T11:30:00Z","outcome":"completed"}`,
+	)
+	next := oneTurn(summary.AgentClaude, "sess-next", claudeModel, begin.Add(time.Hour), begin.Add(100*time.Minute), 100, 0, 10, summary.KindRead, 100)
+	next.Turns = append(next.Turns,
+		summary.Turn{Idx: 1, UserMessage: "still working", AssistantText: "yes", StartedAt: begin.Add(65 * time.Minute), EndedAt: begin.Add(66 * time.Minute), Model: claudeModel, InputTokens: 200, OutputTokens: 20},
+		summary.Turn{Idx: 2, UserMessage: workInvocation("loom/other-0001"), AssistantText: "next run", StartedAt: begin.Add(70 * time.Minute), EndedAt: begin.Add(71 * time.Minute), Model: claudeModel, InputTokens: 300, OutputTokens: 30},
+	)
+	next.Turns[0].UserMessage = workInvocation("loom/next-0001")
+	writeSession(t, st, next)
+
+	boundedByNext := build(t, st, "run-next")
+	if boundedByNext.Metrics.Parent.Turns != 2 || boundedByNext.Metrics.Parent.TotalTokens != 330 {
+		t.Errorf("next-invocation bound metrics = %+v, want the first two turns", boundedByNext.Metrics.Parent)
+	}
+	if boundedByNext.Time.RootSpan != RootSpanInvocationNext {
+		t.Errorf("next-invocation time.root_span = %q, want %q", boundedByNext.Time.RootSpan, RootSpanInvocationNext)
+	}
+}
+
+func TestReportingCutoffNamesUntimedParentTurnAsGap(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-untimed-cutoff","ticket":"loom/untimed-0001","runtime":"claude-code","agent":"claude-code","session_id":"sess-untimed-cutoff","started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:10:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T12:10:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-untimed-cutoff","run_id":"run-untimed-cutoff","execution_kind":"root","agent":"claude-code","session_id":"sess-untimed-cutoff","started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:10:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	sum := oneTurn(summary.AgentClaude, "sess-untimed-cutoff", claudeModel, begin, begin.Add(20*time.Minute), 100, 0, 10, summary.KindRead, 100)
+	sum.Turns[0].UserMessage = workInvocation("loom/untimed-0001")
+	sum.Turns = append(sum.Turns, summary.Turn{
+		Idx: 1, UserMessage: "untimed parent turn", AssistantText: "unknown placement",
+		Model: claudeModel, InputTokens: 200, OutputTokens: 20,
+	})
+	writeSession(t, st, sum)
+
+	rep := build(t, st, "run-untimed-cutoff")
+	if rep.Telemetry.State != StatePartial {
+		t.Errorf("telemetry = %+v, want partial for unresolved cutoff attribution", rep.Telemetry)
+	}
+	gaps := strings.Join(rep.Telemetry.Gaps, "\n")
+	if !strings.Contains(gaps, "session claude-code/sess-untimed-cutoff turn 1 has no start time; reporting cutoff attribution unresolved") {
+		t.Errorf("gaps = %v, want the untimed parent turn named", rep.Telemetry.Gaps)
+	}
+}
+
 // AC1: the mixed-runtime fixture yields parent, descendant and total scopes
 // and every breakdown, through Load as the command reads it.
 func TestReportCoversTheMixedRuntimeFixture(t *testing.T) {
@@ -705,7 +799,7 @@ func TestHistoricalRunMetersSubagentRows(t *testing.T) {
 	if rep.Run.Origin != runs.OriginTranscript || rep.Run.Outcome != OutcomeUnknown || rep.Run.Source != nil {
 		t.Errorf("historical run = %+v", rep.Run)
 	}
-	if rep.Telemetry.RootSpan != SpanInvocation || rep.Time.WallMs == nil || *rep.Time.WallMs != 60*60*1000 {
+	if rep.Telemetry.RootSpan != SpanInvocation || rep.Time.RootSpan != RootSpanInvocationSessionEnd || rep.Time.WallMs == nil || *rep.Time.WallMs != 60*60*1000 {
 		t.Errorf("telemetry = %+v time = %+v", rep.Telemetry, rep.Time)
 	}
 	coder := execution(t, rep, "transcript:claude-code:hist:0:subagent:0")
