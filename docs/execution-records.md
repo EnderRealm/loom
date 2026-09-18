@@ -123,13 +123,16 @@ outcome taken from the record alone, and whatever the evidence does not cover
 named as a telemetry gap rather than reported as zero. It takes a declared
 `run_id` or a synthesized `transcript:<agent>:<session>:<turn>` id.
 
-For a declared run carrying `reporting_cutoff`, the root's parent-only span
-stops at the last turn whose `started_at` is at or before that cutoff. A turn
-that starts by the cutoff remains part of the run even when it ends later.
-Historical transcript-recognized runs have no cutoff and retain their
-invocation-to-session-end bound. The report states the selected bound in
-`time.root_span`, beside `time.wall_basis`; descendant transcripts keep their
-own process-bounded spans.
+For a declared run, the root's parent-only span starts at the first turn whose
+`started_at` is at or after the run's `started_at`; the invocation turn remains
+included when the run started during it. A `reporting_cutoff` stops that span
+at the last turn whose `started_at` is at or before the cutoff. These bounds
+partition multiple declared runs sharing one invocation without counting a
+parent turn twice. Historical transcript-recognized runs keep their
+invocation-to-session-end bound. The report states the selected start in
+`telemetry.root_span` and the complete bound in `time.root_span`, beside
+`time.wall_basis`; descendant transcripts keep their own process-bounded
+spans.
 
 **Rejected records.** A record with an unknown `v`, an unknown `kind`, a
 missing required id, a value outside an enum, or a timestamp that is not RFC

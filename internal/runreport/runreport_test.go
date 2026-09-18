@@ -310,6 +310,97 @@ func TestReportingCutoffBoundsDeclaredRootSpan(t *testing.T) {
 	}
 }
 
+func TestDeclaredRunsPartitionOneInvocationAtStartedAt(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		ticket  = "loom/shared-invocation"
+		session = "sess-shared-invocation"
+	)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-part-1","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:00:30Z","ended_at":"2026-09-10T10:19:00Z","outcome":"stopped","reporting_cutoff":"2026-09-10T10:19:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-part-1","run_id":"run-part-1","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:00:30Z","ended_at":"2026-09-10T10:19:00Z","outcome":"stopped"}`,
+		`{"v":1,"kind":"run","run_id":"run-part-2","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:19:30Z","ended_at":"2026-09-10T10:39:00Z","outcome":"stopped","reporting_cutoff":"2026-09-10T10:39:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-part-2","run_id":"run-part-2","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:19:30Z","ended_at":"2026-09-10T10:39:00Z","outcome":"stopped"}`,
+		`{"v":1,"kind":"run","run_id":"run-part-3","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:39:30Z","ended_at":"2026-09-10T11:00:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T11:00:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-part-3","run_id":"run-part-3","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:39:30Z","ended_at":"2026-09-10T11:00:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	sum := &summary.SessionSummary{
+		SessionID: session,
+		Agent:     summary.AgentClaude,
+		StartTime: begin,
+		EndTime:   begin.Add(time.Hour),
+	}
+	for i := 0; i < 6; i++ {
+		start := begin.Add(time.Duration(i*10) * time.Minute)
+		sum.Turns = append(sum.Turns, summary.Turn{
+			Idx: i, UserMessage: "continue", AssistantText: "working",
+			StartedAt: start, EndedAt: start.Add(time.Minute), Model: claudeModel,
+			InputTokens: int64((i + 1) * 100), OutputTokens: int64((i + 1) * 10),
+		})
+		sum.ToolCalls = append(sum.ToolCalls, summary.ToolCall{
+			TurnIdx: i, Kind: summary.KindRead, ToolName: "Read",
+			StartedAt: start.Add(30 * time.Second), DurationMs: int64((i + 1) * 100),
+		})
+	}
+	sum.Turns[0].UserMessage = workInvocation(ticket)
+	writeSession(t, st, sum)
+
+	type want struct {
+		tokens int64
+		span   string
+		bound  string
+	}
+	wants := []want{
+		{tokens: 330, span: SpanInvocation, bound: RootSpanInvocationCutoff},
+		{tokens: 770, span: SpanStartedAt, bound: RootSpanStartedAtCutoff},
+		{tokens: 1210, span: SpanStartedAt, bound: RootSpanStartedAtCutoff},
+	}
+	var turns, calls int
+	var tokens int64
+	for i, w := range wants {
+		rep := build(t, st, "run-part-"+strconv.Itoa(i+1))
+		parent := rep.Metrics.Parent
+		if parent.Turns != 2 || parent.ToolCalls != 2 || parent.TotalTokens != w.tokens {
+			t.Errorf("run %d parent = %d turns %d calls %d tokens, want 2/2/%d",
+				i+1, parent.Turns, parent.ToolCalls, parent.TotalTokens, w.tokens)
+		}
+		if rep.Telemetry.RootSpan != w.span || rep.Time.RootSpan != w.bound {
+			t.Errorf("run %d root span = telemetry %q time %q, want %q/%q",
+				i+1, rep.Telemetry.RootSpan, rep.Time.RootSpan, w.span, w.bound)
+		}
+		turns += parent.Turns
+		calls += parent.ToolCalls
+		tokens += parent.TotalTokens
+	}
+	if turns != 6 || calls != 6 || tokens != 2310 {
+		t.Errorf("partition totals = %d turns %d calls %d tokens, want 6/6/2310", turns, calls, tokens)
+	}
+}
+
+func TestDeclaredRunStartingBeforeInvocationKeepsInvocationStart(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		runID   = "run-before-invocation"
+		ticket  = "loom/before-invocation"
+		session = "sess-before-invocation"
+	)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"`+runID+`","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T09:59:00Z","ended_at":"2026-09-10T10:20:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T10:20:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-before-invocation","run_id":"`+runID+`","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T09:59:00Z","ended_at":"2026-09-10T10:20:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	sum := oneTurn(summary.AgentClaude, session, claudeModel, begin, begin.Add(time.Minute), 100, 0, 10, summary.KindRead, 100)
+	sum.Turns[0].UserMessage = workInvocation(ticket)
+	writeSession(t, st, sum)
+
+	rep := build(t, st, runID)
+	if rep.Metrics.Parent.Turns != 1 || rep.Telemetry.RootSpan != SpanInvocation || rep.Time.RootSpan != RootSpanInvocationCutoff {
+		t.Errorf("report = parent %+v telemetry %q time %q, want invocation-anchored turn",
+			rep.Metrics.Parent, rep.Telemetry.RootSpan, rep.Time.RootSpan)
+	}
+}
+
 func TestReportingCutoffNamesUntimedParentTurnAsGap(t *testing.T) {
 	st, _ := openStore(t)
 	importLines(t, st,

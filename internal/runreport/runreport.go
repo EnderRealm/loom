@@ -54,6 +54,7 @@ const (
 // Span basis values: what the root's parent-only span is bounded by.
 const (
 	SpanInvocation = "invocation"
+	SpanStartedAt  = "started_at"
 	SpanSession    = "session"
 	SpanUnresolved = "unresolved"
 )
@@ -63,6 +64,9 @@ const (
 	RootSpanInvocationCutoff     = "invocation→reporting_cutoff"
 	RootSpanInvocationNext       = "invocation→next_invocation"
 	RootSpanInvocationSessionEnd = "invocation→session_end"
+	RootSpanStartedAtCutoff      = "started_at→reporting_cutoff"
+	RootSpanStartedAtNext        = "started_at→next_invocation"
+	RootSpanStartedAtSessionEnd  = "started_at→session_end"
 	RootSpanSessionCutoff        = "session→reporting_cutoff"
 	RootSpanSessionEnd           = "session→session_end"
 	RootSpanUnresolved           = "unresolved"
@@ -151,7 +155,8 @@ type RunInfo struct {
 // is a gap and not a zero; Gaps names each reason it is not. RootSpan says
 // whether the root's parent-only span is its /work invocation's turn range
 // or, with no invocation recognized, the whole session; empty when the root
-// names no transcript.
+// names no transcript. A declared run sharing an invocation can instead be
+// bounded from its started_at so parent turns are partitioned between runs.
 type Telemetry struct {
 	State                       string   `json:"state"`
 	Gaps                        []string `json:"gaps"`
@@ -504,15 +509,16 @@ func Build(db *sql.DB, run *runs.Run, table *pricing.Table) (*Report, error) {
 }
 
 type builder struct {
-	db        *sql.DB
-	run       *runs.Run
-	table     *pricing.Table
-	at        time.Time
-	sessions  map[runs.TranscriptRef]*sessionData
-	units     []*unit
-	rootSpan  string
-	rootBound string
-	gaps      []string
+	db            *sql.DB
+	run           *runs.Run
+	table         *pricing.Table
+	at            time.Time
+	sessions      map[runs.TranscriptRef]*sessionData
+	units         []*unit
+	rootSpan      string
+	rootBound     string
+	rootStartedAt bool
+	gaps          []string
 }
 
 // collect walks the tree depth-first, root first, then each unresolved
@@ -614,6 +620,7 @@ func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 	}
 	u.data = data
 	if n == b.run.Root {
+		b.applyStartedAt(u)
 		b.applyReportingCutoff(u)
 	}
 	if u.counted && !data.usageKnown {
@@ -634,6 +641,52 @@ func invocationRootBound(endIdx int) string {
 	return RootSpanInvocationNext
 }
 
+// applyStartedAt narrows a declared root transcript to the first parent turn
+// beginning at or after the run record. The invocation turn remains included
+// when the record was started while that turn was in progress.
+func (b *builder) applyStartedAt(u *unit) {
+	if b.run.Origin != runs.OriginRecord || b.at.IsZero() || b.rootSpan != SpanInvocation {
+		return
+	}
+	var invocationTurn *turnRow
+	for i := range u.data.turns {
+		if u.data.turns[i].idx == u.startIdx {
+			invocationTurn = &u.data.turns[i]
+			break
+		}
+	}
+	if invocationTurn == nil || b.at.Before(invocationTurn.startedAt) || b.at.Equal(invocationTurn.startedAt) ||
+		(!invocationTurn.endedAt.IsZero() && !b.at.After(invocationTurn.endedAt)) {
+		return
+	}
+
+	startIdx := math.MaxInt
+	for _, turn := range u.data.turns {
+		if turn.idx < u.startIdx || turn.idx > u.endIdx {
+			continue
+		}
+		if turn.startedAt.IsZero() {
+			ref := *u.node.Transcript
+			b.gap(fmt.Sprintf("session %s/%s turn %d has no start time; started_at attribution unresolved",
+				ref.Agent, ref.SessionID, turn.idx))
+			continue
+		}
+		if !turn.startedAt.Before(b.at) {
+			startIdx = turn.idx
+			break
+		}
+	}
+	u.startIdx = startIdx
+	b.rootStartedAt = true
+	b.rootSpan = SpanStartedAt
+	switch b.rootBound {
+	case RootSpanInvocationNext:
+		b.rootBound = RootSpanStartedAtNext
+	case RootSpanInvocationSessionEnd:
+		b.rootBound = RootSpanStartedAtSessionEnd
+	}
+}
+
 // applyReportingCutoff narrows only the root transcript. A turn belongs to
 // the run when it started at or before the cutoff, even when it ended later.
 func (b *builder) applyReportingCutoff(u *unit) {
@@ -651,7 +704,7 @@ func (b *builder) applyReportingCutoff(u *unit) {
 	// A following invocation can already provide the tighter bound. Keep it
 	// when its turn starts by the cutoff, or when its time is unavailable and
 	// the ordering cannot establish that the cutoff came first.
-	if b.rootBound == RootSpanInvocationNext {
+	if b.rootBound == RootSpanInvocationNext || b.rootBound == RootSpanStartedAtNext {
 		for _, turn := range u.data.turns {
 			if turn.idx <= u.endIdx {
 				continue
@@ -670,8 +723,12 @@ func (b *builder) applyReportingCutoff(u *unit) {
 		endIdx = turn.idx
 	}
 	u.endIdx = endIdx
-	if b.rootSpan == SpanInvocation {
-		b.rootBound = RootSpanInvocationCutoff
+	if b.rootSpan == SpanInvocation || b.rootSpan == SpanStartedAt {
+		if b.rootStartedAt {
+			b.rootBound = RootSpanStartedAtCutoff
+		} else {
+			b.rootBound = RootSpanInvocationCutoff
+		}
 	} else {
 		b.rootBound = RootSpanSessionCutoff
 	}
