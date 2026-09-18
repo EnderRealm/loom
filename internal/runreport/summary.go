@@ -90,16 +90,19 @@ func ListSummaries(dbPath string, since, until time.Time) ([]Summary, error) {
 	return Summaries(db, table, since, until)
 }
 
-// Summaries builds each run in range and reduces it: the list is the report,
-// row by row, with no accounting of its own.
+// Summaries builds each run in range and reduces it. Session rows are shared
+// across the builders: several recorded runs commonly occupy one transcript,
+// and reading that transcript once keeps the list proportional to the corpus
+// rather than the number of runs times the corpus.
 func Summaries(db *sql.DB, table *pricing.Table, since, until time.Time) ([]Summary, error) {
 	list, err := runs.List(db, since, until)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Summary, 0, len(list))
+	sessions := map[runs.TranscriptRef]*sessionData{}
 	for i := range list {
-		rep, err := Build(db, &list[i], table)
+		rep, err := buildWithSessions(db, &list[i], table, sessions)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", list[i].RunID, err)
 		}

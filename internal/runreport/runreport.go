@@ -495,12 +495,16 @@ type unit struct {
 // place (nil Children, Unresolved and Diagnostics become empty slices) and the
 // Report aliases the run's nodes rather than copying them.
 func Build(db *sql.DB, run *runs.Run, table *pricing.Table) (*Report, error) {
+	return buildWithSessions(db, run, table, map[runs.TranscriptRef]*sessionData{})
+}
+
+func buildWithSessions(db *sql.DB, run *runs.Run, table *pricing.Table, sessions map[runs.TranscriptRef]*sessionData) (*Report, error) {
 	b := &builder{
 		db:       db,
 		run:      run,
 		table:    table,
 		at:       parseTime(run.StartedAt),
-		sessions: map[runs.TranscriptRef]*sessionData{},
+		sessions: sessions,
 	}
 	if err := b.collect(); err != nil {
 		return nil, err
@@ -594,16 +598,18 @@ func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 		b.rootSpan = SpanInvocation
 		b.rootBound = invocationRootBound(b.run.Invocation.EndIdx)
 	} else if n == b.run.Root {
-		invocations, err := workreport.Invocations(b.db)
-		if err != nil {
-			return nil, err
-		}
 		b.rootSpan = SpanSession
 		b.rootBound = RootSpanSessionEnd
-		if inv, ok := runs.SpanningInvocation(invocations, ref.Agent, ref.SessionID, b.at); ok {
-			u.startIdx, u.endIdx = inv.TurnIdx, inv.EndIdx
-			b.rootSpan = SpanInvocation
-			b.rootBound = invocationRootBound(inv.EndIdx)
+		if !b.run.InvocationLoaded {
+			invocations, err := workreport.Invocations(b.db)
+			if err != nil {
+				return nil, err
+			}
+			if inv, ok := runs.SpanningInvocation(invocations, ref.Agent, ref.SessionID, b.at); ok {
+				u.startIdx, u.endIdx = inv.TurnIdx, inv.EndIdx
+				b.rootSpan = SpanInvocation
+				b.rootBound = invocationRootBound(inv.EndIdx)
+			}
 		}
 	} else if by := b.counter(ref); by != "" {
 		u.counted, u.countedBy = false, by

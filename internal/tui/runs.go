@@ -426,6 +426,11 @@ func (m runsModel) view() string {
 	b.WriteString("\n")
 
 	visible := m.visibleRows()
+	if m.loading && len(m.rows) == 0 {
+		b.WriteString(StyleDim.Render("  loading run summaries…"))
+		b.WriteString("\n")
+		visible--
+	}
 	end := m.offset + visible
 	if end > len(m.rows) {
 		end = len(m.rows)

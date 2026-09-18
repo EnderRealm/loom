@@ -136,17 +136,18 @@ type Run struct {
 	TranscriptBasis      string         `json:"transcript_basis"`
 	InvocationUnresolved bool           `json:"invocation_unresolved,omitempty"`
 	// Transcript recognition establishes turn identity even without timestamps.
-	Invocation      *workreport.Invocation `json:"-"`
-	StartedAt       string                 `json:"started_at"`
-	EndedAt         string                 `json:"ended_at"`
-	Outcome         string                 `json:"outcome"`
-	ReportingCutoff string                 `json:"reporting_cutoff"`
-	Producer        string                 `json:"producer"`
-	Origin          string                 `json:"origin"`
-	Source          *SourceRef             `json:"source"`
-	Root            *Node                  `json:"root"`
-	Unresolved      []*Node                `json:"unresolved"`
-	Diagnostics     []Diagnostic           `json:"diagnostics"`
+	Invocation       *workreport.Invocation `json:"-"`
+	InvocationLoaded bool                   `json:"-"`
+	StartedAt        string                 `json:"started_at"`
+	EndedAt          string                 `json:"ended_at"`
+	Outcome          string                 `json:"outcome"`
+	ReportingCutoff  string                 `json:"reporting_cutoff"`
+	Producer         string                 `json:"producer"`
+	Origin           string                 `json:"origin"`
+	Source           *SourceRef             `json:"source"`
+	Root             *Node                  `json:"root"`
+	Unresolved       []*Node                `json:"unresolved"`
+	Diagnostics      []Diagnostic           `json:"diagnostics"`
 	// Lenses is the run's review attempts (workreport.LensAttempt), read from
 	// its transcript's lens responses. Null for a run with no transcript, and
 	// for a recorded run whose session holds no /work invocation spanning
@@ -312,17 +313,18 @@ func loadRunRow(db *sql.DB, runID string) (*runRow, error) {
 // record that named none either — takes the same reference.
 func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) (*Run, error) {
 	run := &Run{
-		RunID:           row.runID,
-		Ticket:          row.ticket,
-		Runtime:         row.runtime,
-		Transcript:      transcriptRef(row.agent, row.sessionID),
-		StartedAt:       row.startedAt,
-		EndedAt:         row.endedAt,
-		Outcome:         row.outcome,
-		ReportingCutoff: row.reportingCutoff,
-		Producer:        row.producer,
-		Origin:          OriginRecord,
-		Source:          &SourceRef{Path: row.sourcePath, Line: row.sourceLine},
+		RunID:            row.runID,
+		Ticket:           row.ticket,
+		Runtime:          row.runtime,
+		Transcript:       transcriptRef(row.agent, row.sessionID),
+		StartedAt:        row.startedAt,
+		EndedAt:          row.endedAt,
+		Outcome:          row.outcome,
+		ReportingCutoff:  row.reportingCutoff,
+		Producer:         row.producer,
+		Origin:           OriginRecord,
+		Source:           &SourceRef{Path: row.sourcePath, Line: row.sourceLine},
+		InvocationLoaded: true,
 	}
 	if run.Transcript != nil {
 		run.TranscriptBasis = BasisDeclared
@@ -375,6 +377,11 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 		run.Lenses, err = workreport.Lenses(db, inv, lensExecutions(nodes))
 		if err != nil {
 			return nil, err
+		}
+	}
+	if run.Root != nil && run.Root.Transcript != nil {
+		if metering, matched := SpanningInvocation(invocations, run.Root.Transcript.Agent, run.Root.Transcript.SessionID, parseTime(row.startedAt)); matched {
+			run.Invocation = &metering
 		}
 	}
 	if run.Root != nil && run.Root.Transcript != nil {
@@ -695,16 +702,17 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 			EndedAt:     isoOrEmpty(inv.EndsAt),
 		}
 		run := Run{
-			RunID:           id,
-			Ticket:          inv.Ticket,
-			Runtime:         inv.Agent,
-			Transcript:      &ref,
-			TranscriptBasis: BasisTranscript,
-			Invocation:      &inv,
-			StartedAt:       root.StartedAt,
-			EndedAt:         root.EndedAt,
-			Origin:          OriginTranscript,
-			Root:            root,
+			RunID:            id,
+			Ticket:           inv.Ticket,
+			Runtime:          inv.Agent,
+			Transcript:       &ref,
+			TranscriptBasis:  BasisTranscript,
+			Invocation:       &inv,
+			InvocationLoaded: true,
+			StartedAt:        root.StartedAt,
+			EndedAt:          root.EndedAt,
+			Origin:           OriginTranscript,
+			Root:             root,
 		}
 		if err := attachSubagentRows(db, &run, inv); err != nil {
 			return nil, err

@@ -1,11 +1,14 @@
 package runreport
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"loom/internal/parse/summary"
 	"loom/internal/pricing"
 	"loom/internal/runs"
 )
@@ -67,6 +70,55 @@ func TestListSummariesAgreesWithTheReport(t *testing.T) {
 	}
 }
 
+func TestListSummariesBoundsTheRootTranscriptWithItsOwnInvocation(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		runID         = "run-distinct-root-session"
+		ticket        = "loom/distinct-root-session"
+		recordSession = "record-session"
+		rootSession   = "root-session"
+	)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"`+runID+`","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+recordSession+`","started_at":"2026-09-10T10:00:00Z","ended_at":"2026-09-10T10:10:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T10:10:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-distinct-session","run_id":"`+runID+`","execution_kind":"root","agent":"claude-code","session_id":"`+rootSession+`","started_at":"2026-09-10T10:00:00Z","ended_at":"2026-09-10T10:10:00Z","outcome":"completed"}`,
+	)
+	start := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	writeSession(t, st, &summary.SessionSummary{
+		SessionID: recordSession,
+		Agent:     summary.AgentClaude,
+		Turns: []summary.Turn{{
+			Idx: 7, UserMessage: workInvocation(ticket), StartedAt: start, EndedAt: start.Add(time.Minute),
+			Model: claudeModel, InputTokens: 900, OutputTokens: 90,
+		}},
+	})
+	writeSession(t, st, &summary.SessionSummary{
+		SessionID: rootSession,
+		Agent:     summary.AgentClaude,
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), StartedAt: start, EndedAt: start.Add(time.Minute), Model: claudeModel, InputTokens: 100, OutputTokens: 10},
+			{Idx: 1, UserMessage: "continue", StartedAt: start.Add(5 * time.Minute), EndedAt: start.Add(6 * time.Minute), Model: claudeModel, InputTokens: 200, OutputTokens: 20},
+		},
+	})
+
+	table, err := pricing.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := Summaries(st.DB(), table, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.RunID == runID {
+			if row.TotalTokens != 330 {
+				t.Errorf("root transcript tokens = %d, want 330 from its own invocation", row.TotalTokens)
+			}
+			return
+		}
+	}
+	t.Fatalf("run %s not listed", runID)
+}
+
 func TestSummariesBoundTheRange(t *testing.T) {
 	st, _ := fixture(t)
 	table, err := pricing.Default()
@@ -81,6 +133,27 @@ func TestSummariesBoundTheRange(t *testing.T) {
 		if r.RunID == fixtureRun {
 			t.Errorf("run started at %v listed for a range from %v", r.StartedAt, runStart.Add(time.Hour))
 		}
+	}
+}
+
+func TestListSummariesWindowBudget(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".loom", "summaries.db")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skip("~/.loom/summaries.db is absent")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if _, err := ListSummaries(path, time.Now().Add(-30*24*time.Hour), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed >= 2*time.Second {
+		t.Fatalf("ListSummaries took %s, want under 2s", elapsed)
 	}
 }
 

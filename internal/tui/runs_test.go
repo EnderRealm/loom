@@ -234,6 +234,9 @@ func TestRunsListLoadsOffTheUpdateLoop(t *testing.T) {
 	if !strings.Contains(app.View(), "loading…") {
 		t.Error("the overlay does not say it is loading")
 	}
+	if !strings.Contains(app.View(), "loading run summaries…") {
+		t.Error("the empty table body does not show its loading state")
+	}
 	loaded := make(chan tea.Msg, 1)
 	go func() { loaded <- s.cmd() }()
 
