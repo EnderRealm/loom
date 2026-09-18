@@ -1,6 +1,7 @@
 package runreport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -11,11 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"loom/internal/parse/codexparse"
 	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
 	"loom/internal/pricing"
 	"loom/internal/runs"
 	"loom/internal/summaries"
+	"loom/internal/workreport"
 )
 
 // fixtureRun is the run docs/execution-records.md and
@@ -113,6 +116,38 @@ func oneTurn(agent summary.Agent, sessionID, model string, start, end time.Time,
 		}},
 		ToolCalls: []summary.ToolCall{{TurnIdx: 0, Kind: kind, ToolName: string(kind), StartedAt: start, DurationMs: toolMs}},
 	}
+}
+
+func codexLensSession(t *testing.T, sessionID, lensName, text string, start time.Time) *summary.SessionSummary {
+	t.Helper()
+	fenced := "```json\n" + `{"lens":"` + lensName + `","verdict":"satisfied","summary":"` + text + `","context":{"state":"clean","received":[]},"criteria":[],"findings":[]}` + "\n```"
+	records := []map[string]any{
+		{"timestamp": start.Format(time.RFC3339Nano), "type": "session_meta", "payload": map[string]any{
+			"id": sessionID, "timestamp": start.Format(time.RFC3339Nano), "cwd": "/tmp/lens", "cli_version": "0.160.0", "source": "cli", "model_provider": "openai",
+		}},
+		{"timestamp": start.Add(time.Second).Format(time.RFC3339Nano), "type": "turn_context", "payload": map[string]any{
+			"turn_id": "t1", "cwd": "/tmp/lens", "model": codexModel, "effort": "high",
+		}},
+		{"timestamp": start.Add(2 * time.Second).Format(time.RFC3339Nano), "type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "review"}},
+		}},
+		{"timestamp": start.Add(3 * time.Second).Format(time.RFC3339Nano), "type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": fenced}},
+		}},
+	}
+	var lines []string
+	for _, record := range records {
+		raw, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, string(raw))
+	}
+	sum, err := codexparse.Parse(bytes.NewBufferString(strings.Join(lines, "\n") + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sum
 }
 
 // rootSessionSummary is the fixture run's own transcript: the /work
@@ -1184,6 +1219,71 @@ func TestRecordedRoundPlacesAttemptsWithNoCommitmentLine(t *testing.T) {
 	}
 	if len(rep.Attempts) != 3 {
 		t.Errorf("attempts = %+v, want one per lens", rep.Attempts)
+	}
+}
+
+// A routed verdict may exist only in the child session codex-lens recorded.
+// Both rounds survive parser ingestion, join their recorded executions, and
+// remain available to the detail loader as complete response bodies.
+func TestRoutedLensResponsesLoadFromRecordedChildSessions(t *testing.T) {
+	st, path := openStore(t)
+	const (
+		runID    = "run-routed-children"
+		ticket   = "loom/attach-routed-lens-501a"
+		parent   = "sess-routed-parent"
+		child1   = "sess-routed-security-r1"
+		child2   = "sess-routed-security-r2"
+		router   = "~/.cursor/codex-lens.sh --runtime cursor --lens security --payload /tmp/c/payload.md > /tmp/c/security.md"
+		summary1 = "Round one complete response."
+		summary2 = "Round two complete response."
+	)
+	start := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"`+runID+`","ticket":"`+ticket+`","runtime":"cursor-cli","agent":"cursor-cli","session_id":"`+parent+`","started_at":"2026-09-15T12:00:00Z","ended_at":"2026-09-15T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-routed","run_id":"`+runID+`","execution_kind":"root","agent":"cursor-cli","session_id":"`+parent+`","started_at":"2026-09-15T12:00:00Z","ended_at":"2026-09-15T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-routed-r1","run_id":"`+runID+`","parent_execution_id":"root-routed","execution_kind":"lens","lens":"security","round":1,"attempt":1,"agent":"codex-cli","session_id":"`+child1+`","started_at":"2026-09-15T12:01:02Z","ended_at":"2026-09-15T12:01:06Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-routed-r2","run_id":"`+runID+`","parent_execution_id":"root-routed","execution_kind":"lens","lens":"security","round":2,"attempt":1,"agent":"codex-cli","session_id":"`+child2+`","started_at":"2026-09-15T12:05:02Z","ended_at":"2026-09-15T12:05:06Z","outcome":"completed"}`,
+	)
+	writeSession(t, st, &summary.SessionSummary{
+		SessionID: parent,
+		Agent:     summary.AgentCursor,
+		StartTime: start,
+		EndTime:   start.Add(10 * time.Minute),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: "$work " + ticket, AssistantText: "dispatching (" + ticket + " round 1): security", StartedAt: start, EndedAt: start.Add(2 * time.Minute)},
+			{Idx: 1, UserMessage: "continue", AssistantText: "dispatching (" + ticket + " round 2): security", StartedAt: start.Add(5 * time.Minute), EndedAt: start.Add(7 * time.Minute)},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "call-r1", Kind: summary.KindBash, ToolName: "Shell", KeyArg: router, StartedAt: start.Add(time.Minute), DurationMs: 10_000},
+			{TurnIdx: 1, CallID: "call-r2", Kind: summary.KindBash, ToolName: "Shell", KeyArg: router, StartedAt: start.Add(5 * time.Minute), DurationMs: 10_000},
+		},
+	})
+	writeSession(t, st, codexLensSession(t, child1, lens.Security, summary1, start.Add(time.Minute)))
+	writeSession(t, st, codexLensSession(t, child2, lens.Security, summary2, start.Add(5*time.Minute)))
+
+	rep := build(t, st, runID)
+	if len(rep.Lenses) != 2 {
+		t.Fatalf("lenses = %+v, want two security rounds", rep.Lenses)
+	}
+	for i, group := range rep.Lenses {
+		if group.Lens != lens.Security || group.Round != i+1 || len(group.Attempts) != 1 {
+			t.Fatalf("lens group %d = %+v", i, group)
+		}
+		a := group.Attempts[0]
+		if !a.Recorded || a.Status != workreport.AttemptParsed || a.Verdict != "satisfied" || a.ExecutionID != "lens-routed-r"+strconv.Itoa(i+1) {
+			t.Errorf("round %d attempt = %+v", i+1, a)
+		}
+	}
+
+	detail, err := LoadDetail(path, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round, want := range map[int]string{1: summary1, 2: summary2} {
+		raw, ok := detail.LensResponses[LensKey(lens.Security, round, 1)]
+		if !ok || !strings.Contains(raw, want) || !strings.Contains(raw, `"verdict":"satisfied"`) {
+			t.Errorf("round %d response = %q, %v", round, raw, ok)
+		}
 	}
 }
 

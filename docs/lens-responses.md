@@ -43,9 +43,12 @@ malformed response leaves its JSON on the response row and writes no items:
 what the lens returned is kept either way, and only a response that fits the
 schema is counted.
 
-Subagent transcripts are not read for lens blocks. The parent holds the same
-response as a notification or a tool result, and a second copy would count
-twice.
+Ordinary subagent transcripts are not read for lens blocks. The parent holds
+the same response as a notification or a tool result, and a second copy would
+count twice. A recorded routed lens is the exception: when its parent attempt
+has no response, the final assistant verdict in the execution record's
+declared child session answers that exact execution. A parent-session response
+still wins when both exist.
 
 ## Response identity
 
@@ -73,8 +76,10 @@ lens in one review round. The run's turns are walked in order.
   carries no verdict is `failed`. An attempt's `provenance` says where its
   paired response came from when the walk could attribute it to the router
   — `router_result` for a lone router call's own result, `read_back` for an
-  exclusive read of the router's redirect — and is empty otherwise: for a
-  subagent's notification, an inlined pass, or no response.
+  exclusive read of the router's redirect, or `child_session` for the final
+  assistant verdict in a routed execution's declared transcript — and is
+  empty otherwise: for a subagent's notification, an inlined pass, or no
+  response.
 - A response pairs with its attempt by dispatch id. One naming a known lens
   other than the attempt's — a contract dispatch coming back with a quality
   verdict — is the dispatch answered wrong, not a verdict of either lens:
@@ -152,6 +157,12 @@ lens in one review round. The run's turns are walked in order.
   carries the record's `execution_id`, and the run report fills that
   attempt with the record's outcome and metrics rather than looking one up
   by (lens, round, attempt).
+- After the parent transcript walk, an unanswered attempt carrying a recorded
+  execution id takes the final assistant lens response from that execution's
+  declared `(agent, session_id)`. No response is looked up by project, time or
+  lens name alone. A response naming a different known lens is retained as a
+  mismatched `responded` attempt, not promoted to a verdict; a missing child
+  response leaves the attempt `dispatched`.
 - A turn whose assistant text holds no commitment line — a Claude transcript
   since Claude Code 2.1.268 carries no text block from an assistant message
   that also called a tool, so no row holds the line — takes its round from

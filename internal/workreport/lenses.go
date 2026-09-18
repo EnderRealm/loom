@@ -46,6 +46,9 @@ const (
 	// ProvenanceReadBack: an exclusive read of the path the router alone
 	// redirected its output to.
 	ProvenanceReadBack = "read_back"
+	// ProvenanceChildSession: the final assistant response in the routed
+	// execution's declared transcript.
+	ProvenanceChildSession = "child_session"
 )
 
 // SourceRef locates the transcript record a response was read from.
@@ -73,9 +76,9 @@ type LensAttempt struct {
 	// than a subagent.
 	Routed bool `json:"routed"`
 	// Provenance is where the paired response came from when it was the
-	// router's own result or a read-back of the router's redirect; "" for
-	// a subagent's notification, an inlined pass, or no response. A routed
-	// attempt an inlined verdict answered has none.
+	// router's own result, a read-back of its redirect, or its recorded
+	// child session; "" for a subagent's notification, an inlined pass, or
+	// no response. A routed attempt an inlined verdict answered has none.
 	Provenance      string `json:"provenance"`
 	DispatchID      string `json:"dispatch_id"`
 	DispatchTurnIdx int    `json:"dispatch_turn_idx"`
@@ -117,6 +120,8 @@ type LensExecution struct {
 	Round       int
 	Attempt     int
 	DispatchID  string
+	Agent       string
+	SessionID   string
 	StartedAt   time.Time
 }
 
@@ -133,7 +138,49 @@ func Lenses(db *sql.DB, inv Invocation, execs []LensExecution) ([]LensAttempt, e
 	if err != nil {
 		return nil, err
 	}
-	return lensAttempts(runtimeOf(inv.Agent), inv.TurnIdx, inv.EndIdx, data, execs), nil
+	attempts := lensAttempts(runtimeOf(inv.Agent), inv.TurnIdx, inv.EndIdx, data, execs)
+	routed := map[string]bool{}
+	for _, a := range attempts {
+		if a.Routed && a.ResponseID == "" && a.ExecutionID != "" {
+			routed[a.ExecutionID] = true
+		}
+	}
+	children, err := loadChildLensResponses(db, inv, execs, routed)
+	if err != nil {
+		return nil, err
+	}
+	w := lensWalk{}
+	for i := range attempts {
+		if r, ok := children[attempts[i].ExecutionID]; ok {
+			w.pair(&attempts[i], r)
+			attempts[i].Provenance = ProvenanceChildSession
+		}
+	}
+	return attempts, nil
+}
+
+// loadChildLensResponses reads the final assistant verdict from each routed
+// execution's declared transcript. The execution identity is the join: a
+// response from any other session is unrelated, whatever its lens or timing.
+func loadChildLensResponses(db *sql.DB, inv Invocation, execs []LensExecution, routed map[string]bool) (map[string]lensRow, error) {
+	out := map[string]lensRow{}
+	for _, e := range execs {
+		if !routed[e.ExecutionID] || e.Agent == "" || e.SessionID == "" ||
+			(e.Agent == inv.Agent && e.SessionID == inv.SessionID) {
+			continue
+		}
+		data, err := loadSession(db, e.Agent, e.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		for i := len(data.lenses) - 1; i >= 0; i-- {
+			if data.lenses[i].origin == summary.OriginAssistant {
+				out[e.ExecutionID] = data.lenses[i]
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // lensRow is one lens_responses row.

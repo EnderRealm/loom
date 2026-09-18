@@ -412,10 +412,26 @@ func lensExecutions(nodes []*Node) []workreport.LensExecution {
 			Round:       intOf(n.Round),
 			Attempt:     intOf(n.Attempt),
 			DispatchID:  n.DispatchID,
+			Agent:       refAgent(n.Transcript),
+			SessionID:   refSession(n.Transcript),
 			StartedAt:   parseTime(n.StartedAt),
 		})
 	}
 	return out
+}
+
+func refAgent(ref *TranscriptRef) string {
+	if ref == nil {
+		return ""
+	}
+	return ref.Agent
+}
+
+func refSession(ref *TranscriptRef) string {
+	if ref == nil {
+		return ""
+	}
+	return ref.SessionID
 }
 
 // Match attach's root choice before inferring identity from ticket and time.

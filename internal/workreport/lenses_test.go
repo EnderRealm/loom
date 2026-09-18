@@ -945,6 +945,86 @@ func TestMismatchedLensResponseNeverPairsAsAVerdict(t *testing.T) {
 	}
 }
 
+func TestChildSessionResponsesFailClosedAndDoNotDuplicateParentResponses(t *testing.T) {
+	const (
+		ticket = "loom/child-lens-0001"
+		router = "~/.cursor/codex-lens.sh --runtime cursor --lens security --payload /tmp/c/payload.md"
+	)
+	at := func(min int) time.Time { return base.Add(time.Duration(min) * time.Minute) }
+	response := func(sessionID, lensName, text string) *summary.SessionSummary {
+		raw := fenced(`{"lens":"` + lensName + `","verdict":"satisfied","summary":"` + text + `"}`)
+		return &summary.SessionSummary{
+			SessionID: sessionID,
+			Agent:     summary.AgentCodex,
+			StartTime: at(1),
+			EndTime:   at(9),
+			Turns: []summary.Turn{{
+				Idx: 0, UserMessage: "review", AssistantText: raw, StartedAt: at(1), EndedAt: at(2),
+			}},
+			LensResponses: []summary.LensResponse{{
+				TurnIdx: 0, Origin: summary.OriginAssistant, SourceLine: 4, At: at(2),
+				Block: lens.Extract(raw)[0],
+			}},
+		}
+	}
+
+	f := newFixture(t)
+	parent := &summary.SessionSummary{
+		SessionID: "child-lens-parent",
+		Agent:     summary.AgentCursor,
+		StartTime: at(0),
+		EndTime:   at(20),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: "$work " + ticket, AssistantText: "dispatching (" + ticket + " round 1): security", StartedAt: at(0)},
+			{Idx: 1, UserMessage: "continue", AssistantText: "dispatching (" + ticket + " round 2): security", StartedAt: at(5)},
+			{Idx: 2, UserMessage: "continue", AssistantText: "dispatching (" + ticket + " round 3): security", StartedAt: at(10)},
+			{Idx: 3, UserMessage: "continue", AssistantText: "dispatching (" + ticket + " round 4): security", StartedAt: at(15)},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "call-missing", Kind: summary.KindBash, ToolName: "Shell", KeyArg: router, StartedAt: at(1), DurationMs: 1000},
+			{TurnIdx: 1, CallID: "call-mismatch", Kind: summary.KindBash, ToolName: "Shell", KeyArg: router, StartedAt: at(6), DurationMs: 1000},
+			{TurnIdx: 2, CallID: "call-parent", Kind: summary.KindBash, ToolName: "Shell", KeyArg: router, StartedAt: at(11), DurationMs: 1000},
+			{TurnIdx: 3, CallID: "call-subagent", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "security lens review", StartedAt: at(16), DurationMs: 1000},
+		},
+	}
+	parentRaw := fenced(`{"lens":"security","verdict":"satisfied","summary":"parent response"}`)
+	parent.LensResponses = []summary.LensResponse{{
+		TurnIdx: 2, Origin: summary.OriginToolResult, DispatchID: "call-parent", SourceLine: 20, At: at(12),
+		Block: lens.Extract(parentRaw)[0],
+	}}
+	f.add(parent)
+	f.add(response("child-mismatch", "quality", "wrong lens"))
+	f.add(response("child-parent-too", "security", "child duplicate"))
+	f.add(response("child-subagent", "security", "not a routed response"))
+	f.add(response("unrelated-child", "security", "must not attach"))
+	db := openRO(t, f.path)
+
+	attempts, err := Lenses(db, fixtureInvocation(t, db), []LensExecution{
+		{ExecutionID: "exec-missing", Lens: "security", Round: 1, Attempt: 1, Agent: "codex-cli", SessionID: "child-with-no-response", StartedAt: at(1)},
+		{ExecutionID: "exec-mismatch", Lens: "security", Round: 2, Attempt: 1, Agent: "codex-cli", SessionID: "child-mismatch", StartedAt: at(6)},
+		{ExecutionID: "exec-parent", Lens: "security", Round: 3, Attempt: 1, Agent: "codex-cli", SessionID: "child-parent-too", StartedAt: at(11)},
+		{ExecutionID: "exec-subagent", Lens: "security", Round: 4, Attempt: 1, DispatchID: "call-subagent", Agent: "codex-cli", SessionID: "child-subagent", StartedAt: at(16)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "security/1/1/dispatched security/2/1/responded security/3/1/parsed security/4/1/dispatched"; got != want {
+		t.Fatalf("attempts = %s, want %s", got, want)
+	}
+	mismatch := attempt(t, attempts, lens.Security, 2, 1)
+	if mismatch.Successful() || mismatch.Verdict != "" || mismatch.Malformed != "lens mismatch: response names quality, dispatch named security" ||
+		mismatch.Provenance != ProvenanceChildSession {
+		t.Errorf("mismatched child response = %+v", mismatch)
+	}
+	parentAttempt := attempt(t, attempts, lens.Security, 3, 1)
+	if parentAttempt.Summary != "parent response" || parentAttempt.Provenance != ProvenanceRouterResult {
+		t.Errorf("parent response was replaced or duplicated: %+v", parentAttempt)
+	}
+	if subagent := attempt(t, attempts, lens.Security, 4, 1); subagent.Routed || subagent.ResponseID != "" {
+		t.Errorf("ordinary subagent child response was attached: %+v", subagent)
+	}
+}
+
 // A dispatch a record names by dispatch id takes the record's identity: it
 // is a dispatch of the record's lens even when its key argument reads as no
 // lens dispatch, and its attempt lands in the record's round and attempt
