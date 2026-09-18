@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"loom/internal/launchd"
 	"loom/internal/parse/summary"
 	"loom/internal/updater"
+	"loom/internal/version"
 	"loom/transport/receiver"
 	"loom/transport/shipper"
 )
@@ -22,6 +24,9 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show loom component status",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		self, _ := os.Executable()
+		printBinaryStatus(cmd.OutOrStdout(), self, time.Now())
+
 		// Both cadences live in config.json; the summarizer's is read at
 		// daemon start, so a missing file yields its default.
 		shipperInterval := ""
@@ -129,6 +134,19 @@ var statusCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+func printBinaryStatus(w io.Writer, path string, now time.Time) {
+	fmt.Fprintln(w, "=== loom binary ===")
+	fmt.Fprintf(w, "  version = %s\n", version.String())
+	if mtime, ok := fileMtime(path); ok {
+		ago := now.Sub(mtime).Round(time.Second)
+		fmt.Fprintf(w, "  last updated = %s (%s ago)\n",
+			mtime.Local().Format("2006-01-02 15:04:05 MST"), formatAgo(ago))
+	} else {
+		fmt.Fprintln(w, "  last updated = unknown")
+	}
+	fmt.Fprintln(w)
 }
 
 // printScopes reports which knowledge scopes this host's sessions resolve to
