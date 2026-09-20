@@ -21,7 +21,9 @@ const perMillion = 1e6
 
 // Rate is one model's list prices, in Currency per million tokens, from
 // Effective onward. FastInput and FastOutput are nil where the vendor offers
-// no fast mode for the model.
+// no fast mode for the model. Source and Checked are the entry's own
+// provenance — the page the figures were read from and when — and fall back
+// to the table's when the entry carries none.
 type Rate struct {
 	Model        string
 	Effective    time.Time
@@ -32,6 +34,8 @@ type Rate struct {
 	CacheRead    float64
 	FastInput    *float64
 	FastOutput   *float64
+	Source       string
+	Checked      time.Time
 }
 
 // Table is the parsed rate table. Source and Checked say where the rates came
@@ -81,6 +85,8 @@ type rateJSON struct {
 	CacheRead    *float64 `json:"cache_read"`
 	FastInput    *float64 `json:"fast_input"`
 	FastOutput   *float64 `json:"fast_output"`
+	Source       string   `json:"source"`
+	Checked      string   `json:"checked"`
 }
 
 type tableJSON struct {
@@ -94,6 +100,8 @@ type tableJSON struct {
 // standard rates (an explicit 0 is allowed, an omitted or null field is not),
 // every rate must be non-negative, every entry must name a model and a
 // YYYY-MM-DD effective date, and no two entries may share (model, effective).
+// An entry's own source and checked date are optional and default to the
+// table's; a checked date given must be YYYY-MM-DD.
 func Parse(data []byte) (*Table, error) {
 	var raw tableJSON
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -143,6 +151,15 @@ func Parse(data []byte) (*Table, error) {
 		if r.FastInput != nil && (*r.FastInput < 0 || *r.FastOutput < 0) {
 			return nil, fmt.Errorf("rate table: entry %d (%s): fast rate is negative", i, r.Model)
 		}
+		source, checked := t.Source, t.Checked
+		if r.Source != "" {
+			source = r.Source
+		}
+		if r.Checked != "" {
+			if checked, err = time.Parse(time.DateOnly, r.Checked); err != nil {
+				return nil, fmt.Errorf("rate table: entry %d (%s): checked %q: %w", i, r.Model, r.Checked, err)
+			}
+		}
 		t.rates[r.Model] = append(t.rates[r.Model], Rate{
 			Model:        r.Model,
 			Effective:    effective,
@@ -153,6 +170,8 @@ func Parse(data []byte) (*Table, error) {
 			CacheRead:    *r.CacheRead,
 			FastInput:    r.FastInput,
 			FastOutput:   r.FastOutput,
+			Source:       source,
+			Checked:      checked,
 		})
 	}
 	for _, rs := range t.rates {

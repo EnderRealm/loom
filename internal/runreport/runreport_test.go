@@ -37,7 +37,7 @@ const (
 	reviewSession  = "4d9f6e3a-0b5c-4a7d-9f8e-3c4d5e6f7a8b"
 	lensDispatchID = "toolu_01Wq9LensSecurityR1"
 	claudeModel    = "claude-opus-5"
-	codexModel     = "gpt-5.6"
+	codexModel     = "gpt-5.6-sol"
 )
 
 var runStart = time.Date(2026, 9, 10, 17, 2, 11, 0, time.UTC)
@@ -513,6 +513,16 @@ func TestReportCoversTheMixedRuntimeFixture(t *testing.T) {
 	if sub.Metrics.Turns != 1 || tokens(t, sub.Metrics, "claude-code").Input != 1000 || sub.DurationMs == nil || *sub.DurationMs != 202000 {
 		t.Errorf("subagent = %+v", sub.Metrics)
 	}
+	// The Codex child and lens price at gpt-5.6-sol's 2026-08-21 rate with
+	// the cache read taken out of the input: (1000−600)·4 + 600·0.4 + 100·20,
+	// then (500−100)·4 + 100·0.4 + 50·20, per million.
+	codex := execution(t, rep, "codex-01a0029b").Metrics
+	if codex.CostUSD == nil || *codex.CostUSD != 0.00384 || !codex.Pricing.Available || len(codex.PricingWarnings) != 0 {
+		t.Errorf("codex child cost = %v pricing = %+v warnings = %v, want 0.00384 available", deref(codex.CostUSD), codex.Pricing, codex.PricingWarnings)
+	}
+	if lensExec := execution(t, rep, "lens-security-r1-a1").Metrics; lensExec.CostUSD == nil || *lensExec.CostUSD != 0.00264 {
+		t.Errorf("lens cost = %v, want 0.00264", deref(lensExec.CostUSD))
+	}
 	cmd := execution(t, rep, "cmd-go-test-1")
 	if cmd.Transcript != nil || cmd.Metrics.Turns != 0 || cmd.Metrics.Transcripts != 0 || cmd.DurationMs == nil || *cmd.DurationMs != 17000 {
 		t.Errorf("command = %+v", cmd)
@@ -969,13 +979,18 @@ func TestHistoricalRunMetersSubagentRows(t *testing.T) {
 // cause named, and every other metric standing.
 func TestMissingRateLeavesMetricsReadable(t *testing.T) {
 	st, _ := fixture(t)
+	// The Codex child re-folded under the literal Codex's auto-review feature
+	// records as its model, which no vendor page prices.
+	unpriced := oneTurn(summary.AgentCodex, codexSession, "codex-auto-review", at("17:06:00"), at("17:08:00"), 1000, 600, 100, summary.KindBash, 2000)
+	unpriced.Errors = []summary.ErrorEvent{{TurnIdx: 0, Source: "exec_error", Time: at("17:07:00")}}
+	writeSession(t, st, unpriced)
 	rep := build(t, st, fixtureRun)
 
 	codex := execution(t, rep, "codex-01a0029b").Metrics
 	if codex.CostUSD != nil || codex.Pricing.Available {
 		t.Errorf("codex cost = %v pricing = %+v, want unavailable", codex.CostUSD, codex.Pricing)
 	}
-	if !reflect.DeepEqual(codex.PricingWarnings, []string{`unpriced model "` + codexModel + `" at 2026-09-10`}) {
+	if !reflect.DeepEqual(codex.PricingWarnings, []string{`unpriced model "codex-auto-review" at 2026-09-10`}) {
 		t.Errorf("codex warnings = %v", codex.PricingWarnings)
 	}
 	if codex.Turns != 1 || codex.ToolCalls != 1 || codex.TotalTokens != 1100 || codex.Failures.Tool != 1 {
@@ -1151,6 +1166,114 @@ func TestRecordWithoutSessionIsAGapUntilJoined(t *testing.T) {
 	}
 	if rep.Metrics.Descendants.Turns != 1 || rep.Metrics.Total.Turns != 2 || rep.Metrics.Total.TotalTokens != 2300+550 {
 		t.Errorf("scopes = descendants %d turns total %d turns %d tokens", rep.Metrics.Descendants.Turns, rep.Metrics.Total.Turns, rep.Metrics.Total.TotalTokens)
+	}
+	// Each scope priced under OpenAI's accounting at gpt-5.6-sol's rate:
+	// parent (2000−800)·4 + 800·0.4 + 300·20 = 11120; lens (500−100)·4 +
+	// 100·0.4 + 50·20 = 2640; per million, and the total is their sum.
+	d, tot := rep.Metrics.Descendants, rep.Metrics.Total
+	if p.CostUSD == nil || *p.CostUSD != 0.01112 || d.CostUSD == nil || *d.CostUSD != 0.00264 || tot.CostUSD == nil || *tot.CostUSD != 0.01376 {
+		t.Errorf("costs = parent %v descendants %v total %v, want 0.01112, 0.00264 and 0.01376", deref(p.CostUSD), deref(d.CostUSD), deref(tot.CostUSD))
+	}
+	if len(tot.PricingWarnings) != 0 || !tot.Pricing.Available {
+		t.Errorf("total pricing = %+v warnings = %v, want available and none", tot.Pricing, tot.PricingWarnings)
+	}
+}
+
+// A Claude root with a Codex child: each scope is priced under its own
+// runtime's cache accounting and at its own model's rate, and the total is
+// the sum of the two.
+func TestMixedRuntimeScopesPriceSeparatelyAndSum(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-mixed","ticket":"loom/mx-0001","runtime":"claude-code","agent":"claude-code","session_id":"sess-mx-root","started_at":"2026-09-15T12:00:00Z","ended_at":"2026-09-15T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-mx","run_id":"run-mixed","execution_kind":"root","agent":"claude-code","session_id":"sess-mx-root","started_at":"2026-09-15T12:00:00Z","ended_at":"2026-09-15T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-mx-security-r1-a1","run_id":"run-mixed","parent_execution_id":"root-mx","execution_kind":"lens","lens":"security","round":1,"attempt":1,"agent":"codex-cli","session_id":"sess-mx-lens","started_at":"2026-09-15T12:01:00Z","ended_at":"2026-09-15T12:05:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	root := oneTurn(summary.AgentClaude, "sess-mx-root", claudeModel, begin, begin.Add(time.Minute), 100, 0, 10, summary.KindRead, 200)
+	root.Turns[0].UserMessage = workInvocation("loom/mx-0001")
+	writeSession(t, st, root)
+	writeSession(t, st, oneTurn(summary.AgentCodex, "sess-mx-lens", "gpt-6-astra", begin.Add(time.Minute), begin.Add(5*time.Minute), 1000, 600, 100, summary.KindBash, 300))
+
+	rep := build(t, st, "run-mixed")
+	parent, desc, total := rep.Metrics.Parent, rep.Metrics.Descendants, rep.Metrics.Total
+	// Parent: claude-opus-5, 100·5 + 10·25 = 750. Descendant: gpt-6-astra at
+	// its 2026-09-03 rate with the cache read inside the input, (1000−600)·10
+	// + 600·1 + 100·50 = 9600. Per million; the total is their sum.
+	if parent.CostUSD == nil || *parent.CostUSD != 0.00075 || desc.CostUSD == nil || *desc.CostUSD != 0.0096 || total.CostUSD == nil || *total.CostUSD != 0.01035 {
+		t.Errorf("costs = parent %v descendants %v total %v, want 0.00075, 0.0096 and 0.01035", deref(parent.CostUSD), deref(desc.CostUSD), deref(total.CostUSD))
+	}
+	if len(total.PricingWarnings) != 0 || !total.Pricing.Available {
+		t.Errorf("total pricing = %+v warnings = %v, want available and none", total.Pricing, total.PricingWarnings)
+	}
+	if got := tokens(t, total, "codex-cli"); got != (Tokens{Input: 1000, Output: 100, CacheRead: 600, CacheSemantics: CacheReadInsideInput, Total: 1100}) {
+		t.Errorf("codex tokens = %+v, want the recorded counters under cache_read_included_in_input", got)
+	}
+	if got := tokens(t, total, "claude-code"); got != (Tokens{Input: 100, Output: 10, CacheSemantics: CacheSeparate, Total: 110}) {
+		t.Errorf("claude tokens = %+v", got)
+	}
+
+	// A Codex cache read larger than its input is a broken record: the unit
+	// and every scope holding it go unpriced with the cause, the parent
+	// stays priced.
+	writeSession(t, st, oneTurn(summary.AgentCodex, "sess-mx-lens", "gpt-6-astra", begin.Add(time.Minute), begin.Add(5*time.Minute), 100, 200, 10, summary.KindBash, 300))
+	rep = build(t, st, "run-mixed")
+	want := []string{"lens-mx-security-r1-a1 turn 0" + workreport.CacheReadExceedsInput}
+	if rep.Metrics.Total.CostUSD != nil || !reflect.DeepEqual(rep.Metrics.Total.PricingWarnings, want) || rep.Metrics.Parent.CostUSD == nil {
+		t.Errorf("total cost = %v warnings = %v parent cost = %v, want null, %v and the parent priced", deref(rep.Metrics.Total.CostUSD), rep.Metrics.Total.PricingWarnings, deref(rep.Metrics.Parent.CostUSD), want)
+	}
+}
+
+// cursorRun folds a recorded Cursor run whose root session holds one turn
+// with the given counters, and returns its report.
+func cursorRun(t *testing.T, model string, usageUnavailable bool, input, cacheRead, output int64) *Report {
+	t.Helper()
+	st, _ := openStore(t)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-cu","ticket":"loom/cu-0001","runtime":"cursor-cli","agent":"cursor-cli","session_id":"sess-cu","started_at":"2026-09-15T12:00:00Z","ended_at":"2026-09-15T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-cu","run_id":"run-cu","execution_kind":"root","agent":"cursor-cli","session_id":"sess-cu","started_at":"2026-09-15T12:00:00Z","ended_at":"2026-09-15T12:10:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	sess := oneTurn(summary.AgentCursor, "sess-cu", model, begin, begin.Add(time.Minute), input, cacheRead, output, summary.KindRead, 200)
+	sess.Turns[0].UserMessage = "$work loom/cu-0001"
+	sess.UsageUnavailable = usageUnavailable
+	writeSession(t, st, sess)
+	return build(t, st, "run-cu")
+}
+
+// A Cursor session that recorded billable counters prices at the rate the
+// Cursor page states for its identity when no cache token is involved; a
+// cache token has no documented accounting and leaves the cost null with
+// the reason; and the occupancy-only journals Cursor writes today fold with
+// usage_known = 0, so nothing is counted as a token and nothing is priced.
+func TestCursorUsageIsPricedOnlyWhenBillableAndUnambiguous(t *testing.T) {
+	// Composer 2.5 (Fast): 1000·3 + 100·15 = 4500 per million.
+	m := cursorRun(t, "composer-2.5-fast", false, 1000, 0, 100).Metrics.Total
+	if m.CostUSD == nil || *m.CostUSD != 0.0045 || len(m.PricingWarnings) != 0 || m.TokenUsageUnavailable {
+		t.Errorf("known usage: cost %v warnings %v unavailable %v, want 0.0045, none and measured", deref(m.CostUSD), m.PricingWarnings, m.TokenUsageUnavailable)
+	}
+	if got := tokens(t, m, "cursor-cli"); got != (Tokens{Input: 1000, Output: 100, CacheSemantics: CacheUnknown, Total: 1100}) {
+		t.Errorf("cursor tokens = %+v", got)
+	}
+
+	m = cursorRun(t, "composer-2.5-fast", false, 1000, 400, 100).Metrics.Total
+	want := []string{"root-cu turn 0: cache accounting semantics unknown for cursor-cli"}
+	if m.CostUSD != nil || !reflect.DeepEqual(m.PricingWarnings, want) || m.Pricing.Available {
+		t.Errorf("cache read under unknown semantics: cost %v warnings %v, want null and %v", deref(m.CostUSD), m.PricingWarnings, want)
+	}
+
+	m = cursorRun(t, "composer-2.5-fast", true, 0, 0, 0).Metrics.Total
+	want = []string{"root-cu: token usage not recorded"}
+	if !m.TokenUsageUnavailable || m.CostUSD != nil || !reflect.DeepEqual(m.PricingWarnings, want) {
+		t.Errorf("occupancy-only session: unavailable %v cost %v warnings %v, want unavailable, null and %v", m.TokenUsageUnavailable, deref(m.CostUSD), m.PricingWarnings, want)
+	}
+	tok := tokens(t, m, "cursor-cli")
+	if !tok.Unavailable || tok.Input != 0 || tok.Output != 0 || tok.CacheRead != 0 || tok.CacheSemantics != CacheUnknown {
+		t.Errorf("occupancy-only bucket = %+v, want unavailable with nothing counted", tok)
+	}
+	wire, _ := json.Marshal(m)
+	if !strings.Contains(string(wire), `"total_tokens":null`) || !strings.Contains(string(wire), `"cost_usd":null`) {
+		t.Errorf("occupancy-only wire = %s, want null total tokens and cost", wire)
 	}
 }
 

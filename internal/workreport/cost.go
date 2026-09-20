@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"loom/internal/parse/summary"
 	"loom/internal/pricing"
 )
 
@@ -497,8 +498,61 @@ func UsageOf(input, output, cacheRead, cacheCreation, cacheCreation1h int64) (pr
 	}, true
 }
 
+// Cache semantics labels, one per runtime. Claude records input tokens
+// exclusive of the cache buckets; Codex records cached_input_tokens as a
+// subset of input_tokens; Cursor journals expose no billing counters, so
+// nothing is known about how they would account a cache. A price or a total
+// that treated both the same way would count a Codex cache read twice.
+const (
+	CacheSeparate        = "cache_separate"
+	CacheReadInsideInput = "cache_read_included_in_input"
+	CacheUnknown         = "unknown"
+)
+
+// CacheSemantics is the label for a summaries.db agent value.
+func CacheSemantics(agent string) string {
+	switch agent {
+	case string(summary.AgentClaude):
+		return CacheSeparate
+	case string(summary.AgentCodex):
+		return CacheReadInsideInput
+	default:
+		return CacheUnknown
+	}
+}
+
+// BillableUsage is the usage one unit is priced at under agent's cache
+// semantics, or the reason it cannot be, as a suffix for the unit's warning.
+// A cache read inside the input is taken back out so the two price at their
+// own rates; a read larger than the input is a broken record. Under unknown
+// semantics only a unit with no cache tokens has a known billable split — a
+// cache read there might or might not be inside the input, and pricing it
+// either way is a guess.
+func BillableUsage(agent string, input, output, cacheRead, cacheCreation, cacheCreation1h int64) (pricing.Usage, string) {
+	u, ok := UsageOf(input, output, cacheRead, cacheCreation, cacheCreation1h)
+	if !ok {
+		return pricing.Usage{}, BreakdownExceedsTotal
+	}
+	switch CacheSemantics(agent) {
+	case CacheReadInsideInput:
+		u.Input -= cacheRead
+		if u.Input < 0 {
+			return pricing.Usage{}, CacheReadExceedsInput
+		}
+	case CacheUnknown:
+		if cacheRead != 0 || cacheCreation != 0 {
+			return pricing.Usage{}, ": cache accounting semantics unknown for " + agent
+		}
+	}
+	return u, ""
+}
+
 // BreakdownExceedsTotal is the warning for a unit UsageOf refused.
 const BreakdownExceedsTotal = ": cache write breakdown exceeds total"
+
+// CacheReadExceedsInput is the warning for a unit whose cache read, recorded
+// as a subset of its input, is larger than that input.
+const CacheReadExceedsInput = ": cache read exceeds input"
 
 // RecordsDisagree is the warning for a unit whose records did not all carry
 // one model and speed: its tokens have no single rate.
@@ -563,9 +617,9 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 		// A turn with no tokens costs nothing whatever its model, so it
 		// cannot make the run unpriceable.
 		subject := fmt.Sprintf("turn %d", t.idx)
-		u, ok := UsageOf(t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreation, t.cacheCreation1h)
-		if !ok {
-			p.Warn(subject + BreakdownExceedsTotal)
+		u, reason := BillableUsage(inv.agent, t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreation, t.cacheCreation1h)
+		if reason != "" {
+			p.Warn(subject + reason)
 			priced = false
 		} else if t.usageMixed && HasTokens(u) {
 			p.Warn(subject + RecordsDisagree)
@@ -646,10 +700,10 @@ func measure(inv invocationRow, endIdx int, endsAt time.Time, data *costSessionD
 			subagentsPriced = false
 			continue
 		}
-		u, ok := UsageOf(s.inputTokens.Int64, s.outputTokens.Int64, s.cacheReadTokens.Int64,
+		u, reason := BillableUsage(inv.agent, s.inputTokens.Int64, s.outputTokens.Int64, s.cacheReadTokens.Int64,
 			s.cacheCreation.Int64, s.cacheCreation1h.Int64)
-		if !ok {
-			p.Warn(subject + BreakdownExceedsTotal)
+		if reason != "" {
+			p.Warn(subject + reason)
 			subagentsPriced = false
 		} else if s.usageMixed.Bool {
 			p.Warn(subject + RecordsDisagree)

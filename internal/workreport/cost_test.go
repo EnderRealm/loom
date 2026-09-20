@@ -681,16 +681,45 @@ func TestCacheWritesArePricedByTTL(t *testing.T) {
 	}
 }
 
+// codexPricedSession is pricedSession in Codex's form: a codex-cli session
+// whose turn records cached input as a subset of input, invoked on
+// 2026-09-15, when gpt-6-astra's 2026-09-03 rate is in force.
+func codexPricedSession(model string, turn summary.Turn) *summary.SessionSummary {
+	sum := pricedSession(model, turn)
+	sum.Agent = summary.AgentCodex
+	sum.Turns[0].UserMessage = "$work loom/priced-1111"
+	shift(sum, time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC))
+	return sum
+}
+
+// cursorPricedSession is pricedSession in Cursor's form, invoked at base.
+func cursorPricedSession(model string, turn summary.Turn) *summary.SessionSummary {
+	sum := pricedSession(model, turn)
+	sum.Agent = summary.AgentCursor
+	sum.Turns[0].UserMessage = "$work loom/priced-1111"
+	return sum
+}
+
+// shift moves a single-turn session's clock to start at `at`.
+func shift(sum *summary.SessionSummary, at time.Time) {
+	sum.StartTime = at
+	sum.EndTime = at.Add(time.Hour)
+	sum.Turns[0].StartedAt = at
+}
+
 func TestUnpricedModelReportsNullCostAndNamesTheModel(t *testing.T) {
 	f := newFixture(t)
-	f.add(pricedSession("gpt-5.6-sol", summary.Turn{InputTokens: 1_000_000, OutputTokens: 100_000}))
+	// codex-auto-review is the literal Codex records as the model of its
+	// auto-review feature; no vendor page prices it.
+	f.add(codexPricedSession("codex-auto-review", summary.Turn{InputTokens: 1_000_000, OutputTokens: 100_000}))
 
 	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
 	if run.CostUSD != nil {
 		t.Fatalf("cost_usd = %v, want null: an unknown model must not price at a default", *run.CostUSD)
 	}
-	if len(run.PricingWarnings) != 1 || !strings.Contains(run.PricingWarnings[0], `"gpt-5.6-sol"`) {
-		t.Fatalf("pricing_warnings = %v, want one line naming gpt-5.6-sol", run.PricingWarnings)
+	want := `unpriced model "codex-auto-review" at 2026-09-15`
+	if len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("pricing_warnings = %v, want [%s]", run.PricingWarnings, want)
 	}
 	out, err := json.Marshal(run)
 	if err != nil {
@@ -897,5 +926,131 @@ func TestDispatchWhoseRecordsDisagreeIsUnpriced(t *testing.T) {
 	}
 	if run.CostUSD == nil || *run.CostUSD != 5 {
 		t.Fatalf("cost_usd = %v, want 5: the run's own cost is unaffected", run.CostUSD)
+	}
+}
+
+// TestCodexCacheReadIsPricedInsideInput pins OpenAI's accounting: a Codex
+// turn's cache read is a subset of its input, so the read is taken back out
+// of the input before each is priced at its own rate, and neither the turn
+// nor a subagent row under the same session charges the cached share twice.
+// The reported token counters stay as recorded.
+func TestCodexCacheReadIsPricedInsideInput(t *testing.T) {
+	f := newFixture(t)
+	sum := codexPricedSession("gpt-6-astra", summary.Turn{InputTokens: 1_000_000, CacheReadTokens: 600_000, OutputTokens: 100_000})
+	sum.Subagents = []summary.Subagent{
+		{ParentTurnIdx: 0, AgentType: "reviewer", Usage: &summary.SubagentUsage{
+			Model: "gpt-6-astra", InputTokens: 200_000, CacheReadTokens: 200_000, OutputTokens: 10_000,
+		}},
+	}
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	// gpt-6-astra: 400,000 billable input at $10/M = 4; 600,000 cached input
+	// at $1/M = 0.6; 100,000 output at $50/M = 5.
+	if run.CostUSD == nil || *run.CostUSD != 9.6 {
+		t.Fatalf("cost_usd = %v, want 9.6", run.CostUSD)
+	}
+	// The dispatch's input was entirely cached: 0 billable input; 200,000
+	// cached at $1/M = 0.2; 10,000 output at $50/M = 0.5.
+	if run.SubagentCostUSD == nil || *run.SubagentCostUSD != 0.7 {
+		t.Fatalf("subagent_cost_usd = %v, want 0.7", run.SubagentCostUSD)
+	}
+	if run.PricingWarnings != nil {
+		t.Fatalf("pricing_warnings = %v, want nil", run.PricingWarnings)
+	}
+	if run.InputTokens != 1_000_000 || run.CacheReadTokens != 600_000 {
+		t.Fatalf("tokens = %d input %d cache read, want the recorded 1000000 and 600000", run.InputTokens, run.CacheReadTokens)
+	}
+}
+
+func TestCodexCacheReadExceedingInputIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	f.add(codexPricedSession("gpt-6-astra", summary.Turn{InputTokens: 100, CacheReadTokens: 200, OutputTokens: 10}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null: a negative billable input is a broken record, not a discount", *run.CostUSD)
+	}
+	want := "turn 0" + CacheReadExceedsInput
+	if len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("pricing_warnings = %v, want [%s]", run.PricingWarnings, want)
+	}
+}
+
+// TestCodexRunBeforeTheRateIsUnpriced pins the date boundary on an OpenAI
+// entry: gpt-5.6-sol's documented rate starts 2026-08-21, so a run invoked
+// at base (2026-08-01) is not priced at it.
+func TestCodexRunBeforeTheRateIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	sum := codexPricedSession("gpt-5.6-sol", summary.Turn{InputTokens: 1_000_000, OutputTokens: 100_000})
+	shift(sum, base)
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	want := `unpriced model "gpt-5.6-sol" at 2026-08-01`
+	if run.CostUSD != nil || len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("cost_usd = %v warnings = %v, want null and [%s]", run.CostUSD, run.PricingWarnings, want)
+	}
+}
+
+// TestCursorKnownUsageIsPricedAtItsMappedRate: a Cursor session that did
+// record billable counters prices at the rate the Cursor page states for
+// the recorded identity, as long as no cache token needs an accounting
+// convention the journal does not document.
+func TestCursorKnownUsageIsPricedAtItsMappedRate(t *testing.T) {
+	f := newFixture(t)
+	f.add(cursorPricedSession("composer-2.5-fast", summary.Turn{InputTokens: 1_000_000, OutputTokens: 100_000}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	// Composer 2.5 (Fast): 1,000,000 input at $3/M = 3; 100,000 output at
+	// $15/M = 1.5.
+	if run.CostUSD == nil || *run.CostUSD != 4.5 {
+		t.Fatalf("cost_usd = %v, want 4.5", run.CostUSD)
+	}
+	if run.TokenUsageUnavailable || run.PricingWarnings != nil {
+		t.Fatalf("run = unavailable %v warnings %v, want measured and none", run.TokenUsageUnavailable, run.PricingWarnings)
+	}
+}
+
+func TestCursorCacheTokensAreUnpricedUnderUnknownSemantics(t *testing.T) {
+	f := newFixture(t)
+	f.add(cursorPricedSession("composer-2.5-fast", summary.Turn{InputTokens: 1_000_000, CacheReadTokens: 500_000, OutputTokens: 100_000}))
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.CostUSD != nil {
+		t.Fatalf("cost_usd = %v, want null: whether a Cursor cache read sits inside the input is undocumented", *run.CostUSD)
+	}
+	want := "turn 0: cache accounting semantics unknown for cursor-cli"
+	if len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("pricing_warnings = %v, want [%s]", run.PricingWarnings, want)
+	}
+}
+
+// TestCursorOccupancyOnlySessionIsUnpriced: the journals Cursor CLI writes
+// today expose context-window occupancy and no billing counters, so the
+// session folds with usage_known = 0 and a mapped rate changes nothing —
+// the tokens are null, not zero, and the cost is null with the reason.
+func TestCursorOccupancyOnlySessionIsUnpriced(t *testing.T) {
+	f := newFixture(t)
+	sum := cursorPricedSession("composer-2.5-fast", summary.Turn{})
+	sum.UsageUnavailable = true
+	f.add(sum)
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if !run.TokenUsageUnavailable || run.CostUSD != nil {
+		t.Fatalf("run = unavailable %v cost %v, want unavailable and null", run.TokenUsageUnavailable, run.CostUSD)
+	}
+	want := "token usage not recorded"
+	if len(run.PricingWarnings) != 1 || run.PricingWarnings[0] != want {
+		t.Fatalf("pricing_warnings = %v, want [%s]", run.PricingWarnings, want)
+	}
+	out, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"input_tokens":null`, `"output_tokens":null`, `"cache_read_tokens":null`, `"cost_usd":null`} {
+		if !strings.Contains(string(out), field) {
+			t.Fatalf("json %s lacks %s", out, field)
+		}
 	}
 }

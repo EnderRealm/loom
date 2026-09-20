@@ -84,13 +84,15 @@ const (
 	WallLastObserved = "started_at→last_observed_at"
 )
 
-// Cache semantics labels. Claude records input tokens exclusive of the cache
-// buckets; Codex records cached_input_tokens as a subset of input_tokens. A
-// total that summed both the same way would count a Codex cache read twice.
+// Cache semantics labels, shared with cost-report so the two reports price a
+// runtime's cache tokens under one rule. Claude records input tokens
+// exclusive of the cache buckets; Codex records cached_input_tokens as a
+// subset of input_tokens. A total that summed both the same way would count a
+// Codex cache read twice.
 const (
-	CacheSeparate        = "cache_separate"
-	CacheReadInsideInput = "cache_read_included_in_input"
-	CacheUnknown         = "unknown"
+	CacheSeparate        = workreport.CacheSeparate
+	CacheReadInsideInput = workreport.CacheReadInsideInput
+	CacheUnknown         = workreport.CacheUnknown
 )
 
 // LegacyActiveMsSemantics is the fixed label beside every legacy_active_ms.

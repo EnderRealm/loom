@@ -303,7 +303,7 @@ func (m *meter) add(u *unit, transcript bool) {
 			m.priced = false
 			m.m.TokenUsageUnavailable = true
 			if m.m.TokensByRuntime[u.data.agent] == nil {
-				m.m.TokensByRuntime[u.data.agent] = &Tokens{CacheSemantics: cacheSemantics(u.data.agent)}
+				m.m.TokensByRuntime[u.data.agent] = &Tokens{CacheSemantics: workreport.CacheSemantics(u.data.agent)}
 			}
 			m.m.TokensByRuntime[u.data.agent].Unavailable = true
 		}
@@ -409,14 +409,14 @@ func (m *meter) addSubagent(u *unit) {
 		s.inputTokens.Int64, s.outputTokens.Int64, s.cacheReadTokens.Int64, s.cacheCreation.Int64, s.cacheCreation1h.Int64)
 }
 
-// addTokens adds one unit's usage to its runtime's bucket and prices it. The
-// priced input is the billable one: for a runtime whose input already holds
-// the cache read, the read is taken back out before the two are priced at
-// their own rates, so a rate for such a model would not count it twice.
+// addTokens adds one unit's usage to its runtime's bucket and prices it at
+// the billable split workreport.BillableUsage derives under the runtime's
+// cache semantics, so a Codex cache read is not counted twice and a cache
+// token under unknown semantics is not priced at a guess.
 func (m *meter) addTokens(agent, subject, model, speed string, mixed bool, input, output, cacheRead, cacheWrite, cacheWrite1h int64) {
 	tok := m.m.TokensByRuntime[agent]
 	if tok == nil {
-		tok = &Tokens{CacheSemantics: cacheSemantics(agent)}
+		tok = &Tokens{CacheSemantics: workreport.CacheSemantics(agent)}
 		m.m.TokensByRuntime[agent] = tok
 	}
 	tok.Input += input
@@ -425,18 +425,9 @@ func (m *meter) addTokens(agent, subject, model, speed string, mixed bool, input
 	tok.CacheWrite += cacheWrite
 	tok.CacheWrite1h += cacheWrite1h
 
-	billableInput := input
-	if tok.CacheSemantics == CacheReadInsideInput {
-		billableInput = input - cacheRead
-		if billableInput < 0 {
-			m.p.Warn(subject + ": cache read exceeds input")
-			m.priced = false
-			return
-		}
-	}
-	u, ok := workreport.UsageOf(billableInput, output, cacheRead, cacheWrite, cacheWrite1h)
-	if !ok {
-		m.p.Warn(subject + workreport.BreakdownExceedsTotal)
+	u, reason := workreport.BillableUsage(agent, input, output, cacheRead, cacheWrite, cacheWrite1h)
+	if reason != "" {
+		m.p.Warn(subject + reason)
 		m.priced = false
 		return
 	}
@@ -482,17 +473,6 @@ func (m *meter) metrics() Metrics {
 		Available: out.CostUSD != nil,
 	}
 	return out
-}
-
-func cacheSemantics(agent string) string {
-	switch agent {
-	case string(summary.AgentClaude):
-		return CacheSeparate
-	case string(summary.AgentCodex):
-		return CacheReadInsideInput
-	default:
-		return CacheUnknown
-	}
 }
 
 func appendDistinct(list []string, v string) []string {

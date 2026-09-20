@@ -61,8 +61,10 @@ The observed source records context-window `used_tokens` and `max_tokens`.
 These describe occupancy, not billable input/output usage; their values are
 preserved in the `usage:context_window_only` diagnostic and in the source.
 The inspected source does not record per-session CLI version, billing input,
-output or cache counters. Model names do not establish a price or cache
-accounting convention.
+output or cache counters. A model name can resolve a published rate — see
+[Model pricing coverage](pricing.md) for which recorded Cursor identities
+do — but it does not establish a cache accounting convention, and a rate
+alone prices nothing without billable counters.
 
 Schema **11** adds `sessions.usage_known` and `parent_tool_call_id`, plus
 `tool_calls.child_session_id`, `child_duration_ms` and `child_resume_id`. Cursor
@@ -73,7 +75,12 @@ preserving observed turn/tool/error counts and durations. Cost-report also
 emits NULL token counters and cost. The TUI displays unavailable tokens and
 cost while retaining observed activity. A mixed-runtime scope with any
 unavailable usage has an unavailable total, even if other buckets are known.
-No Cursor cost calculation is supported from these journals.
+No Cursor cost calculation is supported from these journals: context-window
+occupancy is never treated as billable tokens. Should a future journal record
+billing counters, a session prices at its identity's mapped rate only while it
+carries no cache tokens; a cache read or write under the `unknown` convention
+leaves the cost null with the reason `cache accounting semantics unknown for
+cursor-cli` rather than guessing whether the read sits inside the input.
 
 Unobserved tool durations are NULL in storage and have a
 `tool_call:duration_unavailable` diagnostic. Run reports count timed and
