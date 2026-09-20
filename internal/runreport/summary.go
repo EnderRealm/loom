@@ -8,6 +8,7 @@ import (
 	"loom/internal/pricing"
 	"loom/internal/runs"
 	"loom/internal/summaries"
+	"loom/internal/workreport"
 )
 
 // Summary is one run as a list row: the figures a reader compares runs by,
@@ -45,7 +46,12 @@ type Summary struct {
 	ToolCalls           int
 	Failures            int
 	Children            int
-	CostUSD             *float64
+	// CostUSD is the all-or-nothing total. The other fields retain the
+	// independently priced portions and identify a descendant pricing gap.
+	CostUSD                   *float64
+	ParentCostUSD             *float64
+	PricedDescendantCostUSD   *float64
+	DescendantCostUnavailable bool
 	// LegacyActiveMs is the parent span's, cost-report's active_ms.
 	LegacyActiveMs int64
 }
@@ -53,30 +59,54 @@ type Summary struct {
 // SummaryOf reduces a report to its row.
 func SummaryOf(rep *Report) Summary {
 	total := rep.Metrics.Total
+	pricedDescendants := pricedDescendantCost(rep)
 	return Summary{
-		RunID:               rep.Run.RunID,
-		Ticket:              rep.Run.Ticket,
-		Runtime:             rep.Run.Runtime,
-		StartedAt:           parseTime(rep.Run.StartedAt),
-		Outcome:             rep.Run.Outcome,
-		TelemetryState:      rep.Telemetry.State,
-		Pending:             len(rep.Telemetry.ExecutionsPending),
-		LastObservedAt:      parseTime(rep.Run.LastObservedAt),
-		WallMs:              rep.Time.WallMs,
-		ExecutionTimeMs:     rep.Time.ExecutionTimeMs,
-		TimedExecutions:     total.ExecutionTimeCoverage.Timed,
-		UntimedExecutions:   total.ExecutionTimeCoverage.Untimed,
-		ToolTimeMs:          rep.Time.ToolTimeMs,
-		ToolTimeUnavailable: total.ToolTimeUnavailable || total.ToolTimeCoverage.Untimed > 0,
-		Metered:             len(total.TokensByRuntime) > 0,
-		TotalTokens:         total.TotalTokens,
-		TokensUnavailable:   total.TokenUsageUnavailable,
-		ToolCalls:           total.ToolCalls,
-		Failures:            total.Failures.Tool + total.Failures.API + total.Failures.Process + total.Failures.Other,
-		Children:            rep.Metrics.Descendants.Executions,
-		CostUSD:             total.CostUSD,
-		LegacyActiveMs:      rep.Time.LegacyActiveMs,
+		RunID:                   rep.Run.RunID,
+		Ticket:                  rep.Run.Ticket,
+		Runtime:                 rep.Run.Runtime,
+		StartedAt:               parseTime(rep.Run.StartedAt),
+		Outcome:                 rep.Run.Outcome,
+		TelemetryState:          rep.Telemetry.State,
+		Pending:                 len(rep.Telemetry.ExecutionsPending),
+		LastObservedAt:          parseTime(rep.Run.LastObservedAt),
+		WallMs:                  rep.Time.WallMs,
+		ExecutionTimeMs:         rep.Time.ExecutionTimeMs,
+		TimedExecutions:         total.ExecutionTimeCoverage.Timed,
+		UntimedExecutions:       total.ExecutionTimeCoverage.Untimed,
+		ToolTimeMs:              rep.Time.ToolTimeMs,
+		ToolTimeUnavailable:     total.ToolTimeUnavailable || total.ToolTimeCoverage.Untimed > 0,
+		Metered:                 len(total.TokensByRuntime) > 0,
+		TotalTokens:             total.TotalTokens,
+		TokensUnavailable:       total.TokenUsageUnavailable,
+		ToolCalls:               total.ToolCalls,
+		Failures:                total.Failures.Tool + total.Failures.API + total.Failures.Process + total.Failures.Other,
+		Children:                rep.Metrics.Descendants.Executions,
+		CostUSD:                 total.CostUSD,
+		ParentCostUSD:           rep.Metrics.Parent.CostUSD,
+		PricedDescendantCostUSD: pricedDescendants,
+		DescendantCostUnavailable: rep.Metrics.Descendants.Executions > 0 &&
+			rep.Metrics.Descendants.CostUSD == nil,
+		LegacyActiveMs: rep.Time.LegacyActiveMs,
 	}
+}
+
+func pricedDescendantCost(rep *Report) *float64 {
+	if rep.Metrics.Descendants.CostUSD != nil {
+		return rep.Metrics.Descendants.CostUSD
+	}
+	var cost float64
+	priced := false
+	for _, execution := range rep.Executions {
+		if execution.Kind == runs.KindRoot || !execution.Counted || execution.Metrics.CostUSD == nil {
+			continue
+		}
+		cost += *execution.Metrics.CostUSD
+		priced = true
+	}
+	if !priced {
+		return nil
+	}
+	return workreport.RoundUSD(cost)
 }
 
 // ListSummaries opens dbPath the way Load does and summarizes every run

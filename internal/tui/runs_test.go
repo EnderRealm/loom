@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
@@ -208,6 +209,40 @@ func TestRunsRenderUnknownAsUnavailable(t *testing.T) {
 	row = m.renderRow(done, false)
 	if !strings.Contains(row, "completed") || !strings.Contains(row, "complete ") || strings.Contains(row, "partial") {
 		t.Errorf("completed row with complete telemetry:\n%s", row)
+	}
+}
+
+func TestRunsRenderPricedParentWhenDescendantCostIsUnavailable(t *testing.T) {
+	var m runsModel
+	m.setSize(160, 20)
+	row := runreport.Summary{
+		RunID: "r", Children: 1, ParentCostUSD: usd(14.62), DescendantCostUnavailable: true,
+	}
+	if got := m.renderRow(row, false); !strings.Contains(got, "$14.62+") || lipgloss.Width(got) > m.width {
+		t.Errorf("row with an unpriced descendant lacks the marked parent cost:\n%s", got)
+	}
+
+	row.PricedDescendantCostUSD = usd(1.25)
+	if got := m.renderRow(row, false); !strings.Contains(got, "$15.87+") {
+		t.Errorf("row with mixed priced and unpriced descendants lacks the marked subtotal:\n%s", got)
+	}
+
+	row.CostUSD = usd(16)
+	if got := m.renderRow(row, false); !strings.Contains(got, "$16.0000") || strings.Contains(got, "$16.0000+") {
+		t.Errorf("fully priced row does not show the unmarked total:\n%s", got)
+	}
+
+	row.CostUSD = nil
+	row.ParentCostUSD = nil
+	row.PricedDescendantCostUSD = usd(1.25)
+	row.DescendantCostUnavailable = false
+	if got := m.renderRow(row, false); !strings.Contains(got, "$1.25+") {
+		t.Errorf("row with an unpriced parent lacks the marked descendant cost:\n%s", got)
+	}
+
+	row.PricedDescendantCostUSD = nil
+	if got := m.renderRow(row, false); !strings.Contains(got, unavailable) || strings.Contains(got, "$0") {
+		t.Errorf("row with no priced scope does not show unavailable:\n%s", got)
 	}
 }
 

@@ -68,6 +68,35 @@ func TestListSummariesAgreesWithTheReport(t *testing.T) {
 	if row.CostUSD != nil || total.CostUSD != nil {
 		t.Errorf("row cost = %v, report %v, want both unavailable", row.CostUSD, total.CostUSD)
 	}
+	if row.ParentCostUSD == nil || *row.ParentCostUSD != *rep.Metrics.Parent.CostUSD {
+		t.Errorf("row parent cost = %v, report %v", row.ParentCostUSD, rep.Metrics.Parent.CostUSD)
+	}
+	if row.PricedDescendantCostUSD == nil || !row.DescendantCostUnavailable {
+		t.Errorf("row priced descendant cost = %v unavailable = %v, want priced descendants beside the unpriced codex gap", row.PricedDescendantCostUSD, row.DescendantCostUnavailable)
+	}
+}
+
+func TestSummaryCarriesPricedDescendantSubtotalAcrossGap(t *testing.T) {
+	priced, duplicate := 1.25, 9.0
+	rep := &Report{
+		Metrics: Scopes{
+			Parent:      Metrics{Executions: 1},
+			Descendants: Metrics{Executions: 3},
+		},
+		Executions: []ExecutionMetrics{
+			{Kind: runs.KindRoot, Counted: true, Metrics: Metrics{}},
+			{Kind: runs.KindLens, Counted: true, Metrics: Metrics{CostUSD: &priced}},
+			{Kind: runs.KindLens, Counted: true, Metrics: Metrics{}},
+			{Kind: runs.KindSubagent, Counted: false, Metrics: Metrics{CostUSD: &duplicate}},
+		},
+	}
+	row := SummaryOf(rep)
+	if row.PricedDescendantCostUSD == nil || *row.PricedDescendantCostUSD != priced {
+		t.Errorf("priced descendant subtotal = %v, want %v without the duplicate", row.PricedDescendantCostUSD, priced)
+	}
+	if !row.DescendantCostUnavailable {
+		t.Error("mixed priced and unpriced descendants did not retain the pricing gap")
+	}
 }
 
 func TestListSummariesBoundsTheRootTranscriptWithItsOwnInvocation(t *testing.T) {

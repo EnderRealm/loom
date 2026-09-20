@@ -217,7 +217,9 @@ var runSortColumns = []runSortColumn{
 		return moreInt64(int64(a.Children), int64(b.Children), func() bool { return runOrder(a, b) })
 	}},
 	{"COST", func(a, b runreport.Summary) bool {
-		return moreFloatPtr(a.CostUSD, b.CostUSD, func() bool { return runOrder(a, b) })
+		aCost, _ := summaryCost(a)
+		bCost, _ := summaryCost(b)
+		return moreFloatPtr(aCost, bCost, func() bool { return runOrder(a, b) })
 	}},
 }
 
@@ -485,6 +487,30 @@ func costCell(usd *float64) string {
 	return fmt.Sprintf("$%.4f", *usd)
 }
 
+func summaryCost(s runreport.Summary) (*float64, bool) {
+	if s.CostUSD != nil {
+		return s.CostUSD, false
+	}
+	var cost float64
+	priced := false
+	partial := s.ParentCostUSD == nil
+	if s.ParentCostUSD != nil {
+		cost += *s.ParentCostUSD
+		priced = true
+	}
+	if s.Children > 0 {
+		partial = partial || s.DescendantCostUnavailable
+		if s.PricedDescendantCostUSD != nil {
+			cost += *s.PricedDescendantCostUSD
+			priced = true
+		}
+	}
+	if !priced {
+		return nil, false
+	}
+	return &cost, partial
+}
+
 func (m runsModel) renderRow(s runreport.Summary, selected bool) string {
 	selBg := lipgloss.NewStyle()
 	if selected {
@@ -562,10 +588,13 @@ func (m runsModel) renderRow(s runreport.Summary, selected bool) string {
 	childCell := padRightBg(gray.Render(itoa(s.Children)), colRunChildren, bg)
 
 	var cost string
-	if s.CostUSD == nil {
+	displayCost, partial := summaryCost(s)
+	if displayCost == nil {
 		cost = muted.Render(costCell(nil))
+	} else if partial {
+		cost = white.Render(fmt.Sprintf("$%.2f+", *displayCost))
 	} else {
-		cost = white.Render(costCell(s.CostUSD))
+		cost = white.Render(costCell(displayCost))
 	}
 
 	sp := "  "
