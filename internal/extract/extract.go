@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -368,7 +369,7 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 		// The scopes are named, and the remedy with them: a count alone reads as
 		// a defect, where the whole of the fix is a directory nobody created.
 		log.Printf("sweep: %d session(s) waiting on a knowledge scope (%s) — onboard with: %s",
-			total(r.pendingScopes), formatCounts(r.pendingScopes), ScopeAddCommand)
+			total(r.pendingScopes), formatPendingScopes(r.pendingScopes), ScopeAddCommand)
 	}
 	if len(r.unresolvedReasons) > 0 {
 		// The rest of the scope failures, which no directory fixes. Named by
@@ -489,6 +490,44 @@ func boundEcho(s string, limit int) (string, bool) {
 		return s, false
 	}
 	return string([]rune(s)[:limit]), true
+}
+
+// pendingScopeListLimit caps how many pending scopes the sweep's waiting line
+// names. A pending scope is a client-derived name that has cleared scopePattern,
+// which bounds neither its length nor how many distinct ones a batch of sessions
+// can carry, and the decision is re-made every sweep by design — so each name
+// listed is restated on every tick indefinitely. Enough to read back the
+// scopes an operator would onboard at once; past that the count says the
+// rest, and `loom status` lists them all.
+const pendingScopeListLimit = 8
+
+// formatPendingScopes renders the sweep's pending-scope breakdown: the same
+// fixed order as formatCounts, each name bounded at scopeEchoLimit, and at most
+// pendingScopeListLimit entries with the remainder summarized. Bare rather than
+// quoted, like the reason breakdowns beside it: every key has cleared
+// scopePattern, which admits no control character.
+func formatPendingScopes(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	listed := keys
+	if len(listed) > pendingScopeListLimit {
+		listed = keys[:pendingScopeListLimit]
+	}
+	parts := make([]string, 0, len(listed)+1)
+	for _, k := range listed {
+		name := k
+		if bounded, cut := boundEcho(k, scopeEchoLimit); cut {
+			name = bounded + "…"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%d", name, counts[k]))
+	}
+	if rest := len(keys) - len(listed); rest > 0 {
+		parts = append(parts, fmt.Sprintf("… and %d more scope(s)", rest))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // echoScope renders a rejected name for a log line: bounded, and quoted so a

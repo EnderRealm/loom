@@ -134,6 +134,10 @@ func TestBackfillDryRunReportsEveryExclusion(t *testing.T) {
 	e.addSession("f1", forgeRemote)
 	e.addSession("ghost", "https://github.com/EnderRealm/ghostwheel.git")
 	e.addSession("bare", "")
+	// Bucketed through the sweep's classifier, so the label matches what the
+	// sweep reports for the same session rather than folding into unknown
+	// scope — which onboarding would then falsely promise to fix.
+	e.addSession("unsafe", "https://github.com/BadOwner/..")
 	e.addSessionAs(summary.AgentCodex, "rollout", loomRemote, "", 0)
 
 	st, err := loadState()
@@ -146,8 +150,8 @@ func TestBackfillDryRunReportsEveryExclusion(t *testing.T) {
 
 	logs := e.logs.String()
 	for _, want := range []string{
-		"backfill dry run: scanned 6/6 sessions, 2 to extract (forge=1, loom=1)",
-		"backfill dry run: 4 excluded (already visited=1, no git remote=1, unknown scope=1, unsupported agent=1)",
+		"backfill dry run: scanned 7/7 sessions, 2 to extract (forge=1, loom=1)",
+		"backfill dry run: 5 excluded (already visited=1, no git remote=1, unknown scope=1, unsafe scope=1, unsupported agent=1)",
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("log missing %q; got:\n%s", want, logs)

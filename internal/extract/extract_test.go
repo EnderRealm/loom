@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 
@@ -207,6 +208,53 @@ func TestSweepExtractsOnceAcrossRuns(t *testing.T) {
 	want := "loom " + input
 	if len(e.runs) != 1 || e.runs[0] != want {
 		t.Fatalf("runs = %v, want exactly [%q] (a session is extracted at most once)", e.runs, want)
+	}
+}
+
+// The pending-scope line is keyed by client-derived names that scopePattern
+// bounds in neither length nor number, and it is restated every sweep: its
+// length has to be a function of the constants, not of the backlog.
+func TestSweepBoundsThePendingScopeLine(t *testing.T) {
+	e := newEnv(t, "loom")
+	const distinct = 30
+	for i := 0; i < distinct; i++ {
+		name := fmt.Sprintf("p%02d-%s", i, strings.Repeat("x", scopeEchoLimit))
+		e.addSession(fmt.Sprintf("s%02d", i), "https://github.com/o/"+name)
+	}
+
+	sweep(context.Background(), Options{})
+
+	var line string
+	for _, l := range strings.Split(e.logs.String(), "\n") {
+		if strings.Contains(l, "waiting on a knowledge scope") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no pending-scope line:\n%s", e.logs.String())
+	}
+	// Each entry is a bounded name, the cut marker, "=N" and a separator; the
+	// prose around the list is fixed. A timestamp prefix and the onboarding
+	// command sit inside the same allowance.
+	const perEntry = scopeEchoLimit + 10
+	bound := pendingScopeListLimit*perEntry + 200 + len(ScopeAddCommand)
+	if n := utf8.RuneCountInString(line); n > bound {
+		t.Fatalf("pending line is %d characters, want at most %d:\n%s", n, bound, line)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("%d session(s) waiting on a knowledge scope (", distinct),
+		"p00-" + strings.Repeat("x", scopeEchoLimit-4) + "…=1",
+		fmt.Sprintf("… and %d more scope(s))", distinct-pendingScopeListLimit),
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("pending line missing %q:\n%s", want, line)
+		}
+	}
+	if strings.Contains(line, fmt.Sprintf("p%02d-", pendingScopeListLimit)) {
+		t.Fatalf("pending line enumerates a scope past the cap:\n%s", line)
+	}
+	if strings.Contains(line, strings.Repeat("x", scopeEchoLimit)) {
+		t.Fatalf("pending line echoes a name past scopeEchoLimit:\n%s", line)
 	}
 }
 

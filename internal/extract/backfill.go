@@ -224,13 +224,16 @@ func planBackfill(st *state, sessions []summaries.SessionSource, opts Options, s
 		}
 		res, err := resolveScope(s.CwdRaw, s.GitRemote, seen)
 		if err != nil {
-			// errNoRemote still means "nothing named this session's project":
-			// resolveScope only reaches it once the marker derivation has
-			// failed too, so the bucket keeps counting the same sessions.
-			if errors.Is(err, errNoRemote) {
-				excluded[reasonNoRemote]++
-			} else {
+			// Bucketed by the sweep's classifier so the same failure carries
+			// the same label on both entry points. errUnknownScope keeps its
+			// own bucket because it is the one failure onboarding reverses —
+			// creating truths/<scope>/ is the fix — where no directory fixes
+			// the reasons scopeFailureReason labels.
+			var unknown errUnknownScope
+			if errors.As(err, &unknown) {
 				excluded[reasonUnknownScope]++
+			} else {
+				excluded[scopeFailureReason(err)]++
 			}
 			logSkip(s, err.Error())
 			continue
