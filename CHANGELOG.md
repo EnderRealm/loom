@@ -6,6 +6,62 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-09-21 — Run reporting bounds, costs and lens joins
+
+### Upgrade
+
+- No schema change; `summaries.db` stays at schema 11. Codex turn usage is
+  now attributed from cumulative counters, so Codex sessions folded before
+  this release keep their old per-turn totals until re-summarized
+  (`loom summarize --force`). Router calls already stored with a 200-char
+  key argument are read correctly by the walk without a re-fold.
+
+### Added
+
+- Codex and Cursor pricing rates in `internal/pricing/rates.json`, each
+  entry carrying its own vendor source and dates. Cache accounting moved
+  into `workreport.BillableUsage`, so `cost-report` and `run-report` price
+  a Codex cache read as a subset of input and refuse to price a unit whose
+  runtime's cache semantics are unknown.
+- Run summaries carry the priced parent cost beside the all-or-nothing
+  total, and the runs screen's COST column shows it with a `+` marker when
+  a descendant is unpriced, instead of blank.
+- `loom status` reports the running binary's version and when it was last
+  updated.
+- Knowledge scope collisions: the extraction ledger records the git remote
+  each session filed under, and `loom status` names any scope whose
+  recorded remotes disagree — pending scopes included.
+- The project rollup and all-project activity read the central ticket
+  store through tk v8's `MultiStore.Snapshot`, so Root tickets and
+  cross-project epics report from one snapshot and an epic retrospect
+  expands to its children across namespaces. `TK_STORE_ROOT` is honored.
+
+### Fixed
+
+- A declared run's root span is bounded by its record: it starts at the
+  run's `started_at` and ends at its `reporting_cutoff`, so a session that
+  continues after `end`, or several runs sharing one `/work` invocation,
+  no longer inflate the run's turns, tool calls and tokens.
+  `telemetry.root_span` names which bounds applied.
+- Routed lens responses that exist only in the recorded child session
+  attach to the correct run, lens, round and attempt, so a security
+  verdict redirected to a file in the parent is no longer reported as
+  unavailable.
+- A `codex-lens.sh` call whose stored key argument was cut before `--lens`
+  joins its execution record by time window and takes lens, round and
+  attempt from it, instead of rendering a missing attempt beside an
+  unrecorded one. The Claude and Codex parsers now keep a router command
+  whole in `key_arg` up to 2000 characters.
+- Codex turn tokens are the delta of each sample's cumulative counter
+  against a per-session baseline, so a multi-request turn no longer keeps
+  only its final request's usage.
+- The runs screen lists its 30-day window from a summary query rather than
+  a full report per run (50 s → under 2 s on a 358 MB database), and shows
+  a loading state in the table body while rows build.
+- The sweep's pending-scope status line is bounded in name length and
+  count, and the backfill classifies unsafe or escaping scope names with
+  the same labels as the sweep.
+
 ## [1.9.1] — 2026-09-16 — Stable execution registry shipping
 
 ### Fixed
