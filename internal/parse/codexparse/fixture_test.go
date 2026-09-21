@@ -249,3 +249,124 @@ func TestTurnConditionsLand(t *testing.T) {
 		}
 	}
 }
+
+// TestTokenUsageReconcilesCumulativeSamples pins turn usage as the sum of
+// attributable deltas of the session's cumulative counter. Turn 1 carries the
+// samples of a retained one-turn reviewer rollout whose final counter reads
+// 185,213 input / 910 output; assigning each sample's last_token_usage in
+// place of the previous one landed 52,317 / 108. A repeated counter (the
+// rate-limit refresh after the last request) adds nothing, a second turn
+// attributes only its own samples, and a counter that drops below the
+// baseline attributes just that sample's own usage, with the next delta taken
+// against the reset counter.
+func TestTokenUsageReconcilesCumulativeSamples(t *testing.T) {
+	s := parseFixture(t, "testdata/token_usage.jsonl")
+	if len(s.Turns) != 2 {
+		t.Fatalf("Turns len: got %d, want 2", len(s.Turns))
+	}
+	if len(s.TokenCounts) != 8 {
+		t.Fatalf("TokenCounts len: got %d, want 8", len(s.TokenCounts))
+	}
+
+	want := []struct{ input, output, cached int64 }{
+		{185213, 910, 132352},
+		// 10000 + 3000 (reset, own usage) + 4000 (against the reset counter).
+		{17000, 210, 11500},
+	}
+	for i, w := range want {
+		got := s.Turns[i]
+		if got.InputTokens != w.input || got.OutputTokens != w.output ||
+			got.CacheReadTokens != w.cached {
+			t.Errorf("Turn[%d] tokens: got %d/%d/%d, want %d/%d/%d", i,
+				got.InputTokens, got.OutputTokens, got.CacheReadTokens,
+				w.input, w.output, w.cached)
+		}
+		if got.CacheReadTokens > got.InputTokens {
+			t.Errorf("Turn[%d]: cache read %d exceeds input %d", i,
+				got.CacheReadTokens, got.InputTokens)
+		}
+	}
+
+	var sumIn, sumOut, sumCached int64
+	for _, tu := range s.Turns {
+		sumIn += tu.InputTokens
+		sumOut += tu.OutputTokens
+		sumCached += tu.CacheReadTokens
+	}
+	if s.InputTokens != sumIn || s.OutputTokens != sumOut ||
+		s.CacheReadTokens != sumCached {
+		t.Errorf("session tokens: got %d/%d/%d, want sum over turns %d/%d/%d",
+			s.InputTokens, s.OutputTokens, s.CacheReadTokens,
+			sumIn, sumOut, sumCached)
+	}
+
+	// Each sample's own attestation keeps the subsets; the repeated sample is
+	// still recorded as an observation even though it attributes nothing.
+	for i, tc := range s.TokenCounts {
+		if tc.Cached > tc.Input {
+			t.Errorf("TokenCounts[%d]: cached %d exceeds input %d", i,
+				tc.Cached, tc.Input)
+		}
+		if tc.Reasoning > tc.Output {
+			t.Errorf("TokenCounts[%d]: reasoning %d exceeds output %d", i,
+				tc.Reasoning, tc.Output)
+		}
+	}
+	if s.TokenCounts[3].TurnIdx != 0 || s.TokenCounts[4].TurnIdx != 0 ||
+		s.TokenCounts[5].TurnIdx != 1 {
+		t.Errorf("TokenCounts turn attribution: got %d/%d/%d, want 0/0/1",
+			s.TokenCounts[3].TurnIdx, s.TokenCounts[4].TurnIdx,
+			s.TokenCounts[5].TurnIdx)
+	}
+	if s.TokenCounts[4].LimitUsedPercent != 13.0 {
+		t.Errorf("repeated sample LimitUsedPercent: got %v, want 13",
+			s.TokenCounts[4].LimitUsedPercent)
+	}
+}
+
+// TestAttributeTokenUsageDeltas pins the attribution rule sample by sample:
+// no baseline and a reset attribute the sample's own usage, a continuous
+// counter attributes its advance, a repeated counter attributes zero, and
+// every attributed delta keeps cached within input and reasoning within
+// output when the counter stream does.
+func TestAttributeTokenUsageDeltas(t *testing.T) {
+	st := newState(&summary.SessionSummary{})
+	steps := []struct {
+		name        string
+		total, last tokenUsage
+		want        tokenUsage
+	}{
+		{"first", tokenUsage{35036, 0, 228, 0, 35264},
+			tokenUsage{35036, 0, 228, 0, 35264},
+			tokenUsage{InputTokens: 35036, OutputTokens: 228}},
+		{"continuous", tokenUsage{80799, 34816, 637, 78, 81436},
+			tokenUsage{45763, 34816, 409, 78, 46172},
+			tokenUsage{InputTokens: 45763, CachedInputTokens: 34816,
+				OutputTokens: 409, ReasoningOutputTokens: 78}},
+		{"repeated", tokenUsage{80799, 34816, 637, 78, 81436},
+			tokenUsage{45763, 34816, 409, 78, 46172},
+			tokenUsage{}},
+		{"reset", tokenUsage{3000, 1000, 50, 10, 3050},
+			tokenUsage{3000, 1000, 50, 10, 3050},
+			tokenUsage{InputTokens: 3000, CachedInputTokens: 1000,
+				OutputTokens: 50, ReasoningOutputTokens: 10}},
+		{"after reset", tokenUsage{7000, 3500, 110, 25, 7110},
+			tokenUsage{4000, 2500, 60, 15, 4060},
+			tokenUsage{InputTokens: 4000, CachedInputTokens: 2500,
+				OutputTokens: 60, ReasoningOutputTokens: 15}},
+	}
+	for _, step := range steps {
+		got := st.attributeTokenUsage(step.total, step.last)
+		if got != step.want {
+			t.Errorf("%s: got %+v, want %+v", step.name, got, step.want)
+		}
+		if got.CachedInputTokens > got.InputTokens {
+			t.Errorf("%s: cached %d exceeds input %d", step.name,
+				got.CachedInputTokens, got.InputTokens)
+		}
+		if got.ReasoningOutputTokens > got.OutputTokens {
+			t.Errorf("%s: reasoning %d exceeds output %d", step.name,
+				got.ReasoningOutputTokens, got.OutputTokens)
+		}
+	}
+}

@@ -75,6 +75,12 @@ type state struct {
 	lensRead map[string]bool
 
 	unknown map[string]*summary.UnknownRecord
+
+	// tokenBaseline is the previous token_count sample's cumulative counter,
+	// against which the next sample's usage is attributed as a delta.
+	// tokenBaselineSet distinguishes a zero baseline from no sample yet.
+	tokenBaseline    tokenUsage
+	tokenBaselineSet bool
 }
 
 func newState(s *summary.SessionSummary) *state {
@@ -539,16 +545,53 @@ func (st *state) applyTokenCount(p eventMsgPayload, ts time.Time,
 		}
 	}
 	st.s.TokenCounts = append(st.s.TokenCounts, tc)
-	// Roll up into per-turn and per-session aggregates.
+	// Roll up into per-turn and per-session aggregates as the sum of
+	// attributed deltas: a turn spans several samples, each carrying the
+	// session's cumulative counter, so the turn's usage is the counter's
+	// advance across them, not the latest sample's last_token_usage.
+	d := st.attributeTokenUsage(p.Info.TotalTokenUsage, last)
 	if turnIdx >= 0 {
 		t := &st.s.Turns[turnIdx]
-		t.InputTokens = last.InputTokens
-		t.OutputTokens = last.OutputTokens
-		t.CacheReadTokens = last.CachedInputTokens
+		t.InputTokens += d.InputTokens
+		t.OutputTokens += d.OutputTokens
+		t.CacheReadTokens += d.CachedInputTokens
 	}
-	st.s.InputTokens = p.Info.TotalTokenUsage.InputTokens
-	st.s.OutputTokens = p.Info.TotalTokenUsage.OutputTokens
-	st.s.CacheReadTokens = p.Info.TotalTokenUsage.CachedInputTokens
+	st.s.InputTokens += d.InputTokens
+	st.s.OutputTokens += d.OutputTokens
+	st.s.CacheReadTokens += d.CachedInputTokens
+}
+
+// attributeTokenUsage returns the usage a token_count sample attests, given
+// its cumulative counter and its last-request usage, and advances the
+// baseline to the counter. Against a continuous baseline the delta is the
+// attributed usage, so a repeated counter (a rate-limit refresh, a duplicated
+// event) adds nothing. With no baseline, or a counter below it on any field
+// (a reset), the cumulative delta is not attributable and only the sample's
+// own last-request usage is counted; the gap is left uncounted rather than
+// invented, and the baseline rebases to the reset counter.
+func (st *state) attributeTokenUsage(total, last tokenUsage) tokenUsage {
+	base := st.tokenBaseline
+	continuous := st.tokenBaselineSet &&
+		total.InputTokens >= base.InputTokens &&
+		total.CachedInputTokens >= base.CachedInputTokens &&
+		total.OutputTokens >= base.OutputTokens &&
+		total.ReasoningOutputTokens >= base.ReasoningOutputTokens
+	st.tokenBaseline = total
+	st.tokenBaselineSet = true
+	if !continuous {
+		return tokenUsage{
+			InputTokens:           last.InputTokens,
+			CachedInputTokens:     last.CachedInputTokens,
+			OutputTokens:          last.OutputTokens,
+			ReasoningOutputTokens: last.ReasoningOutputTokens,
+		}
+	}
+	return tokenUsage{
+		InputTokens:           total.InputTokens - base.InputTokens,
+		CachedInputTokens:     total.CachedInputTokens - base.CachedInputTokens,
+		OutputTokens:          total.OutputTokens - base.OutputTokens,
+		ReasoningOutputTokens: total.ReasoningOutputTokens - base.ReasoningOutputTokens,
+	}
 }
 
 func (st *state) applyToolOutput(callID string, output json.RawMessage,
