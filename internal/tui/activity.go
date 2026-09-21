@@ -264,6 +264,14 @@ func (m activityModel) ticketSection(width int) []string {
 	if !m.tickets.Available {
 		return append(out, StyleDim.Render("  tk store unavailable"))
 	}
+	// Incomplete foreign data stays visible rather than silently demoting
+	// every epic: tk reads no epic as done or closed until it can see every
+	// ticket, and the reason is the store's, not this window's.
+	if !m.tickets.Complete {
+		for _, d := range m.tickets.Diagnostics {
+			out = append(out, StyleDim.Render("  incomplete: "+sanitize(d)))
+		}
+	}
 	out = append(out, m.ticketList("Created", m.tickets.Created, width)...)
 	out = append(out, m.ticketList("Closed", m.tickets.Closed, width)...)
 	return out

@@ -437,9 +437,14 @@ COMMIT_MARKER_RE = re.compile(r"^\[([^\[\]]+)\]")
 # process did not author — the same threat model as CANDIDATE_ID_RE. Require a
 # namespaced `<project>/<slug>` on a conservative charset (no whitespace, colon,
 # newline or bracket), which also stops git's own `[main 2bbeb99]` bracket from
-# ever reading as a marker.
+# ever reading as a marker. The namespace admits tk's reserved Root namespace
+# `_root` as the one alternative to a name starting alphanumeric — that exact
+# literal, not any leading underscore. Mirrors ticketIDPattern in
+# internal/extract/retrospect.go; keep the two in step. A Root id is a ticket
+# citation only: NAME_PATTERN, which gates a scope, is untouched, because Root
+# has no repository and is never a scope.
 # `\Z`, not `$`: `$` would also match before a trailing newline.
-TICKET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}/[A-Za-z0-9][A-Za-z0-9._-]{0,60}\Z")
+TICKET_ID_RE = re.compile(r"^(?:_root|[A-Za-z0-9][A-Za-z0-9._-]{0,60})/[A-Za-z0-9][A-Za-z0-9._-]{0,60}\Z")
 
 # Any frontmatter line carrying a `ticket:` key, list entry or not. YAML also
 # accepts a quoted key and whitespace before the colon, so `- "ticket" : x` has

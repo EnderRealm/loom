@@ -13,8 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"loom/internal/config"
 	"loom/internal/knowledge/store"
 	"loom/internal/summaries"
+
+	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 )
 
 // ticketIDPattern mirrors TICKET_ID_RE in extractors/extract.py, which is the
@@ -23,7 +26,15 @@ import (
 // the id is interpolated into a log.md entry, so an unbounded value could forge
 // entries in the store's own history. Go's `$` is end-of-text (not Perl's
 // before-a-trailing-newline), which is what the Python spells `\Z`.
-var ticketIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,60}/[A-Za-z0-9][A-Za-z0-9._-]{0,60}$`)
+//
+// The namespace half admits the exact reserved Root namespace `_root` as the
+// one alternative to a name starting alphanumeric: tk holds Root tickets there,
+// and its leading underscore is what keeps a project from ever claiming the
+// name. Only that literal — `_rootx` and `_other` are still refused — and the
+// id half keeps its bounds. A Root id is a ticket reference alone: scopePattern
+// in scope.go is not widened, because Root has no repository and so is never a
+// knowledge scope.
+var ticketIDPattern = regexp.MustCompile(`^(?:_root|[A-Za-z0-9][A-Za-z0-9._-]{0,60})/[A-Za-z0-9][A-Za-z0-9._-]{0,60}$`)
 
 // The provider binaries extract.py invokes, by absolute path
 // (extractors/extract.py, CLAUDE_BIN/CODEX_BIN). Mirrored rather than resolved
@@ -40,6 +51,52 @@ const (
 // missing-backend path without depending on what the host has installed.
 var statBackend = os.Stat
 
+// ticketSelection is what a retrospect selects sessions by: the ids whose
+// commit markers count, and the tk snapshot's own account of what it could
+// not read, one line per cause, when the graph those ids came from is
+// incomplete.
+type ticketSelection struct {
+	ids         []string
+	diagnostics []string
+}
+
+// resolveTicketSelection expands a ticket id to the exact set of ids a
+// retrospect covers, through one snapshot of the central tk store: an epic
+// selects itself plus every child the graph resolves to it, across every
+// namespace, so a Root or project epic whose children live in other projects
+// covers each of them; a leaf selects itself alone. The expansion is exact
+// rather than a prefix or a project filter — a ticket that merely names the
+// epic is not its child, and a child in another namespace is.
+//
+// A store that cannot be resolved, or an id the snapshot does not hold, is an
+// error the caller reports and then falls back from to the named id alone —
+// the selection this command made before tk could answer the question — so a
+// retrospect still runs against a store loom cannot read.
+func resolveTicketSelection(ticketID string) (ticketSelection, error) {
+	root, err := config.CentralStoreRoot()
+	if err != nil {
+		return ticketSelection{}, err
+	}
+	snap, err := ticket.NewMultiStore(filepath.Join(root, "tickets")).Snapshot()
+	if err != nil {
+		return ticketSelection{}, err
+	}
+	t, ok := snap.Get(ticketID)
+	if !ok {
+		return ticketSelection{}, fmt.Errorf("%s is not in the central store at %s", ticketID, root)
+	}
+	sel := ticketSelection{ids: []string{ticketID}}
+	if t.Type == ticket.TypeEpic {
+		for _, c := range snap.Children(ticketID) {
+			sel.ids = append(sel.ids, c.ID)
+		}
+	}
+	if !snap.Complete {
+		sel.diagnostics = snap.Diagnostics()
+	}
+	return sel, nil
+}
+
 // retrospectTypes is what one retrospect runs per session. Both, because the
 // command's job is to push everything a completed ticket learned back out for
 // review, and the two extractors read the same transcript for different things.
@@ -54,6 +111,12 @@ type RetrospectOptions struct {
 // files the result as candidates for human promotion. It writes only to
 // _candidates/ (extract.py's own output tree) and to log.md; truths/ and
 // decisions/ stay human-gated.
+//
+// An epic — a project's or Root's — covers its exact children through tk, each
+// session once whatever it landed for, and each session keeps the scope its
+// own checkout resolves to: the epic decides which sessions, never where their
+// candidates file. The automatic trigger is leaf-driven (tk fires the command
+// for the ticket that closed), so completing an epic re-extracts nothing.
 //
 // Unlike the sweep, this is a foreground command an operator asked for, so
 // anything that stops it from running is an error rather than a logged no-op.
@@ -79,12 +142,32 @@ func Retrospect(opts RetrospectOptions) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sessions, err := summaries.LoadSessionsForTicket(ticketID)
+	// Resolved after the tee so the expansion — and what the store could not
+	// read — is on the run's own record. An epic's children are the graph's to
+	// name; a snapshot that could not see every ticket may be missing some of
+	// them, and that has to be readable rather than silently narrowing the run.
+	sel, err := resolveTicketSelection(ticketID)
+	if err != nil {
+		log.Printf("retrospect %s: %v — selecting by the named id alone", ticketID, err)
+		sel = ticketSelection{ids: []string{ticketID}}
+	}
+	for _, d := range sel.diagnostics {
+		log.Printf("retrospect %s: tk store incomplete: %s", ticketID, logSafe(d))
+	}
+	if len(sel.ids) > 1 {
+		log.Printf("retrospect %s: epic — %d child ticket(s) selected through tk", ticketID, len(sel.ids)-1)
+	}
+
+	sessions, err := summaries.LoadSessionsForTickets(sel.ids)
 	if err != nil {
 		return err
 	}
 	if len(sessions) == 0 {
-		log.Printf("retrospect %s: no summarized session landed a commit marked [%s] — nothing to extract", ticketID, ticketID)
+		children := ""
+		if len(sel.ids) > 1 {
+			children = fmt.Sprintf(" or for any of its %d child ticket(s)", len(sel.ids)-1)
+		}
+		log.Printf("retrospect %s: no summarized session landed a commit marked [%s]%s — nothing to extract", ticketID, ticketID, children)
 		return nil
 	}
 

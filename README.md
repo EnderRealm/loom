@@ -165,7 +165,7 @@ loom extract --backfill --scope loom --limit 20
 
 #### Retrospecting a closed ticket
 
-`loom retrospect <namespaced-ticket-id>` pushes new memory out of completed work: it resolves every summarized session whose commits carry the ticket's `[<id>]` subject marker and runs the extractor over each, for truths and for decisions.
+`loom retrospect <namespaced-ticket-id>` pushes new memory out of completed work: it resolves every summarized session whose commits carry the ticket's `[<id>]` subject marker and runs the extractor over each, for truths and for decisions. An epic id — a project's or Root's (`_root/<id>`) — expands through tk to its exact children across every project; each session is extracted once however many of them it landed for, and files under the scope its own checkout resolves to. Root is never a scope.
 
 ```sh
 loom retrospect loom/add-loom-retrospect-e222

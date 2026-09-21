@@ -326,6 +326,17 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 // sessions" from a DB that cannot hold the answer reads exactly like a ticket
 // that landed no commits, and the caller acts on that reading.
 func LoadSessionsForTicket(ticketID string) ([]SessionSource, error) {
+	return LoadSessionsForTickets([]string{ticketID})
+}
+
+// LoadSessionsForTickets is LoadSessionsForTicket over a set of ids — an epic
+// and its children, resolved by the caller through tk — with each
+// (agent, session_id) selected once however many of the ids its commits carry.
+// One session commonly lands commits for several children of one epic, and an
+// extraction per child would spend the same transcript again for the same
+// candidates. The order is by the session's earliest commit for any of the ids,
+// so it is the order the work happened in across the whole set.
+func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 	dbPath := filepath.Join(config.Home(), "summaries.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, nil
@@ -358,7 +369,18 @@ func LoadSessionsForTicket(ticketID string) ([]SessionSource, error) {
 	// LIKE: a tk ticket id may legally contain `_`, which LIKE reads as a
 	// single-character wildcard, and an ESCAPE clause around it is more fragile
 	// than an exact prefix test.
-	marker := "[" + ticketID + "]"
+	markers := make([]string, 0, len(ticketIDs))
+	for _, id := range ticketIDs {
+		markers = append(markers, "["+id+"]")
+	}
+	marked := func(subject string) bool {
+		for _, m := range markers {
+			if strings.HasPrefix(subject, m) {
+				return true
+			}
+		}
+		return false
+	}
 
 	type hit struct {
 		src   SessionSource
@@ -377,7 +399,7 @@ func LoadSessionsForTicket(ticketID string) ([]SessionSource, error) {
 			&sourcePath, &gitRemote, &cwdRaw); err != nil {
 			return nil, err
 		}
-		if !strings.HasPrefix(subject.String, marker) {
+		if !marked(subject.String) {
 			continue
 		}
 		var at time.Time

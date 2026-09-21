@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 	"loom/internal/summaries"
 	"loom/transport/cursor"
 
-	"github.com/EnderRealm/ticket/v7/pkg/ticket"
+	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 )
 
 // Project aggregates session and ticket state for one identity-keyed
@@ -68,7 +69,14 @@ type Session struct {
 	Summary *summaries.SessionMetrics
 }
 
-// TicketSummary is the rollup for one project's central ticket store.
+// TicketSummary is the rollup for one project's namespace in the central
+// ticket store, filtered out of the one snapshot every ticket read shares.
+// Complete is false when that snapshot could not account for every ticket in
+// the store — an unreadable file, a catalogued namespace with no directory —
+// in which case tk derives no epic as done or closed anywhere, and Diagnostics
+// says why, one line per cause. The lines follow tk's project-view rule: every
+// skip that degrades the epics, from whichever namespace, plus this
+// namespace's own.
 type TicketSummary struct {
 	ProjectName string
 	Dir         string
@@ -77,6 +85,8 @@ type TicketSummary struct {
 	Type        map[string]int
 	Priority    map[int]int
 	OpenTop     []*ticket.Ticket
+	Complete    bool
+	Diagnostics []string
 }
 
 // LoadProjects walks the loom state tree and returns one Project per
@@ -290,6 +300,11 @@ func LoadProjects() ([]Project, error) {
 		return nil, err
 	}
 
+	// One reading of the central store for every project: an epic's status is
+	// derived from children in every namespace, so per-project reads could
+	// disagree with each other and with the activity view.
+	snap, _ := LoadTicketSnapshot()
+
 	out := make([]Project, 0, len(projects))
 	for _, p := range projects {
 		sort.Slice(p.Sessions, func(i, j int) bool {
@@ -298,7 +313,7 @@ func LoadProjects() ([]Project, error) {
 		sort.Strings(p.Agents)
 		sort.Strings(p.Worktrees)
 		sort.Strings(p.Slugs)
-		p.Tickets = loadTicketSummary(p.Path)
+		p.Tickets = ticketSummaryFrom(snap, p.Path)
 		attachSummary(p, summary)
 		out = append(out, *p)
 	}
@@ -548,31 +563,56 @@ func walkAgentSlugSessions(root string, fn func(agent, slug, sid, path string, i
 	return nil
 }
 
-// loadTicketSummary resolves the central ticket store for projectPath via
-// ticket.ResolveStoreForRepo and rolls up the list into a summary. Returns
-// nil when the project can't be resolved (no config entry, no git remote,
-// unresolvable path) or when the store is empty.
-func loadTicketSummary(projectPath string) *TicketSummary {
-	if projectPath == "" {
-		return nil
-	}
-	store, projectName, err := ticket.ResolveStoreForRepo(projectPath)
+// LoadTicketSnapshot reads every namespace of the central tk store once, under
+// the store's shared lock. It is the one read behind every ticket view loom
+// renders: the snapshot carries each epic's status and Completed already
+// derived from its children across all namespaces, so a project rollup and the
+// all-project activity built from the same snapshot cannot report an epic
+// differently. Unlike List, it warns nothing to stderr — the TUI owns the
+// terminal, and the incompleteness travels in the snapshot's skips instead.
+func LoadTicketSnapshot() (*ticket.Snapshot, error) {
+	centralRoot, err := config.CentralStoreRoot()
 	if err != nil {
+		return nil, err
+	}
+	return ticket.NewMultiStore(filepath.Join(centralRoot, "tickets")).Snapshot()
+}
+
+// ticketSummaryFrom resolves projectPath to its namespace via
+// ticket.ResolveStoreForRepo and rolls that namespace's slice of the snapshot
+// into a summary. Returns nil without a snapshot, when the project can't be
+// resolved (no config entry, no git remote, unresolvable path) or when the
+// namespace holds no tickets. IDs stay qualified; ticketIDSuffix strips them
+// for display.
+func ticketSummaryFrom(snap *ticket.Snapshot, projectPath string) *TicketSummary {
+	if snap == nil || projectPath == "" {
 		return nil
 	}
-	tickets, err := store.List()
-	if err != nil || len(tickets) == 0 {
+	store, _, err := ticket.ResolveStoreForRepo(projectPath)
+	if err != nil || store == nil {
 		return nil
 	}
-	fs, _ := store.(*ticket.FileStore)
+	var tickets []*ticket.Ticket
+	for _, t := range snap.Tickets {
+		if ns, _ := ticket.ParseNamespacedID(t.ID); ns == store.Project {
+			tickets = append(tickets, t)
+		}
+	}
+	if len(tickets) == 0 {
+		return nil
+	}
 	s := &TicketSummary{
-		ProjectName: projectName,
+		ProjectName: store.Project,
+		Dir:         store.Dir,
 		Status:      map[string]int{},
 		Type:        map[string]int{},
 		Priority:    map[int]int{},
+		Complete:    snap.Complete,
 	}
-	if fs != nil {
-		s.Dir = fs.Dir
+	for _, skip := range snap.Skips {
+		if skip.Kind.DegradesEpicStatus() || skip.Project == store.Project {
+			s.Diagnostics = append(s.Diagnostics, skipLine(skip))
+		}
 	}
 	for _, t := range tickets {
 		s.Total++
@@ -602,15 +642,40 @@ func loadTicketSummary(projectPath string) *TicketSummary {
 	return s
 }
 
+// skipLine renders one snapshot skip as a single diagnostic line, in the
+// shape tk's own Snapshot.Diagnostics uses: a namespace skip has no file, so
+// it names the namespace alone; the catalog itself is a namespace skip with no
+// project. Local because the per-project filter above needs the line for a
+// subset of the skips and tk renders only the whole set.
+func skipLine(skip ticket.FileSkip) string {
+	switch {
+	case skip.Kind == ticket.FileSkipNamespace && skip.Project == "":
+		return "catalog: " + skip.Error
+	case skip.Kind == ticket.FileSkipNamespace:
+		return fmt.Sprintf("namespace %q: %s", skip.Project, skip.Error)
+	case skip.Project != "":
+		return fmt.Sprintf("%q (%s): %s", skip.Project+"/"+skip.File, skip.Kind, skip.Error)
+	default:
+		return fmt.Sprintf("%q (%s): %s", skip.File, skip.Kind, skip.Error)
+	}
+}
+
 // TicketActivity is the rolling-window rollup of tickets created and closed
-// across every project in the central tk store, newest-first. Available is
+// across every namespace in the central tk store, newest-first. Available is
 // false when the store couldn't be resolved, so the screen can distinguish a
-// genuinely quiet window from a missing store.
+// genuinely quiet window from a missing store. Complete and Diagnostics carry
+// the snapshot's own account of what it could not read (see TicketSummary);
+// Namespaces is every namespace it read in full, Root's `_root` among them
+// when the catalog activates it — a Root ticket needs no repository or
+// session to appear here.
 type TicketActivity struct {
-	Since     time.Time
-	Available bool
-	Created   []TicketChange
-	Closed    []TicketChange
+	Since       time.Time
+	Available   bool
+	Complete    bool
+	Diagnostics []string
+	Namespaces  []string
+	Created     []TicketChange
+	Closed      []TicketChange
 }
 
 // TicketChange is one created or closed ticket. When is the relevant
@@ -623,22 +688,29 @@ type TicketChange struct {
 	When    time.Time
 }
 
-// LoadTicketActivity reads every ticket across all projects in the central tk
-// store and buckets them by Created/Completed within [now-window, now).
+// LoadTicketActivity reads every ticket across all namespaces in the central
+// tk store and buckets them by Created/Completed within [now-window, now).
 // Completed is tk's authoritative close timestamp (zero for non-terminal
-// tickets). Resilient: an unresolvable store yields an empty rollup rather
-// than failing the whole screen.
+// tickets; for an epic, derived from its latest child). Resilient: an
+// unresolvable store yields an empty rollup rather than failing the whole
+// screen.
 func LoadTicketActivity(window time.Duration) TicketActivity {
 	since := time.Now().Add(-window)
-	centralRoot, err := config.CentralStoreRoot()
+	snap, err := LoadTicketSnapshot()
 	if err != nil {
 		return TicketActivity{Since: since}
 	}
-	tickets, err := ticket.NewMultiStore(filepath.Join(centralRoot, "tickets")).List()
-	if err != nil {
-		return TicketActivity{Since: since}
-	}
-	return bucketTicketActivity(tickets, since)
+	return ticketActivityFrom(snap, since)
+}
+
+// ticketActivityFrom is LoadTicketActivity over a snapshot the caller already
+// holds, so one reading can feed both this and the per-project summaries.
+func ticketActivityFrom(snap *ticket.Snapshot, since time.Time) TicketActivity {
+	ta := bucketTicketActivity(snap.Tickets, since)
+	ta.Complete = snap.Complete
+	ta.Diagnostics = snap.Diagnostics()
+	ta.Namespaces = snap.Namespaces()
+	return ta
 }
 
 // bucketTicketActivity splits a ticket list into the created/closed changes

@@ -106,6 +106,20 @@ class RouteCandidateScopeTest(unittest.TestCase):
 
         self.assertEqual(snapshot(self.root), before)
 
+    def test_root_is_never_a_scope(self):
+        # `_root` is a ticket namespace tk reserves, admitted by TICKET_ID_RE
+        # as a citation; it names no repository, so as a declared scope it is
+        # an unusable name — even with a directory of that name in the store.
+        (self.truths / "_root").mkdir()
+        before = snapshot(self.root)
+
+        scope, note, mismatch = route_candidate_scope("_root", "loom", self.truths)
+
+        self.assertEqual(scope, "loom")
+        self.assertIn("not a usable scope name", note)
+        self.assertEqual(mismatch, "_root")
+        self.assertEqual(snapshot(self.root), before)
+
     def test_a_credential_declared_as_a_scope_is_not_echoed(self):
         for declared in (FAKE_TOKEN, FAKE_KEY):
             with self.subTest(declared=declared):

@@ -20,9 +20,16 @@ const retroTicket = "loom/add-loom-retrospect-e222"
 // newRetroEnv is newEnv with the extraction backend reported present: whether
 // /opt/homebrew/bin/claude exists on the host running the tests is not what
 // these cases are about, and requireBackend is exercised on its own below.
+//
+// The tk store is moved off the machine's too — an empty root, which the
+// library reads as a complete, empty snapshot, so a case that names a ticket
+// without building a store selects by the id alone. A case about expansion
+// builds a real store over it with newTicketStore.
 func newRetroEnv(t *testing.T, scopes ...string) *env {
 	t.Helper()
 	e := newEnv(t, scopes...)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("TK_STORE_ROOT", t.TempDir())
 	orig := statBackend
 	statBackend = func(string) (os.FileInfo, error) { return nil, nil }
 	t.Cleanup(func() { statBackend = orig })
@@ -372,6 +379,13 @@ func TestRetrospectRejectsAMalformedTicketID(t *testing.T) {
 		"not-namespaced",
 		"loom/bad id",
 		"",
+		// The reserved namespace is admitted as the exact literal alone, and a
+		// Root id keeps the id half's charset and bound.
+		"_rootx/id",
+		"_other/id",
+		"_root/",
+		"_root/bad id",
+		"_root/" + strings.Repeat("a", 62),
 	} {
 		t.Run(id, func(t *testing.T) {
 			e := newRetroEnv(t, "loom")

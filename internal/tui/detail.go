@@ -112,6 +112,14 @@ func (m detailModel) view() string {
 		}
 		b.WriteString("  " + header + "\n")
 
+		// An incomplete snapshot derives no epic as done or closed, so the
+		// counts below are conditional on what tk could not read.
+		if !t.Complete {
+			for _, d := range t.Diagnostics {
+				b.WriteString("  " + StyleDim.Render("incomplete: "+sanitize(d)) + "\n")
+			}
+		}
+
 		b.WriteString("  ")
 		b.WriteString(renderStatusLine(t.Status))
 		b.WriteString("\n")

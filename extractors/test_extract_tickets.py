@@ -144,6 +144,37 @@ class ExtractTicketIdsTest(unittest.TestCase):
         for bad in hostile:
             self.assertIn(repr(bad), err.getvalue())
 
+    def test_root_namespace_is_admitted_as_the_exact_reserved_name(self):
+        # tk holds Root tickets under the reserved `_root` namespace, whose
+        # leading underscore is what no project name can carry. Only that
+        # literal is admitted; the id half keeps its bounds.
+        root_ticket = "_root/unified-agent-0001"
+        at_bound = "_root/" + "a" * 61
+        path = self.write_jsonl(self.bash_commit("t1", commit_line(root_ticket))
+                                + self.bash_commit("t2", commit_line(at_bound)))
+
+        self.assertEqual(extract_ticket_ids(path), [root_ticket, at_bound])
+
+    def test_other_underscore_namespaces_and_overlong_root_ids_are_rejected(self):
+        hostile = [
+            "_rootx/not-root",          # the literal alone, not a prefix
+            "_other/not-root",          # any other underscore namespace
+            "_root/",                   # empty slug
+            "_root/" + "a" * 62,        # id half over its bound (1 + 60)
+            "_root/has space",          # charset unchanged for Root ids
+        ]
+        records = []
+        for i, bad in enumerate(hostile):
+            records.extend(self.bash_commit(f"t{i}", commit_line(bad)))
+        path = self.write_jsonl(records)
+
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(extract_ticket_ids(path), [])
+
+        for bad in hostile:
+            self.assertIn(repr(bad), err.getvalue())
+
     def test_a_rejected_marker_is_reported_once_not_per_occurrence(self):
         records = []
         for i in range(3):
@@ -369,6 +400,27 @@ class EmitCandidatesTest(unittest.TestCase):
         self.assertIn(f"sources:\n  - session: {session}\n"
                       f"  - ticket: {TICKET}\n  - ticket: {OTHER_TICKET}\n", parsed["raw"])
         self.assertEqual(parsed["status"], "candidate")
+
+    def test_a_root_ticket_is_attributed_in_the_frontmatter(self):
+        # The Root id reaches the `ticket:` source verbatim, filed under the
+        # scope the run asked for: Root names no scope of its own.
+        session = "5a28d3d6-cfeb-40ea-872f-15c0b87ea541"
+        root_ticket = "_root/unified-agent-0001"
+        candidate = {"id": "loom-example", "raw": (
+            "---\nid: loom-example\ntitle: An example truth\nstatus: validated\n---\n\n"
+            "## Claim\n\nSomething is true.\n\n## How to verify\n\nRun the thing.\n"
+        )}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            changes, _ = emit_candidates([candidate], Path(tmp), "loom", "codex", "gpt-5",
+                                         "low", session, [root_ticket],
+                                         Path(tmp) / "truths")
+            self.assertEqual(len(changes), 1)
+            parsed = parse_truth(changes[0]["body"], source=changes[0]["path"])
+
+        self.assertTrue(parsed["valid"])
+        self.assertIn(f"  - ticket: {root_ticket}\n", parsed["raw"])
+        self.assertEqual(Path(changes[0]["path"]).parent.name, "loom")
 
     def test_inline_empty_sources_does_not_capture_the_ticket_entries(self):
         # `sources: []` mimics the template's `related: []`. It carries no
