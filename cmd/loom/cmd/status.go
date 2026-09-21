@@ -153,6 +153,8 @@ func printBinaryStatus(w io.Writer, path string, now time.Time) {
 // and which of them the store has no directory for. The pending scopes are the
 // point: they are the sessions the sweep declines and the one exclusion an
 // operator reverses, so they carry their counts and the command that fixes them.
+// A scope more than one remote resolves to is named with those remotes: two
+// repos sharing a basename merge their truths silently otherwise.
 func printScopes() {
 	fmt.Println("=== knowledge scopes ===")
 	rep, err := extract.ScopeStatus()
@@ -163,17 +165,21 @@ func printScopes() {
 		fmt.Println()
 		return
 	}
+	printScopeReport(os.Stdout, rep)
+}
+
+func printScopeReport(w io.Writer, rep extract.ScopeReport) {
 	// The reference tree, not the store root the extractor section prints as
 	// `knowledge`: one operator reads both, so each says which it is.
-	fmt.Printf("  truths = %s\n", rep.TruthsDir)
+	fmt.Fprintf(w, "  truths = %s\n", rep.TruthsDir)
 	if !rep.TruthsDirExists {
 		// No reference tree at all, so every scope below would be pending and
 		// nothing on this machine is extracted yet.
-		fmt.Println("  no scope directories here — nothing on this machine extracts")
-		fmt.Println()
+		fmt.Fprintln(w, "  no scope directories here — nothing on this machine extracts")
+		fmt.Fprintln(w)
 		return
 	}
-	fmt.Printf("  eligible sessions = %d (%s, min-turns=%d)\n", rep.Eligible, summary.AgentClaude, rep.MinTurns)
+	fmt.Fprintf(w, "  eligible sessions = %d (%s, min-turns=%d)\n", rep.Eligible, summary.AgentClaude, rep.MinTurns)
 
 	var onboarded, pending []string
 	skipped := 0
@@ -187,18 +193,26 @@ func printScopes() {
 		skipped += sc.Sessions
 	}
 	if len(onboarded) > 0 {
-		fmt.Printf("  onboarded: %s\n", strings.Join(onboarded, ", "))
+		fmt.Fprintf(w, "  onboarded: %s\n", strings.Join(onboarded, ", "))
 	}
 	if len(pending) > 0 {
-		fmt.Printf("  not onboarded — %d sessions skipped for want of a scope directory:\n", skipped)
-		fmt.Printf("    %s\n", strings.Join(pending, ", "))
-		fmt.Printf("    onboard with: %s\n", extract.ScopeAddCommand)
+		fmt.Fprintf(w, "  not onboarded — %d sessions skipped for want of a scope directory:\n", skipped)
+		fmt.Fprintf(w, "    %s\n", strings.Join(pending, ", "))
+		fmt.Fprintf(w, "    onboard with: %s\n", extract.ScopeAddCommand)
+	}
+	if len(rep.Collisions) > 0 {
+		// Before the unresolved line: a collision is a scope the store is (or is
+		// about to be) filing into, where unresolved is what it never sees.
+		fmt.Fprintf(w, "  colliding — %d scope(s) filed under more than one remote:\n", len(rep.Collisions))
+		for _, c := range rep.Collisions {
+			fmt.Fprintf(w, "    %s: %s\n", c.Name, c.EchoRemotes())
+		}
 	}
 	if rep.Unresolved > 0 {
-		fmt.Printf("  unresolved: %d sessions (no .loom-project marker naming a scope this store has, and no usable git remote)\n",
+		fmt.Fprintf(w, "  unresolved: %d sessions (no .loom-project marker naming a scope this store has, and no usable git remote)\n",
 			rep.Unresolved)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
 type agentReport struct {

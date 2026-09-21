@@ -350,7 +350,7 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 			continue
 		}
 
-		outcome := extractOne(ctx, st, script, s, res)
+		outcome := extractOne(ctx, st, script, s, res, seen)
 		if outcome == "" {
 			// Interrupted; the session stays unvisited for the next run.
 			break
@@ -386,7 +386,13 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 // the ledger. Returns outcomeExtracted or outcomeFailed, or "" when a shutdown
 // killed the child rather than the extractor failing — the caller stops there
 // and leaves the session unvisited so the next run retries it.
-func extractOne(ctx context.Context, st *state, script string, s summaries.SessionSource, res resolution) string {
+//
+// The record carries the remote the scope was derived from, on the failed mark
+// as well as the extracted one: both are sessions filed under that scope, and
+// the collision check below reads the ledger rather than the outcome. seen is
+// the run's dedupe map, so a scope shared by two repos is stated once per run
+// rather than once per session filed into it.
+func extractOne(ctx context.Context, st *state, script string, s summaries.SessionSource, res resolution, seen logger) string {
 	log.Printf("extract %s/%s scope=%s source=%s input=%s", logSafe(s.Agent), logSafe(s.SessionID),
 		res.scope, res.source, logSafe(s.SourcePath))
 	start := time.Now()
@@ -401,7 +407,8 @@ func extractOne(ctx context.Context, st *state, script string, s summaries.Sessi
 		// from the state file.
 		log.Printf("extract %s/%s: FAILED after %s: %v", logSafe(s.Agent), logSafe(s.SessionID),
 			time.Since(start).Round(time.Second), err)
-		st.mark(s.Agent, s.SessionID, record{Outcome: outcomeFailed, Scope: res.scope, Reason: err.Error()})
+		st.mark(s.Agent, s.SessionID, record{Outcome: outcomeFailed, Scope: res.scope, Remote: res.remote, Reason: err.Error()})
+		noteCollision(st, res, seen)
 		return outcomeFailed
 	}
 	log.Printf("extract %s/%s: ok in %s (candidates=%d score=%.2f)", logSafe(s.Agent), logSafe(s.SessionID),
@@ -409,10 +416,22 @@ func extractOne(ctx context.Context, st *state, script string, s summaries.Sessi
 	st.mark(s.Agent, s.SessionID, record{
 		Outcome:    outcomeExtracted,
 		Scope:      res.scope,
+		Remote:     res.remote,
 		Candidates: run.Candidates,
 		Score:      run.Score,
 	})
+	noteCollision(st, res, seen)
 	return outcomeExtracted
+}
+
+// noteCollision runs the collision check for a session filed by its remote. A
+// marker resolution records no remote and is never checked: the marker is the
+// project's own name, so it cannot have merged two repos.
+func noteCollision(st *state, res resolution, seen logger) {
+	if res.remote == "" {
+		return
+	}
+	reportCollision(st, res.scope, seen)
 }
 
 // markSkip records the skip as visited so it isn't re-logged every sweep.

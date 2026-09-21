@@ -32,7 +32,10 @@ var errNoRemote = errors.New("no git remote")
 // failure onboarding reverses: the sweep and `loom status` tally the pending
 // scope by name, and they pull it back out with errors.As rather than by
 // re-parsing the message resolveScope wrapped. See docs/knowledge-scopes.md.
-type errUnknownScope struct{ scope string }
+// remote is the remoteKey the scope was derived from: only the git-remote
+// branch returns this error, since a marker naming a scope the store lacks
+// falls through to the remote, so a pending scope always has one.
+type errUnknownScope struct{ scope, remote string }
 
 func (e errUnknownScope) Error() string {
 	// The store root rather than the joined path: dir repeats the name, and this
@@ -83,10 +86,14 @@ const (
 	sourceRemote = "git-remote"
 )
 
-// resolution is a resolved scope and the derivation that produced it.
+// resolution is a resolved scope and the derivation that produced it. remote is
+// the remoteKey (host/owner/repo, not its basename) the scope was derived from,
+// and "" when the marker named it: two repos sharing a basename derive one
+// scope, and the full remote is what tells them apart afterwards.
 type resolution struct {
 	scope  string
 	source string
+	remote string
 }
 
 // resolveScope derives a session's knowledge scope, preferring the
@@ -117,10 +124,53 @@ func resolveScope(cwdRaw, gitRemote string, seen logger) (resolution, error) {
 	if remote == "" {
 		return resolution{}, errNoRemote
 	}
+	key := remoteKey(gitRemote)
 	if err := validScope(remote); err != nil {
+		var unknown errUnknownScope
+		if errors.As(err, &unknown) {
+			// The pending scope carries the remote it was derived from, so the
+			// tally reads this derivation's value rather than repeating it.
+			err = errUnknownScope{scope: unknown.scope, remote: key}
+		}
 		return resolution{}, fmt.Errorf("%w (from git remote %q)", err, gitRemote)
 	}
-	return resolution{scope: remote, source: sourceRemote}, nil
+	return resolution{scope: remote, source: sourceRemote, remote: key}, nil
+}
+
+// remoteKey is the identity a scope's remote is recorded and compared under:
+// the normalized remote with any userinfo stripped from its host. A remote is
+// client-supplied and may carry a token (https://u:secret@host/o/r), and
+// NormalizeRemote keeps it — internal/tui depends on that output — so the
+// ledger and the collision lines take the key from here instead. The key still
+// folds one repo's ssh and https clones together: NormalizeRemote turns
+// git@github.com:o/r into github.com/o/r before this looks for an "@".
+func remoteKey(gitRemote string) string {
+	return stripUserinfo(summaries.NormalizeRemote(gitRemote))
+}
+
+// stripUserinfo drops everything up to and including the last "@" in a
+// remote's authority — the first path segment once NormalizeRemote has removed
+// the scheme, or what sits between "://" and the next "/" for a scheme it
+// leaves in place (ftp://u:secret@host/o/r) — leaving host/owner/repo. The
+// last "@" rather than the first because a password may itself hold an
+// unescaped "@" (u:pass@word@host), and stopping at the first would store the
+// rest of it as the host. An "@" past the authority is a path character and
+// is kept. Applied again at render so a ledger value written before the key
+// stripped it never reaches a log line or `loom status` with a credential
+// intact.
+func stripUserinfo(remote string) string {
+	scheme := ""
+	if i := strings.Index(remote, "://"); i >= 0 {
+		scheme, remote = remote[:i+3], remote[i+3:]
+	}
+	host := remote
+	if i := strings.Index(remote, "/"); i >= 0 {
+		host = remote[:i]
+	}
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		return scheme + remote[i+1:]
+	}
+	return scheme + remote
 }
 
 // scopeFromRemote is the git-remote derivation on its own: the basename of the

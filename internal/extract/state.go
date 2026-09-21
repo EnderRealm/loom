@@ -37,8 +37,13 @@ type state struct {
 }
 
 type record struct {
-	Outcome    string    `json:"outcome"`
-	Scope      string    `json:"scope,omitempty"`
+	Outcome string `json:"outcome"`
+	Scope   string `json:"scope,omitempty"`
+	// Remote is the normalized git remote the scope was derived from, and empty
+	// when a marker named it or the session was skipped before resolution. Kept
+	// so a scope two repos derive can be told from one busy repo after the fact
+	// — see docs/knowledge-scopes.md, "Collisions".
+	Remote     string    `json:"remote,omitempty"`
 	Reason     string    `json:"reason,omitempty"`
 	Candidates int       `json:"candidates,omitempty"`
 	Score      float64   `json:"score,omitempty"`
@@ -117,6 +122,20 @@ func (s *state) purgeScopeSkips() {
 			}
 		}
 	}
+}
+
+// remotes groups the recorded remotes by the scope they were filed under.
+// Records without one — skips, and sessions a marker named — contribute
+// nothing: a marker is the project's own declaration, not a derivation that
+// could have merged two repos.
+func (s *state) remotes() remoteSets {
+	sets := remoteSets{}
+	for _, r := range s.Sessions {
+		if r.Remote != "" {
+			sets.add(r.Scope, r.Remote)
+		}
+	}
+	return sets
 }
 
 func (s *state) visited(agent, sessionID string) bool {

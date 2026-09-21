@@ -91,7 +91,11 @@ func backfill(ctx context.Context, opts Options) backfillResult {
 		return r
 	}
 
-	plan := planBackfill(st, sessions, opts)
+	// A backfill resolves the whole DB, so a repo's marker facts would otherwise
+	// be restated once per session ahead of the report below — and a scope two
+	// repos share would be restated once per session extracted into it.
+	seen := logOnce{}
+	plan := planBackfill(st, sessions, opts, seen)
 
 	label := "backfill"
 	if opts.DryRun {
@@ -143,7 +147,7 @@ func backfill(ctx context.Context, opts Options) backfillResult {
 			continue
 		}
 
-		outcome := extractOne(ctx, st, script, item.src, item.res)
+		outcome := extractOne(ctx, st, script, item.src, item.res, seen)
 		if outcome == "" {
 			// Interrupted; the session stays unvisited so a restart resumes here.
 			break
@@ -173,7 +177,7 @@ func backfill(ctx context.Context, opts Options) backfillResult {
 // and most of the backlog's skips are "unknown scope" — recording those would
 // mean creating truths/<scope>/ later could never rescue the very sessions it
 // was created for.
-func planBackfill(st *state, sessions []summaries.SessionSource, opts Options) backfillPlan {
+func planBackfill(st *state, sessions []summaries.SessionSource, opts Options, seen logger) backfillPlan {
 	want := map[string]bool{}
 	for _, scope := range wantedScopes(opts.Scopes) {
 		want[scope] = true
@@ -183,10 +187,6 @@ func planBackfill(st *state, sessions []summaries.SessionSource, opts Options) b
 	byScope := map[string]int{}
 	bySource := map[string]int{}
 	excluded := map[string]int{}
-
-	// A backfill resolves the whole DB, so a repo's marker facts would otherwise
-	// be restated once per session ahead of the report below.
-	seen := logOnce{}
 
 	scanned := 0
 	for _, s := range sessions {

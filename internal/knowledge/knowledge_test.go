@@ -242,3 +242,39 @@ func TestLoadSkipsArtifactsWithoutFrontmatter(t *testing.T) {
 		t.Errorf("ID = %q, want loom-good", arts[0].ID)
 	}
 }
+
+// TestLoadReadsOnlyMarkdownUnderScopeDirs pins the walker's shape: a file at
+// the root, directly under a type directory, or a non-.md file inside a scope
+// is never an artifact. The extractor's ledger (extract.state) lives outside
+// the store, and this is what keeps a sidecar file from ever reading back as a
+// truth or a candidate should the two trees coincide.
+func TestLoadReadsOnlyMarkdownUnderScopeDirs(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+
+	mustWrite := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ledger := "{\"sessions\": {\"claude-code/x\": {\"outcome\": \"extracted\", \"scope\": \"loom\", \"remote\": \"github.com/a/loom\"}}}\n"
+	mustWrite("truths/loom/good.md", "---\nid: loom-good\ntitle: Good\nstatus: validated\n---\n\n## Claim\n\nyes\n")
+	mustWrite("extract.state", ledger)
+	mustWrite("truths/extract.state", ledger)
+	mustWrite("truths/loom/extract.state", ledger)
+	mustWrite("_candidates/truths/loom/extract.state", ledger)
+
+	arts, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(arts) != 1 || arts[0].ID != "loom-good" {
+		t.Fatalf("got %+v, want only loom-good", arts)
+	}
+}

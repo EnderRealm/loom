@@ -109,8 +109,15 @@ matching the sessions it matches today.
 The derived name is a basename, so it is not unique, and it is not stable.
 
 - **Two repos, one basename.** `github.com/a/tools` and `github.com/b/tools`
-  both derive `tools`, and their truths merge into one namespace. Nothing
-  detects it: the store sees one scope with more sessions than expected.
+  both derive `tools`, and their truths merge into one namespace. The merged
+  directory carries no record of which repo each truth came from, so the sweep
+  records the normalized remote each session was filed under (userinfo
+  stripped, so a token in an https URL never enters the ledger or a log line)
+  in its ledger (`~/.loom/extract.state`) and logs the scope with every remote
+  in it once the recorded set exceeds one. `loom status` names colliding scopes
+  with their remotes from summaries.db — before the scope is onboarded, which
+  is the cheap moment to notice. Detection only: what merged is not separated,
+  and the session still files where it resolves.
 - **Directory basename ≠ remote basename.** A checkout in `~/code/loom-fork`
   whose remote is `github.com/enderrealm/loom` resolves to `loom-fork` under
   `resolve_project.py` and to `loom` under the sweep, so the same repo's truths

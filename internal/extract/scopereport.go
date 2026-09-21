@@ -40,6 +40,9 @@ type ScopeReport struct {
 	Unresolved int
 	Eligible   int
 	MinTurns   int
+	// Collisions names every scope, onboarded or pending, that more than one
+	// distinct remote resolves to, with those remotes.
+	Collisions []ScopeCollision
 }
 
 // ScopeStatus tallies scope onboarding across every summarized session.
@@ -50,6 +53,13 @@ type ScopeReport struct {
 // scope skips a pending scope has no ledger entries to read, and the honest
 // number for an onboarded scope is its total.
 //
+// Collisions come from this same pass over the DB rather than from the ledger
+// for the same reason: the ledger records a remote only for a session it
+// extracted, so a pending scope two repos derive — the one that becomes a
+// shared bucket the moment it is onboarded — has no ledger entries to read.
+// Reading the DB names it before the directory exists, which is the cheap
+// moment to notice.
+//
 // A host with no summaries.db reports an empty tally rather than an error, per
 // LoadSessionSources' degrade-silently contract, and so does one with no
 // knowledge store.
@@ -58,6 +68,7 @@ func ScopeStatus() (ScopeReport, error) {
 
 	counts := map[string]int{}
 	onboarded := map[string]bool{}
+	remotes := remoteSets{}
 	// A tree that isn't there yet has no scopes, which is the same answer as an
 	// empty one; the error is kept only to tell those two apart for the report.
 	entries, err := os.ReadDir(rep.TruthsDir)
@@ -90,13 +101,18 @@ func ScopeStatus() (ScopeReport, error) {
 			var unknown errUnknownScope
 			if errors.As(err, &unknown) {
 				counts[unknown.scope]++
+				remotes.add(unknown.scope, unknown.remote)
 				continue
 			}
 			rep.Unresolved++
 			continue
 		}
 		counts[res.scope]++
+		if res.remote != "" {
+			remotes.add(res.scope, res.remote)
+		}
 	}
+	rep.Collisions = remotes.collisions()
 
 	for name, n := range counts {
 		rep.Scopes = append(rep.Scopes, ScopeStat{Name: name, Onboarded: onboarded[name], Sessions: n})
