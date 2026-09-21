@@ -224,13 +224,19 @@ func (r lensRow) contaminated() bool {
 // (`>>`) is not a redirect the read-back can be attributed to: the file can
 // already hold an earlier round's verdict, which the read would deliver
 // first. A key argument cut at 200 chars ends in the truncation mark and is
-// not matched by either.
+// not matched by either. truncatedRouterRe matches a router call the cut
+// took `--lens` from: the script as the program of its command — at the
+// start, after an operator, env assignments ahead of it — then words free
+// of every operator that would join another command (`;`, `&`, `|`, a
+// newline), then the mark; so a command that chained something else after
+// the router is not one, and neither is an `echo` mentioning the script.
 var (
-	routerInvocation = `^(?:\w+=[^\s;&|>…]*[ \t]+)*[^\s;&|>…]*` + regexp.QuoteMeta(codexLensScript) + `(?:[ \t]+(?:2>[ \t]*)?[^\s;&|>…]+)*`
-	lensArgRe        = regexp.MustCompile(`--lens\s+(\w+)`)
-	shellWrapperRe   = regexp.MustCompile(`^(?:bash|sh|zsh)\s+-[a-z]*c[a-z]*\s+`)
-	routerAloneRe    = regexp.MustCompile(routerInvocation + `$`)
-	routerRedirectRe = regexp.MustCompile(routerInvocation + `[ \t]+>[ \t]*([^\s;&|>…]+)(?:[ \t]+2>[ \t]*[^\s;&|>…]+)?$`)
+	routerInvocation  = `^(?:\w+=[^\s;&|>…]*[ \t]+)*[^\s;&|>…]*` + regexp.QuoteMeta(codexLensScript) + `(?:[ \t]+(?:2>[ \t]*)?[^\s;&|>…]+)*`
+	lensArgRe         = regexp.MustCompile(`--lens\s+(\w+)`)
+	shellWrapperRe    = regexp.MustCompile(`^(?:bash|sh|zsh)\s+-[a-z]*c[a-z]*\s+`)
+	routerAloneRe     = regexp.MustCompile(routerInvocation + `$`)
+	routerRedirectRe  = regexp.MustCompile(routerInvocation + `[ \t]+>[ \t]*([^\s;&|>…]+)(?:[ \t]+2>[ \t]*[^\s;&|>…]+)?$`)
+	truncatedRouterRe = regexp.MustCompile(`(?:^|[\n;&|][ \t]*)(?:\w+=[^\s;&|>…]*[ \t]+)*[^\s;&|>…]*` + regexp.QuoteMeta(codexLensScript) + `\b[^\n;&|…]*…$`)
 )
 
 // dispatchLens names the lens a tool row dispatched, or "" when the row is
@@ -255,6 +261,20 @@ func dispatchLens(c callRow) string {
 		}
 	}
 	return ""
+}
+
+// truncatedRouterCall reports whether a shell row's key argument is a router
+// call the 200-char cut ended before the flags that name its lens: the cut
+// row cannot say which lens it routed, but it is still the router, so the
+// record its window holds says for it. A cut row `--lens` survived on named
+// its lens and was judged on it — an unknown name there is not a cue to
+// take any lens's record.
+func truncatedRouterCall(c callRow) bool {
+	if c.toolKind == subagentKind {
+		return false
+	}
+	cmd := shellWrapperRe.ReplaceAllString(strings.TrimSpace(strings.ToLower(c.keyArg)), "")
+	return !lensArgRe.MatchString(cmd) && truncatedRouterRe.MatchString(cmd)
 }
 
 // routerAlone reports whether a router command's result is the router's own
@@ -377,7 +397,8 @@ const joinSlack = 5 * time.Second
 // record naming the row's call id, else — for a router call, whose record
 // cannot know its own call id — the earliest unjoined record of the same
 // lens naming no dispatch whose start falls in the call's window, joinSlack
-// either side. A row a record names by dispatch id is a dispatch of the
+// either side — of any lens, for a router call whose key argument was cut
+// before `--lens`. A row a record names by dispatch id is a dispatch of the
 // record's lens whether or not its key argument reads as one, and its
 // attempt takes the record's round and attempt number where the record
 // carries them: the record is the producer's word, and the key-argument
@@ -554,9 +575,12 @@ func lensRank(name string) int {
 // lens naming no dispatch that started in the call's window — from joinSlack
 // before the call to joinSlack after it ended, or unbounded after when the
 // call's duration is unknown — the parsers write 0 where no result timestamp
-// bounded the call. A subagent row, and a row the heuristic reads as no lens
-// dispatch, joins by dispatch id alone. A row with no call id joins nothing,
-// since the join is kept by call id.
+// bounded the call. A router call whose key argument was cut before `--lens`
+// names no lens, and takes the earliest such record of any lens in its
+// window: the record then names the lens for it. A subagent row, and a row
+// the heuristic reads as no lens dispatch and not as a cut router call,
+// joins by dispatch id alone. A row with no call id joins nothing, since
+// the join is kept by call id.
 func (w *lensWalk) join(name string, c callRow) int {
 	if c.callID == "" {
 		return -1
@@ -566,12 +590,16 @@ func (w *lensWalk) join(name string, c callRow) int {
 			return i
 		}
 	}
-	if name == "" || c.toolKind == subagentKind || c.startedAt.IsZero() {
+	if c.toolKind == subagentKind || c.startedAt.IsZero() {
+		return -1
+	}
+	anyLens := name == "" && truncatedRouterCall(c)
+	if name == "" && !anyLens {
 		return -1
 	}
 	best := -1
 	for i, e := range w.execs {
-		if w.joined[i] || e.DispatchID != "" || e.Lens != name || e.StartedAt.IsZero() {
+		if w.joined[i] || e.DispatchID != "" || e.Lens == "" || (!anyLens && e.Lens != name) || e.StartedAt.IsZero() {
 			continue
 		}
 		if e.StartedAt.Before(c.startedAt.Add(-joinSlack)) {

@@ -1102,3 +1102,111 @@ func TestRecordIdentityWinsForAJoinedDispatch(t *testing.T) {
 		t.Errorf("quality r1 = %+v, want unjoined and standing", a)
 	}
 }
+
+// A router call whose key argument the 200-char cut ended before `--lens` —
+// a scratchpad preamble ahead of the script pushes the flags past the cut
+// — reads as no lens dispatch on its own, so it joins the earliest record
+// of any lens naming no dispatch that started in its window and takes the
+// record's lens, round and attempt. The same cut row with no record in its
+// window still opens nothing, and a cut row that chained another command
+// after the router is not a router call.
+func TestTruncatedRouterCallJoinsItsRecordByWindow(t *testing.T) {
+	const (
+		ticket = "loom/lens-truncated-0001"
+		router = "S=/private/tmp/claude-501/-Users-steve-code-loom/e377ca19-58fa-43ea-bd4c-94f2a6eb0c3d/scratchpad\nmkdir -p $S/lens-logs $S/verdicts\n/Users/steve/.claude/work-policy/d0ad82d1d69e/codex-lens.sh --runtime…"
+	)
+	at := func(min int) time.Time { return base.Add(time.Duration(min) * time.Minute) }
+	verdict := func(name string) string {
+		return `{"lens": "` + name + `", "verdict": "satisfied", "summary": "Fine."}`
+	}
+	f := newFixture(t)
+	f.add(&summary.SessionSummary{
+		SessionID: "truncated-router",
+		Agent:     summary.AgentClaude,
+		StartTime: at(0),
+		EndTime:   at(30),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), StartedAt: at(0),
+				AssistantText: "dispatching (" + ticket + " round 1): contract, security"},
+			{Idx: 1, UserMessage: notification("toolu_c", verdict("contract")), AssistantText: "Contract in.", StartedAt: at(5)},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "toolu_c", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 1", StartedAt: at(1), DurationMs: 120000},
+			{TurnIdx: 0, CallID: "toolu_b", Kind: summary.KindBash, ToolName: "Bash", KeyArg: router, StartedAt: at(2), DurationMs: 10000},
+		},
+	})
+	db := openRO(t, f.path)
+	inv := fixtureInvocation(t, db)
+
+	// Without a record the cut row is nothing, and the line's security
+	// commitment is unmet.
+	attempts, err := Lenses(db, inv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "contract/1/1/parsed security/1/0/missing"; got != want {
+		t.Fatalf("attempts without records = %v, want %v", got, want)
+	}
+
+	// With the record in the call's window: the row is the record's
+	// security dispatch at the record's attempt number, routed, and nothing
+	// is missing.
+	attempts, err = Lenses(db, inv, []LensExecution{
+		{ExecutionID: "lens-security-r1-a1-e52f617f3d55", Lens: "security", Round: 1, Attempt: 1, StartedAt: at(2).Add(2 * time.Second)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "contract/1/1/parsed security/1/1/dispatched"; got != want {
+		t.Fatalf("attempts with a record = %v, want %v", got, want)
+	}
+	if a := attempt(t, attempts, lens.Security, 1, 1); a.ExecutionID != "lens-security-r1-a1-e52f617f3d55" || a.DispatchID != "toolu_b" || !a.Routed || !a.Dispatched {
+		t.Errorf("security r1 = %+v, want the cut router row joined to its record and routed", a)
+	}
+
+	// A record outside the window joins nothing: the cut row stays nothing.
+	attempts, err = Lenses(db, inv, []LensExecution{
+		{ExecutionID: "lens-security-stray", Lens: "security", Round: 1, Attempt: 1, StartedAt: at(20)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shapeOf(attempts), "contract/1/1/parsed security/1/0/missing"; got != want {
+		t.Fatalf("attempts with a stray record = %v, want %v", got, want)
+	}
+	for _, a := range attempts {
+		if a.ExecutionID != "" {
+			t.Errorf("attempt %+v joined the stray record", a)
+		}
+	}
+}
+
+// truncatedRouterCall accepts a cut key argument only when the router is the
+// last command before the cut and no `--lens` survived it: a row that names
+// a lens, known or not, was classified on that name.
+func TestTruncatedRouterCallClassifiesTheCutCommand(t *testing.T) {
+	cases := map[string]bool{
+		"~/.codex/codex-lens.sh --runtime…":                                    true,
+		"S=/tmp/s\nmkdir -p $S/logs\n/x/work-policy/abc/codex-lens.sh --runt…": true,
+		"cd /tmp && ~/.codex/codex-lens.sh --runtime claude --payload /tmp/…":  true,
+		"~/.codex/codex-lens.sh --runtime claude 2> /tmp/err.log --payload /…": true,
+		"~/.codex/codex-lens.sh --runtime claude --lens bogus --round 1 --at…": false,
+		"~/.codex/codex-lens.sh --runtime claude --lens security --round 1 -…": false,
+		"~/.codex/codex-lens.sh --runtime claude":                              false,
+		"~/.codex/codex-lens.sh --runtime claude; cat /tmp/verdict.txt…":       false,
+		"~/.codex/codex-lens.sh --runtime claude | tee /tmp/out.txt…":          false,
+		"~/.codex/codex-lens.sh --runtime claude && cat /tmp/verdict…":         false,
+		"~/.codex/codex-lens.sh --runtime claude\ncat /tmp/verdict.txt…":       false,
+		"bash -lc S=/tmp/s\n~/.codex/codex-lens.sh --runtime codex --payload…": true,
+		"echo codex-lens.sh is at /x…":                                         false,
+		"cat README.md…":                                                       false,
+	}
+	for keyArg, want := range cases {
+		if got := truncatedRouterCall(callRow{toolKind: string(summary.KindBash), keyArg: keyArg}); got != want {
+			t.Errorf("truncatedRouterCall(%q) = %v, want %v", keyArg, got, want)
+		}
+	}
+	if truncatedRouterCall(callRow{toolKind: subagentKind, keyArg: "~/.codex/codex-lens.sh --runtime…"}) {
+		t.Error("a subagent row read as a cut router call")
+	}
+}

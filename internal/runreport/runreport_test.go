@@ -1345,6 +1345,76 @@ func TestRecordedRoundPlacesAttemptsWithNoCommitmentLine(t *testing.T) {
 	}
 }
 
+// Run d777ea83's shape: the router call's key argument was cut at 200
+// chars before `--lens` — a scratchpad preamble ahead of the script — and
+// its record carries no dispatch id. The cut row joins the record by time
+// window and takes its lens, round and attempt: the security lens is one
+// recorded attempt 1 in round 1, not a missing attempt 0 beside an
+// unrecorded attempt 1.
+func TestTruncatedRouterCallReportsAsOneRecordedAttempt(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		ticket  = "loom/report-root-cross-d963"
+		session = "sess-truncated-router"
+		router  = "S=/private/tmp/claude-501/-Users-steve-code-loom/e377ca19-58fa-43ea-bd4c-94f2a6eb0c3d/scratchpad\nmkdir -p $S/lens-logs $S/verdicts\n/Users/steve/.claude/work-policy/d0ad82d1d69e/codex-lens.sh --runtime…"
+	)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-truncated","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-12T04:00:00Z","ended_at":"2026-09-12T04:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-truncated","run_id":"run-truncated","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-12T04:00:00Z","ended_at":"2026-09-12T04:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-security-r1-a1-e52f617f3d55","run_id":"run-truncated","parent_execution_id":"root-truncated","execution_kind":"lens","lens":"security","round":1,"attempt":1,"agent":"codex-cli","session_id":"sess-truncated-lens","started_at":"2026-09-12T04:03:15Z","ended_at":"2026-09-12T04:03:23Z","outcome":"completed"}`,
+	)
+	day := func(hhmmss string) time.Time { return at(hhmmss).AddDate(0, 0, 2) }
+	verdict := func(name string) string {
+		return `{"lens": "` + name + `", "verdict": "satisfied", "summary": "Fine."}`
+	}
+	sum := &summary.SessionSummary{
+		SessionID: session,
+		Agent:     summary.AgentClaude,
+		StartTime: day("04:00:00"),
+		EndTime:   day("04:30:00"),
+		Turns: []summary.Turn{
+			{Idx: 0, UserMessage: workInvocation(ticket), StartedAt: day("04:00:00"), EndedAt: day("04:04:00"), Model: claudeModel, InputTokens: 100, OutputTokens: 50,
+				AssistantText: "dispatching (" + ticket + " round 1): contract, security"},
+			{Idx: 1, UserMessage: notification("toolu_c", verdict("contract")), AssistantText: "Contract in.", StartedAt: day("04:05:00"), EndedAt: day("04:05:10"), Model: claudeModel, InputTokens: 50, OutputTokens: 10},
+		},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "toolu_c", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 1", StartedAt: day("04:03:10"), DurationMs: 120000},
+			{TurnIdx: 0, CallID: "toolu_b", Kind: summary.KindBash, ToolName: "Bash", KeyArg: router, StartedAt: day("04:03:13"), DurationMs: 10367},
+		},
+	}
+	for _, b := range lens.Extract(sum.Turns[1].UserMessage) {
+		sum.LensResponses = append(sum.LensResponses, summary.LensResponse{
+			TurnIdx: 1, Origin: summary.OriginTaskNotification, DispatchID: "toolu_c", SourceLine: 2, At: sum.Turns[1].StartedAt, Block: b,
+		})
+	}
+	writeSession(t, st, sum)
+	writeSession(t, st, oneTurn(summary.AgentCodex, "sess-truncated-lens", codexModel, day("04:03:15"), day("04:03:23"), 500, 100, 50, summary.KindBash, 1500))
+
+	rep := build(t, st, "run-truncated")
+	var groups []string
+	for _, g := range rep.Lenses {
+		groups = append(groups, g.Lens+"/"+strconv.Itoa(g.Round)+"/"+strconv.Itoa(len(g.Attempts)))
+	}
+	if got := strings.Join(groups, " "); got != "contract/1/1 security/1/1" {
+		t.Fatalf("lens groups = %v, want each lens once in round 1", groups)
+	}
+	g := rep.Lenses[1]
+	if g.Retries != 0 {
+		t.Errorf("security retries = %d, want 0", g.Retries)
+	}
+	la := g.Attempts[0]
+	if la.Attempt != 1 || !la.Recorded || la.ExecutionID != "lens-security-r1-a1-e52f617f3d55" || la.Status != "dispatched" || la.Outcome != "completed" {
+		t.Errorf("security attempt = %+v, want attempt 1 recorded and joined to its record", la)
+	}
+	for _, g := range rep.Lenses {
+		for _, a := range g.Attempts {
+			if a.Status == "missing" {
+				t.Errorf("%s round %d has a missing attempt: %+v", g.Lens, g.Round, a)
+			}
+		}
+	}
+}
+
 // A routed verdict may exist only in the child session codex-lens recorded.
 // Both rounds survive parser ingestion, join their recorded executions, and
 // remain available to the detail loader as complete response bodies.

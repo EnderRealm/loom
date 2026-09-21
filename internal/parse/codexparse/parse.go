@@ -699,11 +699,17 @@ func extractFunctionKeyArg(_, args string) string {
 		if v, ok := m[k]; ok {
 			var s string
 			if err := json.Unmarshal(v, &s); err == nil {
+				if k == "command" {
+					return boundCommandKeyArg(s)
+				}
 				return truncate(s, 200)
 			}
 			// arrays (e.g. `command: ["bash","-c","..."]`)
 			var arr []string
 			if err := json.Unmarshal(v, &arr); err == nil {
+				if k == "command" {
+					return boundCommandKeyArg(strings.Join(arr, " "))
+				}
 				return truncate(strings.Join(arr, " "), 200)
 			}
 		}
@@ -766,6 +772,26 @@ func changeOpKind(raw json.RawMessage) string {
 	return "patch"
 }
 
+// keyArgLimit bounds a command key argument; routerKeyArgLimit bounds one
+// invoking the lens router (workreport.codexLensScript). The attempt model
+// classifies a router call off its `--lens` flag and joins its execution
+// record by that lens, and a scratchpad preamble ahead of the script
+// pushes the flags past 200 chars.
+const (
+	keyArgLimit       = 200
+	routerKeyArgLimit = 2000
+	codexLensScript   = "codex-lens.sh"
+)
+
+// boundCommandKeyArg cuts a shell command at keyArgLimit, or at
+// routerKeyArgLimit when it invokes the lens router.
+func boundCommandKeyArg(s string) string {
+	if strings.Contains(s, codexLensScript) {
+		return truncate(s, routerKeyArgLimit)
+	}
+	return truncate(s, keyArgLimit)
+}
+
 // commandKeyArg flattens the exec_command_end `command` field (which is
 // either a string or a string array) into a single line.
 func commandKeyArg(raw json.RawMessage) string {
@@ -773,14 +799,14 @@ func commandKeyArg(raw json.RawMessage) string {
 		return ""
 	}
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return truncate(s, 200)
+	if err := json.Unmarshal(raw, &s); err != nil {
+		var arr []string
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return ""
+		}
+		s = strings.Join(arr, " ")
 	}
-	var arr []string
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		return truncate(strings.Join(arr, " "), 200)
-	}
-	return ""
+	return boundCommandKeyArg(s)
 }
 
 // parseDurationMs handles Codex's duration encoding, which is either a

@@ -882,6 +882,17 @@ func classifyClaudeTool(name string) summary.ToolKind {
 	return summary.KindOther
 }
 
+// keyArgLimit bounds a key argument; routerKeyArgLimit bounds a Bash
+// command invoking the lens router (workreport.codexLensScript). The
+// attempt model classifies a router call off its `--lens` flag and joins
+// its execution record by that lens, and a scratchpad preamble ahead of
+// the script pushes the flags past 200 chars.
+const (
+	keyArgLimit       = 200
+	routerKeyArgLimit = 2000
+	codexLensScript   = "codex-lens.sh"
+)
+
 // extractKeyArg pulls the most identifying argument from a tool_use input
 // payload, keyed off the tool name. Best-effort and bounded in size.
 func extractKeyArg(name string, input json.RawMessage) string {
@@ -897,7 +908,10 @@ func extractKeyArg(name string, input json.RawMessage) string {
 		if v, ok := m[k]; ok {
 			var s string
 			if err := json.Unmarshal(v, &s); err == nil {
-				return truncate(s, 200)
+				if name == "Bash" && k == "command" && strings.Contains(s, codexLensScript) {
+					return truncate(s, routerKeyArgLimit)
+				}
+				return truncate(s, keyArgLimit)
 			}
 		}
 	}

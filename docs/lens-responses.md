@@ -107,8 +107,15 @@ lens in one review round. The run's turns are walked in order.
   earlier round's verdict first, answering the later attempt with the wrong
   block; both attempts stay `dispatched`, never paired by a read-back.
   Anything else the command
-  cannot be classified as — the key argument cut at 200 chars included —
-  fails closed. A verdict a shell call
+  cannot be classified as fails closed. The key argument is cut at 200
+  chars — a router command is kept whole to 2000, since the walk reads its
+  `--lens` off it, but rows folded before that bound stand as stored — and
+  a router row cut before `--lens` reads as no
+  lens dispatch on its own: it joins its execution record by time window,
+  as below, and takes lens, round and attempt from the record, while
+  verdict pairing from that row's own result still fails closed, the
+  attempt `dispatched` until the child session's response fills it. A
+  verdict a shell call
   read back — a `cat` of the file the router's output was redirected to —
   answers the unanswered dispatched attempt whose `codex-lens.sh` command
   redirected its stdout (`> <path>`) to the one path the reading command
@@ -146,7 +153,9 @@ lens in one review round. The run's turns are walked in order.
   tool_use_id — joins a `codex-lens.sh` call of its lens whose window holds
   the record's start, from five seconds before the call began to five
   seconds after it ended (unbounded after, when the call's duration is
-  unknown), the earliest such record first. A subagent row joins by
+  unknown), the earliest such record first — of any lens, when the call's
+  key argument was cut before `--lens` and names none, the router the last
+  command before the cut. A subagent row joins by
   dispatch id alone. A joined record is the attempt's identity: the attempt
   is of the record's lens, in the record's round and at the record's
   attempt number where the record carries them, over the key-argument
@@ -192,9 +201,12 @@ inlines its passes (Codex, Cursor); on Claude the assistant quoting a
 verdict, in its text or in a file it wrote, is not a lens answering.
 A file-reading tool's result is not paired either: a diff or a doc it reads
 can quote verdict blocks that answer nothing. The redirect path is read off
-`tool_calls.key_arg`, the command cut at 200 characters; a redirect past the
-cut is not seen, and the attempt stays `dispatched` rather than pairing on a
-guess.
+`tool_calls.key_arg`, the command cut at 200 characters (2000 for a router
+command); a redirect past the cut is not seen, and the attempt stays
+`dispatched` rather than pairing on a guess. A router row cut before
+`--lens` still joins its execution record by time window and takes lens,
+round and attempt from it; only the pairing from the row's own result fails
+closed.
 
 `contaminated` is the structured `context.state` where the response carries
 one, and otherwise the summary's prose — the historical reading, labelled as
