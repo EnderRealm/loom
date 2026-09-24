@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"loom/internal/parse/claudeparse"
 	"loom/internal/parse/codexparse"
 	"loom/internal/parse/lens"
 	"loom/internal/parse/summary"
@@ -1412,6 +1413,94 @@ func TestTruncatedRouterCallReportsAsOneRecordedAttempt(t *testing.T) {
 				t.Errorf("%s round %d has a missing attempt: %+v", g.Lens, g.Round, a)
 			}
 		}
+	}
+}
+
+// Run 9d4eeab9's shape, folded through the Claude parser: three rounds in
+// one turn, contract and quality async subagents answering through
+// hand-backs, security routed with an execution record per round. Every lens
+// reports one attempt per round with no retries; the routed one is
+// attributed to its record and the subagents to the transcript that paired
+// their verdicts. A dispatch nothing answered and no record joined is
+// attributed as unknown rather than left as empty fields.
+func TestNativeSubagentLensesReportOneAttemptPerRound(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		ticket  = "loom/handback-1"
+		session = "handback-fixture"
+	)
+	lines := []string{
+		`{"v":1,"kind":"run","run_id":"run-handback","ticket":"` + ticket + `","runtime":"claude-code","agent":"claude-code","session_id":"` + session + `","started_at":"2026-09-22T10:00:00Z","ended_at":"2026-09-22T10:40:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-handback","run_id":"run-handback","execution_kind":"root","agent":"claude-code","session_id":"` + session + `","started_at":"2026-09-22T10:00:00Z","ended_at":"2026-09-22T10:40:00Z","outcome":"completed"}`,
+	}
+	for r := 1; r <= 3; r++ {
+		n := strconv.Itoa(r)
+		lines = append(lines, `{"v":1,"kind":"execution","execution_id":"lens-security-r`+n+`","run_id":"run-handback","parent_execution_id":"root-handback","execution_kind":"lens","dispatch_id":"toolu_s`+n+`","lens":"security","round":`+n+`,"attempt":1,"started_at":"2026-09-22T10:`+n+`0:05Z","ended_at":"2026-09-22T10:`+n+`0:06Z","outcome":"completed"}`)
+	}
+	importLines(t, st, lines...)
+	f, err := os.Open(filepath.Join("..", "parse", "claudeparse", "testdata", "lens_handback.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sum, err := claudeparse.Parse(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSession(t, st, sum)
+
+	rep := build(t, st, "run-handback")
+	var groups []string
+	for _, g := range rep.Lenses {
+		groups = append(groups, g.Lens+"/"+strconv.Itoa(g.Round)+"/"+strconv.Itoa(len(g.Attempts)))
+	}
+	if got, want := strings.Join(groups, " "), "contract/1/1 quality/1/1 security/1/1 contract/2/1 quality/2/1 security/2/1 contract/3/1 quality/3/1 security/3/1"; got != want {
+		t.Fatalf("lens groups = %v, want %v", got, want)
+	}
+	for _, g := range rep.Lenses {
+		a := g.Attempts[0]
+		if g.Retries != 0 || a.Attempt != 1 || a.Superseded || a.Status != workreport.AttemptParsed || a.Verdict == "" || a.ContextState != "clean" {
+			t.Errorf("%s round %d = retries %d %+v, want one standing parsed attempt", g.Lens, g.Round, g.Retries, a)
+		}
+		wantAttr, wantExec := AttributionTranscript, ""
+		if g.Lens == lens.Security {
+			wantAttr, wantExec = AttributionExecution, "lens-security-r"+strconv.Itoa(g.Round)
+		}
+		if a.Attribution != wantAttr || a.ExecutionID != wantExec {
+			t.Errorf("%s round %d attribution = %s execution %q, want %s %q", g.Lens, g.Round, a.Attribution, a.ExecutionID, wantAttr, wantExec)
+		}
+	}
+
+	// A contract dispatch nothing answered, and a quality lens committed to
+	// and never sent: neither has a record or a response behind it.
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"run-unanswered","ticket":"loom/unanswered-1","runtime":"claude-code","agent":"claude-code","session_id":"sess-unanswered","started_at":"2026-09-10T17:00:00Z","ended_at":"2026-09-10T17:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-unanswered","run_id":"run-unanswered","execution_kind":"root","agent":"claude-code","session_id":"sess-unanswered","started_at":"2026-09-10T17:00:00Z","ended_at":"2026-09-10T17:30:00Z","outcome":"completed"}`,
+	)
+	writeSession(t, st, &summary.SessionSummary{
+		SessionID: "sess-unanswered",
+		Agent:     summary.AgentClaude,
+		StartTime: at("17:00:00"),
+		EndTime:   at("17:30:00"),
+		Turns: []summary.Turn{{
+			Idx: 0, UserMessage: workInvocation("loom/unanswered-1"), AssistantText: "dispatching (loom/unanswered-1 round 1): contract, quality",
+			StartedAt: at("17:00:00"), EndedAt: at("17:05:00"), Model: claudeModel, InputTokens: 10, OutputTokens: 5,
+		}},
+		ToolCalls: []summary.ToolCall{
+			{TurnIdx: 0, CallID: "toolu_c", Kind: summary.KindTask, ToolName: "Agent", KeyArg: "Contract lens round 1", StartedAt: at("17:01:00")},
+		},
+	})
+	rep = build(t, st, "run-unanswered")
+	if len(rep.Lenses) != 2 {
+		t.Fatalf("lenses = %+v, want contract and quality in round 1", rep.Lenses)
+	}
+	for _, g := range rep.Lenses {
+		if a := g.Attempts[0]; a.Attribution != AttributionUnknown || a.ExecutionID != "" {
+			t.Errorf("%s round %d = %+v, want attribution unknown", g.Lens, g.Round, a)
+		}
+	}
+	if got := rep.Lenses[0].Attempts[0].Status + " " + rep.Lenses[1].Attempts[0].Status; got != "dispatched missing" {
+		t.Errorf("statuses = %s, want dispatched missing", got)
 	}
 }
 

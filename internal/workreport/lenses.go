@@ -374,21 +374,27 @@ const joinSlack = 5 * time.Second
 // alone, since a redirected or compound router command's result is not the
 // router's output and its blocks stay in the store as evidence only, the
 // attempt dispatched until an exclusive read of the path the router alone
-// redirected to pairs it, which a compound command never records;
-// then the user-side responses whose dispatch was only on record
-// after those rows; then the assistant text, its commitment lines and inlined
-// blocks in text order. A file-write row — an inlined pass the agent wrote
-// to a file — is a tool row too, and takes its position among the turn's
-// tool rows by time: it is placed ahead of the first timed call it does not
-// follow, and after the last call otherwise. A tool row has no position
-// among the commitment lines, so the turn's first line is applied at its
-// first lens dispatch and each later one when a lens that already answered
-// in the current round is dispatched again — a retry follows a failed,
-// malformed or unanswered attempt and does not open a round; a file-write
-// row applies a line the same way, since a second verdict of a lens written
-// in the same round is the next round's. The text pass then applies every
-// line where it sits, which is idempotent, so an inlined block lands in the
-// round of the line before it.
+// redirected to pairs it, which a compound command never records; then the
+// user-side responses whose dispatch was not on record when the turn opened,
+// still unplaced; then the assistant text, its commitment lines and inlined
+// blocks in text order. Such a response — a notification or a subagent's
+// hand-back landing mid-turn, a whole /work run being one turn when no human
+// message follows the invocation — takes its position among the tool rows
+// by time instead, once its dispatch is on record: it is placed ahead of the
+// first timed call it does not follow, so a lens that answered before its
+// next round's dispatch reads as answered there and that dispatch applies
+// the next commitment line. A file-write row — an inlined pass the agent
+// wrote to a file — is a tool row too, and takes its position among the
+// turn's tool rows by time: it is placed ahead of the first timed call it
+// does not follow, and after the last call otherwise. A tool row has no
+// position among the commitment lines, so the turn's first line is applied
+// at its first lens dispatch and each later one when a lens that already
+// answered in the current round is dispatched again — a retry follows a
+// failed, malformed or unanswered attempt and does not open a round; a
+// file-write row applies a line the same way, since a second verdict of a
+// lens written in the same round is the next round's. The text pass then
+// applies every line where it sits, which is idempotent, so an inlined block
+// lands in the round of the line before it.
 // Inlined blocks and file-write rows are placed only on a runtime that
 // inlines its passes; on Claude the assistant quoting a verdict is not a
 // lens answering.
@@ -424,10 +430,11 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 			switch r.origin {
 			case summary.OriginTaskNotification:
 				// A notification queued mid-turn lands in the turn of the
-				// dispatch it answers; it is read again once the turn's
-				// dispatches are on record. A user row that is not a
-				// notification is not placed: no lens answers as a plain user
-				// message, so it is quoted material.
+				// dispatch it answers; it is placed among the turn's tool
+				// rows by time once its dispatch is on record, or after
+				// them. A user row that is not a notification is not
+				// placed: no lens answers as a plain user message, so it is
+				// quoted material.
 				if r.dispatchID != "" && w.byDispatch[r.dispatchID] == nil {
 					deferred = append(deferred, r)
 					continue
@@ -465,6 +472,17 @@ func lensAttempts(runtime Runtime, startIdx, endIdx int, data *sessionData, exec
 			for len(written) > 0 && !c.startedAt.IsZero() && !written[0].at.After(c.startedAt) {
 				w.write(written[0])
 				written = written[1:]
+			}
+			if !c.startedAt.IsZero() {
+				kept := deferred[:0]
+				for _, r := range deferred {
+					if !r.at.After(c.startedAt) && w.byDispatch[r.dispatchID] != nil {
+						w.respond(r)
+						continue
+					}
+					kept = append(kept, r)
+				}
+				deferred = kept
 			}
 			if name := w.lensOf(c); name != "" {
 				w.dispatch(name, c, t.idx)

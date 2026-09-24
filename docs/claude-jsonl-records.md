@@ -42,6 +42,7 @@ Key fields:
 - `message.content` — either a `string` (plain typed message) or an array of content blocks
 - `toolUseResult` — present when this record is a tool result (discriminator)
 - `isMeta` — `true` for system-injected reminders
+- `origin` — who put the record there: `kind` is `human`, `task-notification`, `coordinator` or `peer`
 - `isSidechain` — `true` inside a Task subagent conversation
 - `promptId` — present when the user typed a new prompt
 
@@ -49,6 +50,7 @@ Observed variants:
 - plain user text (`content` is a string, no `toolUseResult`)
 - tool-result carrier (`toolUseResult` present, `content` is a block array with `tool_result`)
 - meta / system-injected (`isMeta=true`)
+- subagent hand-back (`isMeta=true`, `origin.kind=peer`, `origin.handback=true`): a background agent's final report relayed to the session. `origin.from` is the agent id the launching Agent call's tool result named in `toolUseResult.agentId` (`isAsync`, `status: async_launched`); `origin.body` is the report under the harness's frame, every line indented two spaces. The `<task-notification>` after it names the dispatch but not the report, so a native lens verdict is read from here (`docs/lens-responses.md`). A hand-back that lands mid-turn is written instead as a `queued_command` attachment carrying the same `origin`
 - sidechain (`isSidechain=true`)
 
 ### `assistant`
@@ -102,7 +104,7 @@ Structured payloads that accompany the conversation but aren't model messages. T
 | `edited_text_file` | Record of an externally-edited file |
 | `hook_success` | Hook execution succeeded (newer CLI). Carries `hookName`, `stdout`, `stderr` and `exitCode`; a PreToolUse hook's ask or deny is JSON in `stdout` and is read into the `friction` table (`docs/friction.md`) |
 | `plan_mode` | Plan-mode state change |
-| `queued_command` | Command queued for later execution (newer CLI). Carries the queued text in `prompt`; a task notification that lands mid-turn is delivered this way rather than as a `user` record, and is where a background lens verdict often arrives (`docs/lens-responses.md`) |
+| `queued_command` | Command queued for later execution (newer CLI). Carries the queued text in `prompt`; a task notification that lands mid-turn is delivered this way rather than as a `user` record, and is where a background lens verdict often arrives (`docs/lens-responses.md`). A subagent hand-back that lands mid-turn arrives this way too: `prompt` is the `<agent-message>` envelope and `attachment.origin` the hand-back's `origin` (kind `peer`, `handback: true`, report in `body`) |
 | `skill_listing` | Available skills listing |
 | `task_reminder` | Task-tracker reminder injection |
 

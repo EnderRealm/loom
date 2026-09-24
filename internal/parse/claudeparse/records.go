@@ -41,6 +41,40 @@ type userRecord struct {
 	IsMeta                  *bool           `json:"isMeta"`
 	IsCompactSummary        bool            `json:"isCompactSummary"`
 	SourceToolAssistantUUID string          `json:"sourceToolAssistantUUID"`
+	// Origin is decoded only when asked whether the record is a hand-back,
+	// so drift in its shape cannot turn a real prompt into an Unknown.
+	Origin json.RawMessage `json:"origin"`
+}
+
+// userOrigin says who put a record on the user side. A subagent hand-back is
+// kind peer with handback set: the harness relaying the final report of an
+// agent the session launched, From naming that agent and Body carrying the
+// report, every line indented under the harness's frame. It rides on a user
+// record, or on the queued_command attachment of one that landed mid-turn.
+type userOrigin struct {
+	Kind     string `json:"kind"`
+	From     string `json:"from"`
+	Body     string `json:"body"`
+	Handback bool   `json:"handback"`
+}
+
+// originPeer is the origin kind of a message another session sent.
+const originPeer = "peer"
+
+// handbackOf decodes an origin and returns it when it is a subagent
+// hand-back. An origin that does not decode is not one.
+func handbackOf(raw json.RawMessage) (userOrigin, bool) {
+	var o userOrigin
+	if len(raw) == 0 || json.Unmarshal(raw, &o) != nil {
+		return userOrigin{}, false
+	}
+	return o, o.Kind == originPeer && o.Handback
+}
+
+// agentLaunch is the part of an Agent tool result's toolUseResult naming
+// the agent it started.
+type agentLaunch struct {
+	AgentID string `json:"agentId"`
 }
 
 type userMessage struct {

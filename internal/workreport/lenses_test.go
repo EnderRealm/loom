@@ -38,8 +38,15 @@ import (
 // with `>>` before reading it back. codexFileWriteFixture is a Codex run
 // over two rounds whose contract and quality passes were written to files
 // through apply_patch, the routed security lens after the writes in round 1
-// and before them in round 2.
+// and before them in round 2. handbackFixture is a Claude /work run of three
+// rounds in one turn — no human message follows the invocation — whose
+// contract and quality lenses are async subagents answering through
+// hand-backs — round 2's two dispatched in one assistant message, round 3's
+// contract answering on a queued_command attachment — and whose security
+// lens is routed; a hand-back from an agent the session never launched lands
+// in round 3.
 const (
+	handbackFixture       = "../parse/claudeparse/testdata/lens_handback.jsonl"
 	lensFixture           = "../parse/claudeparse/testdata/lens_responses.jsonl"
 	codexLensFixture      = "../parse/codexparse/testdata/lens_responses.jsonl"
 	codexReadbackFixture  = "../parse/codexparse/testdata/lens_readback.jsonl"
@@ -345,6 +352,40 @@ func TestLensesModelRoundsAndRetries(t *testing.T) {
 	}
 	if run.ReviewIterations == nil || *run.ReviewIterations != 2 || run.Classification != ClassCompliant {
 		t.Errorf("run = %+v, want two rounds and compliant", run)
+	}
+}
+
+// A single-turn run dispatching each lens once per round reads as one
+// attempt per lens per round. Each hand-back is placed by time ahead of the
+// next round's dispatch, so that dispatch finds its lens answered and applies
+// the next commitment line rather than opening a retry in the round before;
+// no round is left with a lens missing. The hand-back from an agent the
+// session never launched places nothing.
+func TestSingleTurnRunPlacesHandbacksBeforeTheNextRound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "summaries.db")
+	foldFixture(t, path, handbackFixture, summary.AgentClaude)
+	db := openRO(t, path)
+	attempts := fixtureRun(t, db, "loom/handback-1")
+
+	want := "contract/1/1/parsed quality/1/1/parsed security/1/1/parsed " +
+		"contract/2/1/parsed quality/2/1/parsed security/2/1/parsed " +
+		"contract/3/1/parsed quality/3/1/parsed security/3/1/parsed"
+	if got := shapeOf(attempts); got != want {
+		t.Fatalf("attempts = %v, want %v", got, want)
+	}
+	for _, a := range attempts {
+		if a.Superseded || a.Late || !a.Dispatched || a.DispatchTurnIdx != 0 || a.ResponseTurnIdx != 0 {
+			t.Errorf("attempt %+v, want dispatched and answered in turn 0, on time and standing", a)
+		}
+		if a.Source != nil && a.Source.Line == 37 {
+			t.Errorf("attempt %+v was answered by the unlaunched agent's hand-back", a)
+		}
+	}
+	for round, line := range map[int]int{1: 9, 2: 21, 3: 33} {
+		c := attempt(t, attempts, lens.Contract, round, 1)
+		if c.Routed || c.DispatchID != fmt.Sprintf("toolu_c%d", round) || c.Source == nil || c.Source.Line != line {
+			t.Errorf("contract round %d = %+v, want its subagent dispatch answered by the hand-back on line %d", round, c, line)
+		}
 	}
 }
 

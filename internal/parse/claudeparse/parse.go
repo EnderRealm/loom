@@ -110,6 +110,14 @@ type state struct {
 	// transcript never shipped, so the row still names what ran.
 	taskAgentType map[string]string
 
+	// launchedAgents maps the agent id an Agent tool result named to the
+	// tool_use that launched it. A subagent hand-back names only the agent,
+	// so this is its one link back to the dispatch.
+	launchedAgents map[string]string
+
+	// handbacks holds the hand-backs already read, by agent and report.
+	handbacks map[string]bool
+
 	// sidechain lifts the isSidechain guards: the stream *is* a subagent
 	// transcript, so its turns, tools and errors are this parse's subject.
 	sidechain bool
@@ -146,6 +154,8 @@ func newState(s *summary.SessionSummary) *state {
 		toolCallByID:      map[string]int{},
 		progressByToolUse: map[string]*progressAccum{},
 		taskAgentType:     map[string]string{},
+		launchedAgents:    map[string]string{},
+		handbacks:         map[string]bool{},
 		unknown:           map[string]*summary.UnknownRecord{},
 		currentTurnIdx:    -1,
 	}
@@ -222,6 +232,12 @@ func (st *state) handleUser(line []byte) error {
 		return nil
 	}
 
+	// A subagent hand-back is meta and opens no turn: nobody typed it.
+	if o, ok := handbackOf(rec.Origin); ok && !rec.IsCompactSummary {
+		st.recordHandback(o, ts)
+		return nil
+	}
+
 	// Meta / system-injected: not a real user prompt.
 	if rec.IsMeta != nil && *rec.IsMeta {
 		return nil
@@ -263,6 +279,23 @@ func (st *state) handleUser(line []byte) error {
 		st.recordLenses(text, summary.OriginUser, "", idx, ts)
 	}
 	return nil
+}
+
+// recordHandback stores the lens verdicts in a subagent hand-back. A
+// background agent's final report reaches the session as a hand-back, and
+// the task notification that follows it no longer quotes it, so a native
+// lens's verdict is read here. It answers the dispatch that launched the
+// agent; one from an agent this session did not launch names no dispatch
+// and is kept as evidence only. The same hand-back is read once, whichever
+// record carried it — a user record, or a queued_command attachment when it
+// landed mid-turn — so a verdict delivered twice cannot answer twice.
+func (st *state) recordHandback(o userOrigin, ts time.Time) {
+	key := o.From + "\x00" + o.Body
+	if st.handbacks[key] {
+		return
+	}
+	st.handbacks[key] = true
+	st.recordLenses(o.Body, summary.OriginTaskNotification, st.launchedAgents[o.From], st.currentTurnIdx, ts)
 }
 
 // taskNotificationOpen opens the message the harness posts on the user side
@@ -486,8 +519,9 @@ func (st *state) handleAttachment(line []byte) error {
 	var probe struct {
 		header
 		Attachment struct {
-			Type   string `json:"type"`
-			Prompt string `json:"prompt"`
+			Type   string          `json:"type"`
+			Prompt string          `json:"prompt"`
+			Origin json.RawMessage `json:"origin"`
 		} `json:"attachment"`
 	}
 	if err := json.Unmarshal(line, &probe); err != nil {
@@ -500,8 +534,14 @@ func (st *state) handleAttachment(line []byte) error {
 	case "queued_command":
 		// A task notification that lands while the assistant is mid-turn is
 		// queued and injected as this attachment's prompt, never as a user
-		// record: a background lens's verdict often arrives this way.
-		if taskNotification(probe.Attachment.Prompt) {
+		// record: a background lens's verdict often arrives this way. So does
+		// a subagent hand-back, the attachment carrying its origin; an inline
+		// sidechain copy is the subagent's own, as on the user side.
+		if o, ok := handbackOf(probe.Attachment.Origin); ok {
+			if !probe.IsSidechain || st.sidechain {
+				st.recordHandback(o, parseTime(probe.Timestamp))
+			}
+		} else if taskNotification(probe.Attachment.Prompt) {
 			var dispatchID string
 			if m := toolUseIDRe.FindStringSubmatch(probe.Attachment.Prompt); m != nil {
 				dispatchID = m[1]
@@ -684,6 +724,7 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 	if err := json.Unmarshal(rec.Message.Content, &blocks); err != nil {
 		return
 	}
+	st.recordLaunch(rec.ToolUseResult, blocks)
 	for _, b := range blocks {
 		if b.Type != "tool_result" {
 			continue
@@ -716,6 +757,30 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 	// the denied result, so interrupts are read here as well as off prompts.
 	if !rec.IsSidechain || st.sidechain {
 		st.recordInterrupts(blocks, ts)
+	}
+}
+
+// recordLaunch maps the agent an Agent tool result names to the Task call it
+// answers. toolUseResult is one object per carrier, so a carrier holding
+// more than one tool result cannot say which call launched the agent, and
+// maps nothing; neither does one answering a call that is not this session's
+// Task dispatch.
+func (st *state) recordLaunch(raw json.RawMessage, blocks []userContentBlock) {
+	var launch agentLaunch
+	if json.Unmarshal(raw, &launch) != nil || launch.AgentID == "" {
+		return
+	}
+	var results []string
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			results = append(results, b.ToolUseID)
+		}
+	}
+	if len(results) != 1 {
+		return
+	}
+	if idx, ok := st.toolCallByID[results[0]]; ok && st.s.ToolCalls[idx].Kind == summary.KindTask {
+		st.launchedAgents[launch.AgentID] = results[0]
 	}
 }
 

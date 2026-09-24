@@ -2,6 +2,7 @@ package claudeparse
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -103,6 +104,109 @@ func TestLensResponsesAreReadWhole(t *testing.T) {
 	cut := s.LensResponses[3]
 	if !cut.Unterminated || cut.Summary != "All criteria met on the second pass." || len(cut.Criteria) != 0 {
 		t.Errorf("cut verdict = %+v, want unterminated with lens and summary recovered and no criteria", cut)
+	}
+}
+
+// TestSubagentHandbacksAnswerTheirLaunch pins where a native lens's verdict
+// is read from since the task notification stopped quoting it: the meta
+// hand-back the harness relays, its report indented two spaces under the
+// frame, on a user record or — round 3's contract, landing mid-turn — on a
+// queued_command attachment. A hand-back answers the Agent call whose async
+// launch named its agent, round 2's two launches batched in one assistant
+// message included; one from an agent the session never launched names no
+// dispatch. Neither the hand-backs nor the notifications after them open a
+// turn, so the fixture's whole three-round run stays the invocation's one
+// turn.
+func TestSubagentHandbacksAnswerTheirLaunch(t *testing.T) {
+	s := parseFixture(t, "testdata/lens_handback.jsonl")
+	if len(s.Turns) != 1 || len(s.Unknown) != 0 {
+		t.Fatalf("turns = %d unknown = %+v, want 1 turn and no drift: a hand-back is meta and opens none", len(s.Turns), s.Unknown)
+	}
+	want := []struct {
+		line       int
+		origin     string
+		dispatchID string
+		lens       string
+	}{
+		{8, summary.OriginToolResult, "toolu_s1", lens.Security},
+		{9, summary.OriginTaskNotification, "toolu_c1", lens.Contract},
+		{11, summary.OriginTaskNotification, "toolu_q1", lens.Quality},
+		{20, summary.OriginToolResult, "toolu_s2", lens.Security},
+		{21, summary.OriginTaskNotification, "toolu_c2", lens.Contract},
+		{23, summary.OriginTaskNotification, "toolu_q2", lens.Quality},
+		{32, summary.OriginToolResult, "toolu_s3", lens.Security},
+		// The queued_command attachment carrying the hand-back's origin.
+		{33, summary.OriginTaskNotification, "toolu_c3", lens.Contract},
+		{35, summary.OriginTaskNotification, "toolu_q3", lens.Quality},
+		// Agent azz was never launched here: its hand-back is kept, naming
+		// no dispatch.
+		{37, summary.OriginTaskNotification, "", lens.Contract},
+	}
+	if len(s.LensResponses) != len(want) {
+		t.Fatalf("LensResponses len: got %d, want %d", len(s.LensResponses), len(want))
+	}
+	for i, w := range want {
+		r := s.LensResponses[i]
+		if r.SourceLine != w.line || r.TurnIdx != 0 || r.Origin != w.origin || r.DispatchID != w.dispatchID || r.Lens != w.lens {
+			t.Errorf("LensResponses[%d] = line %d turn %d %s %q %s, want line %d turn 0 %s %q %s",
+				i, r.SourceLine, r.TurnIdx, r.Origin, r.DispatchID, r.Lens, w.line, w.origin, w.dispatchID, w.lens)
+		}
+		if r.Status != lens.StatusParsed || r.ContextKind != lens.ContextStructured || r.At.IsZero() {
+			t.Errorf("LensResponses[%d] = %s/%s %s at %s, want the indented block parsed whole with its context",
+				i, r.Status, r.Reason, r.ContextKind, r.At)
+		}
+	}
+	var criteria []map[string]string
+	if err := json.Unmarshal(s.LensResponses[1].Criteria, &criteria); err != nil || len(criteria) != 1 || criteria[0]["id"] != "AC1" {
+		t.Errorf("hand-back criteria = %s (%v), want AC1 intact", s.LensResponses[1].Criteria, err)
+	}
+}
+
+// TestHandbackIsReadOnce pins that one hand-back delivered twice — as the
+// queued_command attachment it arrived on and again as a user record — stores
+// its verdict once, so it cannot answer its dispatch twice and read as a
+// retry.
+func TestHandbackIsReadOnce(t *testing.T) {
+	raw, err := os.ReadFile("testdata/lens_handback.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	var queued struct {
+		Attachment struct {
+			Origin json.RawMessage `json:"origin"`
+		} `json:"attachment"`
+	}
+	if err := json.Unmarshal([]byte(lines[32]), &queued); err != nil || len(queued.Attachment.Origin) == 0 {
+		t.Fatalf("line 33 is not the queued hand-back: %v", err)
+	}
+	again := `{"type":"user","sessionId":"handback-fixture","isSidechain":false,"isMeta":true,"timestamp":"2026-09-22T10:30:07.500Z","origin":` +
+		string(queued.Attachment.Origin) + `,"message":{"role":"user","content":"Another Claude session sent a message"}}`
+	s, err := Parse(strings.NewReader(string(raw) + again + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract3 int
+	for _, r := range s.LensResponses {
+		if r.DispatchID == "toolu_c3" {
+			contract3++
+		}
+	}
+	if len(s.LensResponses) != 10 || contract3 != 1 {
+		t.Errorf("LensResponses = %d with %d answering toolu_c3, want 10 and 1: the repeated hand-back is read once", len(s.LensResponses), contract3)
+	}
+}
+
+// TestOriginDriftKeepsTheTurn pins that an origin whose shape the parser does
+// not model is not a hand-back and does not cost the record: the prompt
+// still opens its turn and nothing is counted as drift.
+func TestOriginDriftKeepsTheTurn(t *testing.T) {
+	s, err := Parse(strings.NewReader(`{"type":"user","sessionId":"s1","promptId":"p1","timestamp":"2026-09-01T10:00:00.000Z","origin":"human","message":{"role":"user","content":"carry on"}}` + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Turns) != 1 || s.Turns[0].UserMessage != "carry on" || len(s.Unknown) != 0 {
+		t.Errorf("turns = %+v unknown = %+v, want the prompt's turn and no drift", s.Turns, s.Unknown)
 	}
 }
 

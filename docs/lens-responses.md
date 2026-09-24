@@ -4,14 +4,14 @@ A `/work` run fans out to three review lenses — contract, quality, security �
 and each answers with one fenced `json` verdict block: `lens`, `verdict`,
 `summary`, `context`, `criteria[]`, `findings[]`. The block reaches the
 orchestrator's transcript by several routes: a task notification on the user
-side for a background reviewer, the subagent call's own tool result for a
-synchronous one, the `codex-lens.sh` call's output for the routed security
-lens (or nothing, when the run redirected that output to a file and read it
-back with a later `cat`), and the assistant's own text — or a file it wrote
-whole — on a runtime that inlines its passes. The summary tables cut every
-tool result at 800
-characters, which lands inside most verdicts' criteria lists. This is the
-store that keeps them whole.
+side for a background reviewer — or, since the notification stopped quoting
+the report, the subagent hand-back that precedes it — the subagent call's own
+tool result for a synchronous one, the `codex-lens.sh` call's output for the
+routed security lens (or nothing, when the run redirected that output to a
+file and read it back with a later `cat`), and the assistant's own text — or
+a file it wrote whole — on a runtime that inlines its passes. The summary
+tables cut every tool result at 800 characters, which lands inside most
+verdicts' criteria lists. This is the store that keeps them whole.
 
 ## What is stored
 
@@ -26,8 +26,8 @@ dropped and never promoted.
 | `agent`, `session_id`, `seq` | The session the block was read from and the block's position among its lens rows. |
 | `response_id` | The position-derived identity below. |
 | `turn_idx` | The turn the record belongs to. |
-| `origin` | Where the block landed: `task_notification`, `tool_result`, `assistant`, `file_write` or `user`. `task_notification` is the envelope the harness posts when a background dispatch finishes — a user record, or a `queued_command` attachment prompt, whose text opens with `<task-notification>` past any leading `<system-reminder>` blocks, and that is not a compaction summary (`isCompactSummary`). `user` is any other Claude user message, one that merely contains the marker included — a pasted note or a compaction summary quoting a whole notification, dispatch id and all, is stored with no dispatch to answer; a Codex user item is not read for blocks. `file_write` is a file the agent wrote whole through a Codex `item_completed` FileChange item — the `add` change's content, which is the whole file as written, since the `/work` render has the inlined passes write their verdicts to files for `verdict-merge.sh` and a file written through `apply_patch` lands in no message. An `update` carries a unified diff and a `delete` the removed file's content — the run's cleanup deletes every verdict file at once — and neither is read. |
-| `dispatch_id` | The tool call the response answers — a tool result's `tool_use_id` / `call_id`, a task notification's `<tool-use-id>` — or NULL where the text names none. |
+| `origin` | Where the block landed: `task_notification`, `tool_result`, `assistant`, `file_write` or `user`. `task_notification` is the envelope the harness posts when a background dispatch finishes — a user record, or a `queued_command` attachment prompt, whose text opens with `<task-notification>` past any leading `<system-reminder>` blocks, and that is not a compaction summary (`isCompactSummary`) — or a subagent hand-back: an `origin` of kind `peer` with `handback` set, the harness relaying a background agent's final report in `origin.body`, every line indented under its frame. It rides on a meta user record, or, when it lands while the assistant is mid-turn, on the `queued_command` attachment that injects it, the attachment carrying the `origin`. The notification that follows it names the dispatch but no longer quotes the report. A hand-back opens no turn and lands in the turn in progress; the same hand-back — the same agent and report — is read once whichever record carried it, so a verdict delivered twice cannot answer twice. An `origin` that does not decode is not a hand-back. `user` is any other Claude user message, one that merely contains the marker included — a pasted note or a compaction summary quoting a whole notification, dispatch id and all, is stored with no dispatch to answer; a Codex user item is not read for blocks. `file_write` is a file the agent wrote whole through a Codex `item_completed` FileChange item — the `add` change's content, which is the whole file as written, since the `/work` render has the inlined passes write their verdicts to files for `verdict-merge.sh` and a file written through `apply_patch` lands in no message. An `update` carries a unified diff and a `delete` the removed file's content — the run's cleanup deletes every verdict file at once — and neither is read. |
+| `dispatch_id` | The tool call the response answers — a tool result's `tool_use_id` / `call_id`, a task notification's `<tool-use-id>`, a hand-back's Agent call: the one whose tool result's `toolUseResult.agentId` names the agent in `origin.from`, when that result is its carrier's only one — or NULL where the record names none, a hand-back from an agent the session did not launch included. |
 | `source_path`, `source_line` | The transcript file and the 1-based line of the record. |
 | `ordinal` | The block's index among the lens blocks in that record. |
 | `at` | The record's timestamp. |
@@ -192,6 +192,12 @@ Round 0 holds attempts neither a commitment line nor a joined record placed.
 Within a turn the order is
 the user-side responses that open it, then its tool rows in sequence, then
 its assistant text with commitment lines and inlined blocks in text order. A
+`task_notification` row whose dispatch was not on record when the turn opened
+— one that landed mid-turn, and in a run no human message interrupts, the
+whole run is one turn — is placed among the tool rows by time once its
+dispatch is on record, ahead of the first timed call it does not follow, and
+after the tool rows otherwise: a lens that answered before its next round's
+dispatch is answered there, so that dispatch applies the next line. A
 tool row has no position among the turn's commitment lines, so the first line
 is applied at the turn's first lens dispatch and each later one when a lens
 that already answered in the current round is dispatched again; a retry

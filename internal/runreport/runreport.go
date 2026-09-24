@@ -403,11 +403,27 @@ type LensGroup struct {
 	Retries  int           `json:"retries"`
 }
 
+// Attribution values of a LensAttempt: what ties the attempt to what ran.
+const (
+	// AttributionExecution: an execution record joined the attempt.
+	AttributionExecution = "execution"
+	// AttributionTranscript: no execution record, but the transcript paired a
+	// response with the attempt — a native subagent lens, which writes none.
+	AttributionTranscript = "transcript"
+	// AttributionUnknown: neither — no record joined and no response paired,
+	// so nothing says what ran: a dispatch never answered, or a lens
+	// committed to and missing.
+	AttributionUnknown = "unknown"
+)
+
 // LensAttempt is one attempt from either side of the join: ExecutionID is
 // empty and Metrics null with no execution record; Recorded is false with no
 // LensAttempt in the transcript, and the status fields are then empty.
+// Attribution says which side, if either, stands behind the attempt, so an
+// attempt with nothing behind it reads as unknown rather than as empty fields.
 type LensAttempt struct {
 	Attempt      int      `json:"attempt"`
+	Attribution  string   `json:"attribution"`
 	ExecutionID  string   `json:"execution_id"`
 	Outcome      string   `json:"outcome"`
 	DurationMs   *int64   `json:"duration_ms"`
@@ -980,8 +996,10 @@ func (b *builder) stages(rep *Report) {
 // execution the attempt model joined to a dispatch (LensAttempt.ExecutionID)
 // fills that attempt wherever the walk placed it, and any other joins on
 // (lens, round, attempt); an attempt on either side alone is still listed.
-// Groups follow the LensAttempt order (round, lens, attempt), then
-// executions no record matched in walk order.
+// Each attempt's attribution is the execution record where one joined, else
+// the transcript where it paired a response, else unknown. Groups follow the
+// LensAttempt order (round, lens, attempt), then executions no record matched
+// in walk order.
 func (b *builder) lenses(rep *Report) {
 	// Attempts are addressed as (group, attempt) indices: a pointer into
 	// rep.Lenses would not survive the appends that follow it.
@@ -1004,7 +1022,7 @@ func (b *builder) lenses(rep *Report) {
 				return slot{g, i}
 			}
 		}
-		rep.Lenses[g].Attempts = append(rep.Lenses[g].Attempts, LensAttempt{Attempt: attempt})
+		rep.Lenses[g].Attempts = append(rep.Lenses[g].Attempts, LensAttempt{Attempt: attempt, Attribution: AttributionUnknown})
 		return slot{g, len(rep.Lenses[g].Attempts) - 1}
 	}
 	joined := map[string]slot{}
@@ -1012,6 +1030,9 @@ func (b *builder) lenses(rep *Report) {
 		at := find(a.Lens, a.Round, a.Attempt)
 		la := &rep.Lenses[at.group].Attempts[at.attempt]
 		la.Recorded = true
+		if a.ResponseID != "" {
+			la.Attribution = AttributionTranscript
+		}
 		la.Status, la.Verdict, la.ContextState = a.Status, a.Verdict, a.ContextState
 		la.Contaminated, la.Superseded, la.Late, la.Malformed = a.Contaminated, a.Superseded, a.Late, a.Malformed
 		if a.ExecutionID != "" {
@@ -1031,6 +1052,7 @@ func (b *builder) lenses(rep *Report) {
 		em := rep.Executions[i]
 		m := em.Metrics
 		la.ExecutionID, la.Outcome, la.DurationMs, la.Metrics = n.ExecutionID, n.Outcome, em.DurationMs, &m
+		la.Attribution = AttributionExecution
 	}
 	for i := range rep.Lenses {
 		g := &rep.Lenses[i]
