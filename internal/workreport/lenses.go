@@ -230,9 +230,13 @@ func (r lensRow) contaminated() bool {
 // of every operator that would join another command (`;`, `&`, `|`, a
 // newline), then the mark; so a command that chained something else after
 // the router is not one, and neither is an `echo` mentioning the script.
+// lensCutRe matches a `--lens` whose name runs into the mark — the cut
+// ended inside or just before the name, so what survived of it names no
+// lens; stripping it to the mark leaves the row to truncatedRouterRe.
 var (
 	routerInvocation  = `^(?:\w+=[^\s;&|>…]*[ \t]+)*[^\s;&|>…]*` + regexp.QuoteMeta(codexLensScript) + `(?:[ \t]+(?:2>[ \t]*)?[^\s;&|>…]+)*`
 	lensArgRe         = regexp.MustCompile(`--lens\s+(\w+)`)
+	lensCutRe         = regexp.MustCompile(`--lens\s+\w*…$`)
 	shellWrapperRe    = regexp.MustCompile(`^(?:bash|sh|zsh)\s+-[a-z]*c[a-z]*\s+`)
 	routerAloneRe     = regexp.MustCompile(routerInvocation + `$`)
 	routerRedirectRe  = regexp.MustCompile(routerInvocation + `[ \t]+>[ \t]*([^\s;&|>…]+)(?:[ \t]+2>[ \t]*[^\s;&|>…]+)?$`)
@@ -268,12 +272,15 @@ func dispatchLens(c callRow) string {
 // row cannot say which lens it routed, but it is still the router, so the
 // record its window holds says for it. A cut row `--lens` survived on named
 // its lens and was judged on it — an unknown name there is not a cue to
-// take any lens's record.
+// take any lens's record. A name the cut ran into (`--lens sec…`) did not
+// survive it: the fragment cannot be told from a known lens's prefix, so
+// the row is a cut router call like one cut before `--lens`.
 func truncatedRouterCall(c callRow) bool {
 	if c.toolKind == subagentKind {
 		return false
 	}
 	cmd := shellWrapperRe.ReplaceAllString(strings.TrimSpace(strings.ToLower(c.keyArg)), "")
+	cmd = lensCutRe.ReplaceAllString(cmd, "…")
 	return !lensArgRe.MatchString(cmd) && truncatedRouterRe.MatchString(cmd)
 }
 

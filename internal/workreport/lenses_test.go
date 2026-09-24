@@ -1231,6 +1231,8 @@ func TestTruncatedRouterCallClassifiesTheCutCommand(t *testing.T) {
 		"S=/tmp/s\nmkdir -p $S/logs\n/x/work-policy/abc/codex-lens.sh --runt…": true,
 		"cd /tmp && ~/.codex/codex-lens.sh --runtime claude --payload /tmp/…":  true,
 		"~/.codex/codex-lens.sh --runtime claude 2> /tmp/err.log --payload /…": true,
+		"~/.codex/codex-lens.sh --runtime claude --lens sec…":                  true,
+		"~/.codex/codex-lens.sh --runtime claude --lens …":                     true,
 		"~/.codex/codex-lens.sh --runtime claude --lens bogus --round 1 --at…": false,
 		"~/.codex/codex-lens.sh --runtime claude --lens security --round 1 -…": false,
 		"~/.codex/codex-lens.sh --runtime claude":                              false,
