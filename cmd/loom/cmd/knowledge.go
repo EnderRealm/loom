@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"loom/internal/extract"
+	"loom/internal/knowledge"
 	"loom/internal/knowledge/store"
 )
 
@@ -58,7 +59,39 @@ func newKnowledgeCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newKnowledgeWriteCmd())
 	cmd.AddCommand(newKnowledgeScopeCmd())
+	cmd.AddCommand(newKnowledgeConflictsCmd())
 	return cmd
+}
+
+func newKnowledgeConflictsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "conflicts",
+		Short: "List candidates whose contradicts: names a validated artifact",
+		Long: "Loads the knowledge store (LOOM_KNOWLEDGE_ROOT, else ~/.loom/knowledge) and " +
+			"prints one line per candidate → validated contradiction, then one warning per " +
+			"contradicts entry that is not an artifact id or names no validated artifact. " +
+			"Read-only.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			arts, err := knowledge.Load()
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			root := knowledge.Root()
+			for _, a := range arts {
+				for _, id := range a.Conflicts {
+					fmt.Fprintf(out, "conflict: %s contradicts %s (%s)\n", a.ID, id, relPath(root, a.Path))
+				}
+			}
+			for _, a := range arts {
+				for _, w := range a.ContradictsWarnings {
+					fmt.Fprintf(out, "warning: %s: %s (%s)\n", a.ID, w, relPath(root, a.Path))
+				}
+			}
+			return nil
+		},
+	}
 }
 
 func newKnowledgeWriteCmd() *cobra.Command {

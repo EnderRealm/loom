@@ -302,6 +302,9 @@ func commitEdit(a Artifact) store.Warn {
 
 func (m knowledgeModel) detailRows() int {
 	r := m.height - 4
+	if a := m.selected(); a != nil {
+		r -= len(contradictionLines(*a))
+	}
 	if r < 1 {
 		r = 1
 	}
@@ -365,6 +368,19 @@ func (m knowledgeModel) listView() string {
 	footer := StyleDim.Render("  ") + StyleSuccess.Render(itoa(cValid)) +
 		StyleDim.Render(" validated · ") + StyleWarning.Render(itoa(cCand)) +
 		StyleDim.Render(" candidate(s)")
+	cConflict, cWarn := 0, 0
+	for _, a := range m.artifacts {
+		cConflict += len(a.Conflicts)
+		cWarn += len(a.ContradictsWarnings)
+	}
+	if cConflict > 0 {
+		footer += StyleDim.Render(" · ") + StyleDanger.Render(itoa(cConflict)) +
+			StyleDim.Render(" contradiction(s) ") + StyleDanger.Render("!")
+	}
+	if cWarn > 0 {
+		footer += StyleDim.Render(" · ") + StyleWarning.Render(itoa(cWarn)) +
+			StyleDim.Render(" unresolved contradicts ") + StyleWarning.Render("?")
+	}
 	b.WriteString(footer)
 	return b.String()
 }
@@ -404,7 +420,17 @@ func (m knowledgeModel) renderRow(a Artifact, selected bool) string {
 	if titleW < 10 {
 		titleW = 10
 	}
-	titleCell := selBg.Foreground(colorGray).Render(truncate(a.Title, titleW))
+	// A contradiction leads the title so it is seen without opening either
+	// side: "!" on a candidate and the validated artifact it contradicts, "?"
+	// on a candidate whose contradicts entries resolved to nothing.
+	marker := ""
+	switch {
+	case len(a.Conflicts) > 0 || len(a.ContradictedBy) > 0:
+		marker = selBg.Foreground(colorDanger).Render("! ")
+	case len(a.ContradictsWarnings) > 0:
+		marker = selBg.Foreground(colorWarning).Render("? ")
+	}
+	titleCell := marker + selBg.Foreground(colorGray).Render(truncate(a.Title, titleW-lipgloss.Width(marker)))
 
 	sp := "  "
 	if selected {
@@ -435,6 +461,10 @@ func (m knowledgeModel) detailView() string {
 	b.WriteString("\n")
 	b.WriteString(StyleDim.Render(a.Status + " · " + a.Type + " · " + a.Scope + " · " + a.ID))
 	b.WriteString("\n")
+	for _, line := range contradictionLines(*a) {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	b.WriteString(StyleDim.Render(shortenPath(a.Path)))
 	b.WriteString("\n\n")
 
@@ -455,4 +485,21 @@ func (m knowledgeModel) detailView() string {
 		b.WriteString(StyleDim.Render("  … " + itoa(len(bodyLines)-end) + " more line(s)"))
 	}
 	return StyleOverlayBorder.Width(boxWidth).Render(b.String())
+}
+
+// contradictionLines renders the detail header's contradiction links: the
+// validated artifacts a candidate contradicts, the candidates contradicting a
+// validated artifact, and the candidate's unresolved contradicts entries.
+func contradictionLines(a Artifact) []string {
+	var out []string
+	for _, id := range a.Conflicts {
+		out = append(out, StyleDanger.Render("! contradicts validated "+id))
+	}
+	for _, id := range a.ContradictedBy {
+		out = append(out, StyleDanger.Render("! contradicted by candidate "+id))
+	}
+	for _, w := range a.ContradictsWarnings {
+		out = append(out, StyleWarning.Render("? "+w))
+	}
+	return out
 }

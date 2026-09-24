@@ -388,3 +388,40 @@ func TestKnowledgeScopeAddWithoutAStore(t *testing.T) {
 		t.Errorf("error %v does not name the missing store", err)
 	}
 }
+
+// TestKnowledgeConflictsListsContradictions drives the subcommand over a store
+// with one candidate → validated contradiction and one dangling entry.
+func TestKnowledgeConflictsListsContradictions(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+	files := map[string]string{
+		"truths/loom/target.md":                 "---\nid: loom-target\ntitle: T\nstatus: validated\n---\n",
+		"_candidates/truths/loom/against--1.md": "---\nid: loom-against\ntitle: A\nstatus: candidate\ncontradicts:\n  - loom-target\n---\n",
+		"_candidates/truths/loom/dangle--1.md":  "---\nid: loom-dangle\ntitle: D\nstatus: candidate\ncontradicts: [loom-nowhere]\n---\n",
+	}
+	for rel, body := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := newKnowledgeCmd()
+	cmd.SetArgs([]string{"conflicts"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("knowledge conflicts: %v", err)
+	}
+	for _, want := range []string{
+		"conflict: loom-against contradicts loom-target (_candidates/truths/loom/against--1.md)",
+		"warning: loom-dangle: contradicts loom-nowhere, but no validated artifact has that id",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output missing %q:\n%s", want, out.String())
+		}
+	}
+}

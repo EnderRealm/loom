@@ -278,3 +278,170 @@ func TestLoadReadsOnlyMarkdownUnderScopeDirs(t *testing.T) {
 		t.Fatalf("got %+v, want only loom-good", arts)
 	}
 }
+
+func TestParseArtifactContradicts(t *testing.T) {
+	cases := []struct {
+		name    string
+		field   string
+		wantIDs []string
+		wantBad []string
+	}{
+		{name: "absent"},
+		{name: "empty flow list", field: "contradicts: []\n"},
+		{
+			name:    "flow list",
+			field:   "contradicts: [loom-a, \"loom-b\"]\n",
+			wantIDs: []string{"loom-a", "loom-b"},
+		},
+		{
+			name:    "block list",
+			field:   "contradicts:\n  - loom-a\n  - 'loom-b'\n",
+			wantIDs: []string{"loom-a", "loom-b"},
+		},
+		{
+			name:    "doc-override mapping",
+			field:   "contradicts:\n  - file: skills/x/SKILL.md\n    claim: \"stale wording\"\n    status: stale\n",
+			wantBad: []string{"file: skills/x/SKILL.md"},
+		},
+		{name: "null", field: "contradicts: null\n"},
+		{name: "tilde", field: "contradicts: ~\n"},
+		{
+			name:    "bare id scalar",
+			field:   "contradicts: loom-a\n",
+			wantIDs: []string{"loom-a"},
+		},
+		{
+			name:    "bare non-id scalar",
+			field:   "contradicts: see the launchd truth\n",
+			wantBad: []string{"see the launchd truth"},
+		},
+		{
+			name:    "indented scalar without a dash",
+			field:   "contradicts:\n  loom-a\n",
+			wantBad: []string{"loom-a"},
+		},
+		{
+			name:    "block mapping without a dash",
+			field:   "contradicts:\n  file: docs/x.md\n  claim: old\n",
+			wantBad: []string{"file: docs/x.md", "claim: old"},
+		},
+		{
+			name:    "id after a mapping entry",
+			field:   "contradicts:\n  - file: docs/x.md\n    status: stale\n  - loom-a\n",
+			wantIDs: []string{"loom-a"},
+			wantBad: []string{"file: docs/x.md"},
+		},
+		{
+			name:    "unterminated flow list",
+			field:   "contradicts: [loom-a, loom-b\n",
+			wantBad: []string{"[loom-a, loom-b"},
+		},
+		{
+			name:    "mixed block list",
+			field:   "contradicts:\n  - loom-a\n  - path: x.go\n",
+			wantIDs: []string{"loom-a"},
+			wantBad: []string{"path: x.go"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "---\nid: loom-c\ntitle: C\nrelated: []\n" + tc.field + "verified_at: 2026-01-01\n---\n\n## Claim\n\nyes\n"
+			a := parseArtifact(body, "/tmp/x.md", "loom", "truths", "candidate")
+			if !reflect.DeepEqual(a.Contradicts, tc.wantIDs) {
+				t.Errorf("Contradicts = %q, want %q", a.Contradicts, tc.wantIDs)
+			}
+			if !reflect.DeepEqual(a.badContradicts, tc.wantBad) {
+				t.Errorf("badContradicts = %q, want %q", a.badContradicts, tc.wantBad)
+			}
+		})
+	}
+}
+
+// TestLoadLinksContradictions pins both directions of a candidate →
+// validated contradiction and the warnings for entries that resolve to no
+// validated artifact.
+func TestLoadLinksContradictions(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+
+	write := func(rel, id, status, contradicts string, date string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := "---\nid: " + id + "\ntitle: " + id + "\nstatus: " + status +
+			"\nsources:\n  - session: aaa\n    date: " + date + "\n" + contradicts + "---\n\n## Claim\n\nyes\n"
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The validated side carries a doc-override mapping of its own, which is
+	// not linked and must not warn.
+	write("truths/loom/target.md", "loom-target", "validated",
+		"contradicts:\n  - file: docs/x.md\n    claim: old\n", "2026-01-01")
+	write("truths/loom/other.md", "loom-other", "validated", "contradicts: []\n", "2026-01-02")
+	write("_candidates/truths/loom/flow--1.md", "loom-flow", "candidate",
+		"contradicts: [loom-target]\n", "2026-02-01")
+	write("_candidates/truths/loom/block--1.md", "loom-block", "candidate",
+		"contradicts:\n  - loom-target\n  - loom-missing\n", "2026-02-02")
+	write("_candidates/truths/loom/bad--1.md", "loom-bad", "candidate",
+		"contradicts:\n  - path: skills/x.md\n    note: stale\n", "2026-02-03")
+	write("_candidates/truths/loom/cand-target--1.md", "loom-cand-target", "candidate",
+		"contradicts: [loom-flow]\n", "2026-02-04")
+	write("_candidates/truths/loom/undashed--1.md", "loom-undashed", "candidate",
+		"contradicts:\n  loom-target\n", "2026-02-07")
+	// The same candidate id in two files, one naming the target twice: linked
+	// once on each side.
+	write("_candidates/truths/loom/dup--1.md", "loom-dup", "candidate",
+		"contradicts: [loom-other, loom-other]\n", "2026-02-05")
+	write("_candidates/truths/loom/dup--2.md", "loom-dup", "candidate",
+		"contradicts: [loom-other]\n", "2026-02-06")
+
+	arts, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	byID := map[string]Artifact{}
+	for _, a := range arts {
+		byID[a.ID] = a
+	}
+
+	if got, want := byID["loom-target"].ContradictedBy, []string{"loom-flow", "loom-block"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("loom-target ContradictedBy = %q, want %q", got, want)
+	}
+	if got := byID["loom-target"].ContradictsWarnings; got != nil {
+		t.Errorf("validated artifact got warnings %q", got)
+	}
+	if got, want := byID["loom-other"].ContradictedBy, []string{"loom-dup"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("loom-other ContradictedBy = %q, want %q", got, want)
+	}
+	for _, a := range arts {
+		if a.ID == "loom-dup" && !reflect.DeepEqual(a.Conflicts, []string{"loom-other"}) {
+			t.Errorf("%s Conflicts = %q, want [loom-other]", a.Path, a.Conflicts)
+		}
+	}
+	if got, want := byID["loom-flow"].Conflicts, []string{"loom-target"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("loom-flow Conflicts = %q, want %q", got, want)
+	}
+	if got, want := byID["loom-block"].Conflicts, []string{"loom-target"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("loom-block Conflicts = %q, want %q", got, want)
+	}
+
+	warns := map[string]string{
+		"loom-block":       "loom-missing",
+		"loom-bad":         "path: skills/x.md",
+		"loom-cand-target": "loom-flow",
+		"loom-undashed":    "loom-target",
+	}
+	for id, needle := range warns {
+		w := byID[id].ContradictsWarnings
+		if len(w) != 1 || !strings.Contains(w[0], needle) {
+			t.Errorf("%s ContradictsWarnings = %q, want one naming %q", id, w, needle)
+		}
+		if id != "loom-block" && byID[id].Conflicts != nil {
+			t.Errorf("%s Conflicts = %q, want none", id, byID[id].Conflicts)
+		}
+	}
+}
