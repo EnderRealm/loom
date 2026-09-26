@@ -299,6 +299,45 @@ func TestPriceOpenAIEntry(t *testing.T) {
 	}
 }
 
+// TestPriceClaudeOpus55 pins the Opus 5.5 entry in the default table: a run
+// on 2026-09-26 resolves to the published rates, cache hits at the page's
+// 0.05× input rather than the usual 0.1×, and prices in both standard and
+// fast mode.
+func TestPriceClaudeOpus55(t *testing.T) {
+	tbl, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := tbl.Lookup("claude-opus-5-5", time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC))
+	if !ok {
+		t.Fatal("claude-opus-5-5 has no rate on 2026-09-26")
+	}
+	if r.Input != 4 || r.Output != 20 || r.CacheWrite5m != 5 || r.CacheWrite1h != 8 || r.CacheRead != 0.2 || r.FastInput == nil || *r.FastInput != 8 || *r.FastOutput != 40 {
+		t.Fatalf("claude-opus-5-5 = %+v, want 4/20/5/8/0.2 fast 8/40", r)
+	}
+	if r.Source != tbl.Source || r.Checked.Format(time.DateOnly) != "2026-09-26" {
+		t.Errorf("claude-opus-5-5 provenance = %s @ %s, want %s @ 2026-09-26", r.Source, r.Checked.Format(time.DateOnly), tbl.Source)
+	}
+	// 1,000,000 input = 4; 100,000 output = 2; 200,000 5m writes = 1;
+	// 100,000 1h writes = 0.8; 1,000,000 cache reads = 0.2.
+	got, err := r.Price(Usage{Input: 1_000_000, Output: 100_000, CacheWrite5m: 200_000, CacheWrite1h: 100_000, CacheRead: 1_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 8 {
+		t.Fatalf("Price = %v, want 8", got)
+	}
+	// Fast: 1,000,000 input = 8; 100,000 output = 4; 1,000,000 cache reads
+	// at 0.05 × the fast input rate = 0.4.
+	got, err = r.Price(Usage{Input: 1_000_000, Output: 100_000, CacheRead: 1_000_000, Fast: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 12.4 {
+		t.Fatalf("fast Price = %v, want 12.4", got)
+	}
+}
+
 // TestParseEntryProvenance pins that an entry's own source and checked date
 // are read when given, default to the table's when not, and that a
 // malformed per-entry checked date is rejected rather than defaulted.
