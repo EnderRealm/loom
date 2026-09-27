@@ -78,6 +78,102 @@ func TestExtractCommitsMultiplePerCall(t *testing.T) {
 	}
 }
 
+// TestExtractCommitsQuietCommit covers commits made with "git commit -q",
+// which prints no bracket line: the "<hash> <subject>" line a follow-up
+// "git log --oneline -1" prints is taken instead, but only for a call whose
+// command runs git commit and wrote that subject, only the first such line,
+// and never a push range or diff index line.
+func TestExtractCommitsQuietCommit(t *testing.T) {
+	at := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	quiet := "cd /Users/steve/code/loom\ngit add -A\ngit commit -q -F - <<'EOF'\n" +
+		"[loom/add-claude-opus-3917] Price claude-opus-5-5 at its published rates\n\nBody.\nEOF\n" +
+		"echo \"commit-exit=$?\"\ngit log --oneline -1"
+	calls := []summary.ToolCall{
+		// The /work shape: exit echo, oneline, then work-candidate.sh's check line.
+		{Kind: summary.KindBash, StartedAt: at, KeyArg: quiet, ResultSummary: "commit-exit=0\n" +
+			"787b923 [loom/add-claude-opus-3917] Price claude-opus-5-5 at its published rates\n" +
+			"work-candidate.sh: commit 787b923c90510c76b69badc2ecda7bb50f03915b carries candidate 8e741d873f32's tree cd2b27b0\n" +
+			"check-exit=0"},
+		// Trailing-marker subject, via git -C.
+		{Kind: summary.KindBash, StartedAt: at,
+			KeyArg:        "git -C /Users/steve/code/loom commit -q -m 'Add Codex and Cursor pricing rates [loom/add-pricing-rates-04d8]' && git log --oneline -1",
+			ResultSummary: "aaa23b5 Add Codex and Cursor pricing rates [loom/add-pricing-rates-04d8]"},
+		// A push range and a diff index line precede the commit line; neither
+		// matches, and only the first oneline line counts.
+		{Kind: summary.KindBash, StartedAt: at, KeyArg: "git -c core.hooksPath=/dev/null commit -q -am 'release: v8.7.0'\ngit push\ngit log --oneline -2",
+			ResultSummary: "To github.com:EnderRealm/ticket.git\n   4a15f51..0ae1262  master -> master\n" +
+				"4a15f51..0ae1262  master -> master\nindex 6ada054..d173914 100644\n" +
+				"0ae1262 release: v8.7.0\n4a15f51 [ticket/older-0001] Older commit"},
+		// Long global options before the subcommand.
+		{Kind: summary.KindBash, StartedAt: at,
+			KeyArg:        "git --git-dir=/r/.git --work-tree=/r --no-pager commit -q -m 'Commit through long options' && git log --oneline -1",
+			ResultSummary: "5a5a5a5 Commit through long options"},
+		// The command was cut at the key-argument limit mid-subject.
+		{Kind: summary.KindBash, StartedAt: at,
+			KeyArg:        "cd /r\ngit add Sources\ngit commit -q -m \"[weft/record-weft-worker-dd8b] Record the weft-wor…",
+			ResultSummary: "26895a2 [weft/record-weft-worker-dd8b] Record the weft-worker build revision on the run log's started line"},
+		// The echoed subject was cut at the result limit.
+		{Kind: summary.KindBash, StartedAt: at,
+			KeyArg:        "git commit -q -m '[weft/open-weft-dashboard-3b61] Open weft on a dashboard' && git log --oneline -1",
+			ResultSummary: " M Sources/Weft/RunStore.swift\n73926fe [weft/open…"},
+		// A failed quiet commit: the echo prints the HEAD already there, whose
+		// subject the command didn't write.
+		{Kind: summary.KindBash, StartedAt: at,
+			KeyArg:        "git commit -q -m '[loom/new-work-0001] Do the new work'; git log --oneline -1",
+			ResultSummary: "nothing to commit, working tree clean\n0b4698d [loom/fold-ticket-state-99fe] Add synthesis-input builder"},
+		// Cut before enough of the subject survives to show the command wrote it.
+		{Kind: summary.KindBash, StartedAt: at,
+			KeyArg:        "git commit -q -m \"[weft/rec…",
+			ResultSummary: "1111111 [weft/record-weft-worker-dd8b] Record the weft-worker build revision"},
+		// An indented line (a diff context line) can't pose as the commit.
+		{Kind: summary.KindBash, StartedAt: at, KeyArg: "git diff\ngit commit -q -m 'context line from a diff'",
+			ResultSummary: " abc1234 context line from a diff"},
+		// No commit in the command: oneline output is a log, not a commit.
+		{Kind: summary.KindBash, StartedAt: at, KeyArg: "git log --oneline -3",
+			ResultSummary: "0b4698d [loom/fold-ticket-state-99fe] Add synthesis-input builder\n787b923 Older"},
+		// Plumbing that prints a bare hash is not a commit.
+		{Kind: summary.KindBash, StartedAt: at, KeyArg: "git commit-tree HEAD^{tree} -m 'not a commit line'",
+			ResultSummary: "1234567 not a commit line"},
+		// A denied commit printed nothing oneline-shaped.
+		{Kind: summary.KindBash, StartedAt: at, KeyArg: quiet,
+			ResultSummary: "work-gate: commit denied — no lens dispatch recorded this session"},
+		// A bracket line wins; the oneline echo after it is not a second commit.
+		{Kind: summary.KindBash, StartedAt: at, KeyArg: "git commit -m x && git log --oneline -1",
+			ResultSummary: "[main c33d065] Show partial run costs [loom/run-cost-reads-2571]\n 4 files changed\nc33d065 Show partial run costs [loom/run-cost-reads-2571]"},
+	}
+
+	recs := extractCommits(calls)
+	want := []struct {
+		branch  string
+		hash    string
+		subject string
+	}{
+		{"", "787b923", "[loom/add-claude-opus-3917] Price claude-opus-5-5 at its published rates"},
+		{"", "aaa23b5", "Add Codex and Cursor pricing rates [loom/add-pricing-rates-04d8]"},
+		{"", "0ae1262", "release: v8.7.0"},
+		{"", "5a5a5a5", "Commit through long options"},
+		{"", "26895a2", "[weft/record-weft-worker-dd8b] Record the weft-worker build revision on the run log's started line"},
+		{"", "73926fe", "[weft/open…"},
+		{"main", "c33d065", "Show partial run costs [loom/run-cost-reads-2571]"},
+	}
+	if len(recs) != len(want) {
+		t.Fatalf("extractCommits: got %d records %+v, want %d", len(recs), recs, len(want))
+	}
+	for i, w := range want {
+		if recs[i].branch != w.branch || recs[i].commitHash != w.hash || recs[i].subject != w.subject {
+			t.Errorf("rec %d: got {%q %q %q}, want {%q %q %q}", i,
+				recs[i].branch, recs[i].commitHash, recs[i].subject,
+				w.branch, w.hash, w.subject)
+		}
+	}
+	if !recs[0].committedAt.Equal(at) {
+		t.Errorf("rec 0 committedAt: got %v, want %v", recs[0].committedAt, at)
+	}
+	if recs[0].filesChanged != nil {
+		t.Errorf("rec 0 filesChanged: got %v, want nil", *recs[0].filesChanged)
+	}
+}
+
 // TestWriteSummaryCommits writes a session whose bash output contains commits
 // and asserts the commits table mirrors them, while a failed commit and a
 // non-bash bracketed line are excluded.

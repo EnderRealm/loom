@@ -432,18 +432,35 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 	return out, nil
 }
 
-// markerTicketID returns the ticket id named by the `[<id>]` marker a commit
-// subject opens with — the convention every ticket-scoped commit follows. A tk
-// id never contains `]`, so the first one closes the marker.
+// markerTicketID returns the ticket id named by a commit subject's `[<id>]`
+// marker. Two conventions are in use, so both are read: a marker that opens
+// the subject (`[<id>] Do the thing`) and one that ends it (`Do the thing
+// [<id>]`). A bracket in the middle of a subject is not a marker — no commit
+// convention puts one there, and text like `Fix [x] parsing` would false-match.
+// A tk id never contains `]`, so the first one closes an opening marker. A
+// marker in either position must be non-empty and hold no whitespace or `]`,
+// since a tk id never does and tags like `[skip ci]` sit in both positions; an
+// opening marker that fails this leaves the trailing one to be read.
 func markerTicketID(subject string) (string, bool) {
-	if !strings.HasPrefix(subject, "[") {
+	if strings.HasPrefix(subject, "[") {
+		if end := strings.IndexByte(subject, ']'); end > 0 {
+			if id := subject[1:end]; id != "" && !strings.ContainsAny(id, " \t") {
+				return id, true
+			}
+		}
+	}
+	if !strings.HasSuffix(subject, "]") {
 		return "", false
 	}
-	end := strings.IndexByte(subject, ']')
-	if end <= 1 {
+	start := strings.LastIndexByte(subject, '[')
+	if start < 0 {
 		return "", false
 	}
-	return subject[1:end], true
+	id := subject[start+1 : len(subject)-1]
+	if id == "" || strings.ContainsAny(id, " \t]") {
+		return "", false
+	}
+	return id, true
 }
 
 // SessionSpan is one summarized session: where it ran and when. Start and End

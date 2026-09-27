@@ -99,6 +99,77 @@ func TestLoadSessionsForTicketsSelectsASharedSessionOnce(t *testing.T) {
 	}
 }
 
+// A marker opens or ends a subject; one in the middle is ordinary text, and a
+// bracket holding whitespace in either position is a tag like `[skip ci]`, not
+// an id.
+func TestMarkerTicketID(t *testing.T) {
+	cases := []struct {
+		subject string
+		id      string
+		ok      bool
+	}{
+		{"[loom/add-claude-opus-3917] Price claude-opus-5-5", "loom/add-claude-opus-3917", true},
+		{"Show partial run costs [loom/run-cost-reads-2571]", "loom/run-cost-reads-2571", true},
+		{"[loom/a-0001] Follow-up to [loom/b-0002]", "loom/a-0001", true},
+		{"Fix [x] parsing", "", false},
+		{"Fix [loom/a-0001] in the middle", "", false},
+		{"Bump deps [skip ci]", "", false},
+		{"[skip ci] Bump deps", "", false},
+		{"[skip ci] Bump deps [loom/a-0001]", "loom/a-0001", true},
+		{"Empty marker []", "", false},
+		{"[] Empty leading marker", "", false},
+		{"Stray close]", "", false},
+		{"release: v8.8.0", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		id, ok := markerTicketID(c.subject)
+		if id != c.id || ok != c.ok {
+			t.Errorf("markerTicketID(%q) = %q, %v; want %q, %v", c.subject, id, ok, c.id, c.ok)
+		}
+	}
+}
+
+// A /work commit is made with "git commit -q" and echoed by git log, often
+// with its marker at the end of the subject; that session is still the one
+// that closed the ticket.
+func TestLoadSessionsForTicketsJoinsAQuietTrailingMarkerCommit(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOOM_HOME", dir)
+
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	sum := &summary.SessionSummary{SessionID: "quiet", Agent: summary.AgentClaude, ToolCalls: []summary.ToolCall{
+		{Kind: summary.KindBash, StartedAt: time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC),
+			KeyArg:        "cd /Users/steve/code/loom\ngit add -A\ngit commit -q -F - <<'EOF'\nAdd Codex and Cursor pricing rates [loom/add-pricing-rates-04d8]\nEOF\ngit log --oneline -1",
+			ResultSummary: "commit=0\naaa23b5 Add Codex and Cursor pricing rates [loom/add-pricing-rates-04d8]\ncheck=0"},
+	}}
+	src := SourceInfo{Path: "/tmp/loom/q.jsonl", GitRemote: "https://github.com/EnderRealm/loom.git"}
+	if err := st.WriteSummary(context.Background(), sum, src); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+
+	got, err := LoadSessionsForTickets([]string{"loom/add-pricing-rates-04d8"})
+	if err != nil {
+		t.Fatalf("LoadSessionsForTickets: %v", err)
+	}
+	if len(got) != 1 || got[0].SessionID != "quiet" {
+		t.Fatalf("LoadSessionsForTickets = %v, want the quiet session", got)
+	}
+
+	_, commits, err := LoadSessionsAndCommits()
+	if err != nil {
+		t.Fatalf("LoadSessionsAndCommits: %v", err)
+	}
+	if len(commits) != 1 || commits[0].Hash != "aaa23b5" || commits[0].TicketID != "loom/add-pricing-rates-04d8" {
+		t.Fatalf("commits = %+v, want aaa23b5 carrying loom/add-pricing-rates-04d8", commits)
+	}
+}
+
 // TestLoadActivityWindow writes sessions and commits both inside and outside
 // the 24h window and asserts LoadActivity returns only the in-window rows,
 // grouped per repo.
