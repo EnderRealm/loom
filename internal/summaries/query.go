@@ -368,18 +368,10 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 	// The commit subject's `[<id>]` marker is matched here rather than by a SQL
 	// LIKE: a tk ticket id may legally contain `_`, which LIKE reads as a
 	// single-character wildcard, and an ESCAPE clause around it is more fragile
-	// than an exact prefix test.
-	markers := make([]string, 0, len(ticketIDs))
+	// than an exact comparison.
+	wanted := make(map[string]bool, len(ticketIDs))
 	for _, id := range ticketIDs {
-		markers = append(markers, "["+id+"]")
-	}
-	marked := func(subject string) bool {
-		for _, m := range markers {
-			if strings.HasPrefix(subject, m) {
-				return true
-			}
-		}
-		return false
+		wanted[id] = true
 	}
 
 	type hit struct {
@@ -399,7 +391,7 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 			&sourcePath, &gitRemote, &cwdRaw); err != nil {
 			return nil, err
 		}
-		if !marked(subject.String) {
+		if id, ok := markerTicketID(subject.String); !ok || !wanted[id] {
 			continue
 		}
 		var at time.Time
@@ -438,6 +430,121 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 		out = append(out, h.src)
 	}
 	return out, nil
+}
+
+// markerTicketID returns the ticket id named by the `[<id>]` marker a commit
+// subject opens with — the convention every ticket-scoped commit follows. A tk
+// id never contains `]`, so the first one closes the marker.
+func markerTicketID(subject string) (string, bool) {
+	if !strings.HasPrefix(subject, "[") {
+		return "", false
+	}
+	end := strings.IndexByte(subject, ']')
+	if end <= 1 {
+		return "", false
+	}
+	return subject[1:end], true
+}
+
+// SessionSpan is one summarized session: where it ran and when. Start and End
+// are zero when the row carries no parseable time.
+type SessionSpan struct {
+	Agent     string
+	SessionID string
+	CwdRaw    string // sidecar-captured raw cwd
+	Cwd       string // parsed from JSONL
+	Start     time.Time
+	End       time.Time
+}
+
+// SessionCommit is one commit a session landed. TicketID is the id its
+// subject's `[<id>]` marker names, "" for an unmarked commit. CommittedAt is
+// zero when the row carries no parseable time.
+type SessionCommit struct {
+	Agent       string
+	SessionID   string
+	Hash        string
+	Branch      string
+	Subject     string
+	CommittedAt time.Time
+	TicketID    string
+}
+
+// LoadSessionsAndCommits returns every summarized session and every commit
+// those sessions landed. Unlike LoadSessionsForTickets, a missing summaries.db
+// is an error as well as one predating the commits table: this read's empty
+// answer is "no session worked on anything", and a DB that is absent or
+// cannot hold commits would read exactly like that.
+func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
+	dbPath := filepath.Join(config.Home(), "summaries.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, nil, fmt.Errorf("summaries.db: %w — run `loom summarize`", err)
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open summaries.db: %w", err)
+	}
+	defer db.Close()
+
+	if v := schemaVersionOf(db); v < commitsSchemaVersion {
+		return nil, nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, commitsSchemaVersion)
+	}
+
+	rows, err := db.Query(`
+		SELECT agent, session_id, cwd_raw, cwd, start_time, end_time
+		FROM sessions
+	`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var spans []SessionSpan
+	for rows.Next() {
+		var (
+			s           SessionSpan
+			cwdRaw, cwd sql.NullString
+			start, end  sql.NullString
+		)
+		if err := rows.Scan(&s.Agent, &s.SessionID, &cwdRaw, &cwd, &start, &end); err != nil {
+			return nil, nil, err
+		}
+		s.CwdRaw, s.Cwd = cwdRaw.String, cwd.String
+		s.Start, _ = time.Parse(time.RFC3339Nano, start.String)
+		s.End, _ = time.Parse(time.RFC3339Nano, end.String)
+		spans = append(spans, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	crows, err := db.Query(`
+		SELECT agent, session_id, commit_hash, branch, subject, committed_at
+		FROM commits
+		ORDER BY agent, session_id, seq
+	`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query commits: %w", err)
+	}
+	defer crows.Close()
+
+	var commits []SessionCommit
+	for crows.Next() {
+		var (
+			c                            SessionCommit
+			branch, subject, committedAt sql.NullString
+		)
+		if err := crows.Scan(&c.Agent, &c.SessionID, &c.Hash, &branch, &subject, &committedAt); err != nil {
+			return nil, nil, err
+		}
+		c.Branch, c.Subject = branch.String, subject.String
+		c.CommittedAt, _ = time.Parse(time.RFC3339Nano, committedAt.String)
+		c.TicketID, _ = markerTicketID(c.Subject)
+		commits = append(commits, c)
+	}
+	return spans, commits, crows.Err()
 }
 
 // ActivityView is the rolling-window rollup the "loom ui" activity screen

@@ -26,6 +26,9 @@ Interactive:
 Knowledge:
   relevant --for-ticket <id>   Rank stored truths/decisions relevant to a ticket
   retrospect <id>              Extract candidates from the sessions that closed a ticket
+  synthesis-input --project <name> --since <window>
+                               A project's new, done and edited tickets and the
+                                 sessions behind them, as JSON
   knowledge write              Apply one JSON write plan (stdin) to the knowledge
                                  store, committing what it touched
   knowledge scope add <name>   Create truths/<name>/ so that project's sessions
