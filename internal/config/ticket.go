@@ -58,3 +58,66 @@ func CentralStoreRoot() (string, error) {
 	}
 	return "", fmt.Errorf("tk central store not configured: no central_root in %s", cfgPath)
 }
+
+// ProjectRepoPath reads the repository registered for project on this
+// machine: `projects.<project>.path` in tk's local config, which is
+// TK_STORE_ROOT's own .ticket/config.yaml when the override is set and
+// ~/.ticket/config.yaml otherwise (tk's project.ConfigPath). Scanned line by
+// line for the same reason as CentralStoreRoot; a project name is the first
+// indent level under the top-level `projects:` key, its path one level
+// deeper.
+func ProjectRepoPath(project string) (string, error) {
+	var cfgPath string
+	if root, ok := os.LookupEnv(tkStoreRootEnv); ok {
+		if !filepath.IsAbs(root) {
+			return "", fmt.Errorf("%s must be an absolute path, got %q", tkStoreRootEnv, root)
+		}
+		cfgPath = filepath.Join(root, ".ticket", "config.yaml")
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("tk config not found: %w", err)
+		}
+		cfgPath = filepath.Join(home, ".ticket", "config.yaml")
+	}
+	f, err := os.Open(cfgPath)
+	if err != nil {
+		return "", fmt.Errorf("tk config not found: %w", err)
+	}
+	defer f.Close()
+
+	inProjects, inProject := false, false
+	nameIndent := -1
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 0 {
+			inProjects, inProject = trimmed == "projects:", false
+			continue
+		}
+		if !inProjects {
+			continue
+		}
+		if nameIndent < 0 {
+			nameIndent = indent
+		}
+		if indent <= nameIndent {
+			inProject = indent == nameIndent && trimmed == project+":"
+			continue
+		}
+		if v, ok := strings.CutPrefix(trimmed, "path:"); ok && inProject {
+			if p := strings.TrimSpace(v); p != "" {
+				return p, nil
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read %s: %w", cfgPath, err)
+	}
+	return "", fmt.Errorf("project %q has no repository registered in %s", project, cfgPath)
+}
