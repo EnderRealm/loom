@@ -2,9 +2,6 @@ package escapes
 
 import (
 	"bytes"
-	"encoding/json"
-	"errors"
-	"io"
 	"os/exec"
 	"regexp"
 	"testing"
@@ -14,46 +11,27 @@ import (
 	"loom/internal/config"
 )
 
-const fixturePath = "testdata/labels.jsonl"
-
 var fullHash = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 func loadFixture(t *testing.T) []Label {
 	t.Helper()
-	labels, err := LoadLabels(fixturePath)
+	labels, err := Fixture()
 	if err != nil {
-		t.Fatalf("LoadLabels: %v", err)
+		t.Fatalf("Fixture: %v", err)
 	}
 	return labels
 }
 
-// doneBugs reads every ticket in the central store through `tk query
-// --all-projects` and returns the qualified ids of those that are done bugs.
+// doneBugs returns the qualified ids of every done bug in the tk store.
 func doneBugs(t *testing.T) map[string]bool {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("tk", "query", "--all-projects")
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("tk query --all-projects: %v: %s", err, stderr.String())
+	st, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
 	}
 	done := map[string]bool{}
-	dec := json.NewDecoder(&stdout)
-	for {
-		var tk struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
-			Type   string `json:"type"`
-		}
-		if err := dec.Decode(&tk); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			t.Fatalf("tk query: decode: %v", err)
-		}
-		if tk.Status == string(ticket.StatusDone) && tk.Type == string(ticket.TypeBug) {
-			done[tk.ID] = true
-		}
+	for _, id := range st.DoneBugs {
+		done[id] = true
 	}
 	return done
 }

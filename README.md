@@ -227,6 +227,21 @@ loom run-report --run transcript:claude-code:<session>:0 | jq '.telemetry.gaps'
 - **Breakdowns and the tree.** `executions` lists every node depth-first, root first, then the unresolved ones (`placement`), each with its own span's metrics and duration; `stages` groups stage attempts by `(stage, occurrence)` with a `retries` count; `lenses` joins the lens execution records with the transcript's lens attempts on `(lens, round, attempt)`, listing an attempt from either side alone, each with an `attribution` — `execution` where a record joined, `transcript` where only the transcript paired a response (a native subagent lens writes no record), `unknown` where neither stands behind it; `attempts` is the flat retry view. `tree`, `unresolved` and `diagnostics` are the run as `internal/runs` reads it, with every empty list rendered `[]`.
 - **A missing rate leaves the metrics standing.** Cost is priced as `cost-report` prices it, at the rates in `internal/pricing/rates.json` in force at the run's start; a model the table does not carry ([coverage](docs/pricing.md)) leaves `cost_usd` null, `pricing.available` false and the cause in `pricing_warnings`, and every other figure is still reported. Each scope is priced on its own — a Claude parent at Claude's rates and semantics, a Codex descendant at OpenAI's — and the total is their sum, or null when any scope in it is. `pricing` names the table's currency, source and checked date. An unknown run id is an error (`run not found: <id>`); a `summaries.db` older than schema 9 is refused until `loom summarize --rebuild`.
 
+### Bug escape attribution
+
+`loom escapes` attributes every done bug in the tk store to the agent sessions whose commits introduced it, and prints the share of loom commits that introduced a bug per (agent, model, cli_version), with precision against the hand-labelled fixture beneath.
+
+```sh
+loom escapes
+jq -c 'select(.class == "unattributable") | {ticket, reason}' ~/.loom/escapes.jsonl
+```
+
+- **SZZ over the fix.** A bug's fix commits are those on the registered repo's HEAD whose subject carries its `[<id>]` marker. The lines they deleted or modified are blamed at each fix's parent with whitespace ignored on both sides; generated paths (`tests/golden/`) are skipped, as are lines written by the bug's own fix commits.
+- **One class per bug.** `single` (one introducing commit), `multi` (several, credit 1/n each), or `unattributable` with a reason: no fix commit found, an add-only fix (no culprit is guessed), a git failure while blaming (written to stderr; the run continues), or no introducing commit in loom's `commits` table, which is where a human commit lands too. A blamed hash is joined to a loom commit only in the same repo, by origin remote (normalized, so SSH and HTTPS forms match) or cwd, so short-hash collisions across repos never cross-attribute.
+- **The rate is introducing commits over commits.** `commits` counts every distinct loom commit in the slice reachable from HEAD in a registered repo, `introducing` how many of them introduced at least one attributed bug, and `rate` is their ratio. `credit` is the fractional sum beside it: 1 per single bug, 1/n per commit of a multi bug, so a commit that introduced several bugs counts once in `introducing` and several times in `credit`.
+- **Precision is printed with the rates.** The hand-labelled fixture (`internal/escapes/testdata/labels.jsonl`) is embedded in the binary; the precision line (`precision on fixture blame-stage singles`) scores the fixture bugs the blame stage classes `single`, before the loom join, against their labelled introducing commits, the same measure `TestPrecisionAgainstFixture` holds at 60% or better.
+- **Per-bug JSONL.** Every done bug is written once to `$LOOM_HOME/escapes.jsonl` (`--out` overrides) with its fix commits, blamed commits and line counts, and the matched session with its `/work` runs, so a wrong attribution can be debugged from the file. `--db` overrides the database read; one older than schema 8 is refused.
+
 ---
 
 # Transport

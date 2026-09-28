@@ -391,7 +391,7 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 			&sourcePath, &gitRemote, &cwdRaw); err != nil {
 			return nil, err
 		}
-		if id, ok := markerTicketID(subject.String); !ok || !wanted[id] {
+		if id, ok := MarkerTicketID(subject.String); !ok || !wanted[id] {
 			continue
 		}
 		var at time.Time
@@ -432,7 +432,7 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 	return out, nil
 }
 
-// markerTicketID returns the ticket id named by a commit subject's `[<id>]`
+// MarkerTicketID returns the ticket id named by a commit subject's `[<id>]`
 // marker. Two conventions are in use, so both are read: a marker that opens
 // the subject (`[<id>] Do the thing`) and one that ends it (`Do the thing
 // [<id>]`). A bracket in the middle of a subject is not a marker — no commit
@@ -441,7 +441,7 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 // marker in either position must be non-empty and hold no whitespace or `]`,
 // since a tk id never does and tags like `[skip ci]` sit in both positions; an
 // opening marker that fails this leaves the trailing one to be read.
-func markerTicketID(subject string) (string, bool) {
+func MarkerTicketID(subject string) (string, bool) {
 	if strings.HasPrefix(subject, "[") {
 		if end := strings.IndexByte(subject, ']'); end > 0 {
 			if id := subject[1:end]; id != "" && !strings.ContainsAny(id, " \t") {
@@ -558,7 +558,7 @@ func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
 		}
 		c.Branch, c.Subject = branch.String, subject.String
 		c.CommittedAt, _ = time.Parse(time.RFC3339Nano, committedAt.String)
-		c.TicketID, _ = markerTicketID(c.Subject)
+		c.TicketID, _ = MarkerTicketID(c.Subject)
 		commits = append(commits, c)
 	}
 	return spans, commits, crows.Err()

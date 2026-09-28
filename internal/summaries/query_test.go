@@ -123,9 +123,9 @@ func TestMarkerTicketID(t *testing.T) {
 		{"", "", false},
 	}
 	for _, c := range cases {
-		id, ok := markerTicketID(c.subject)
+		id, ok := MarkerTicketID(c.subject)
 		if id != c.id || ok != c.ok {
-			t.Errorf("markerTicketID(%q) = %q, %v; want %q, %v", c.subject, id, ok, c.id, c.ok)
+			t.Errorf("MarkerTicketID(%q) = %q, %v; want %q, %v", c.subject, id, ok, c.id, c.ok)
 		}
 	}
 }
