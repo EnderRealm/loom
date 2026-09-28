@@ -30,9 +30,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// schemaVersion is the summaries.db schema this report reads. Version 11
-// distinguishes missing token usage from a measured zero.
-const schemaVersion = 11
+// schemaVersion is the summaries.db schema this report reads. Version 12
+// carries each subagents row's dispatch id and span, which place a Claude
+// subagent under a recorded run and against its reporting cutoff.
+const schemaVersion = 12
 
 // Outcome values the report adds to the record's completed|failed|stopped.
 const (
@@ -71,6 +72,11 @@ const (
 	RootSpanSessionEnd           = "session→session_end"
 	RootSpanUnresolved           = "unresolved"
 )
+
+// ExcludedAfterReportingCutoff is the Excluded reason of a subagent whose
+// transcript starts after the run's reporting_cutoff: the /work summarizer,
+// dispatched to report on the run rather than to do its work.
+const ExcludedAfterReportingCutoff = "started_after_reporting_cutoff"
 
 // Placement values of an execution in the report.
 const (
@@ -242,7 +248,7 @@ type Metrics struct {
 	CLIVersions        []string           `json:"cli_versions"`
 	ConditionsCoverage ConditionsCoverage `json:"conditions_coverage"`
 	// ExecutionTimeMs sums each execution's own started_at→ended_at (or a
-	// historical dispatch's duration_ms); ExecutionTimeCoverage counts the
+	// dispatch row's duration_ms); ExecutionTimeCoverage counts the
 	// executions that carried both bounds and those that did not.
 	ExecutionTimeMs         int64    `json:"execution_time_ms"`
 	ExecutionTimeCoverage   Coverage `json:"execution_time_coverage"`
@@ -350,11 +356,12 @@ type Pricing struct {
 
 // ExecutionMetrics is one execution, in the tree or unresolved, with its own
 // transcript's measure. Counted is false when its transcript was already
-// counted by another execution (CountedBy names it) or when its attribution
-// to the run is what is unresolved (CountedBy empty, and a telemetry gap
-// names it); Metrics is its own span either way. A node whose transcript is
-// another counted execution's has no invocation range bounding it, so it
-// reports that whole session as its own metrics.
+// counted by another execution (CountedBy names it), when it falls outside
+// the run's work (Excluded names why, and it is no gap), or when its
+// attribution to the run is what is unresolved (CountedBy and Excluded
+// empty, and a telemetry gap names it); Metrics is its own span either way.
+// A node whose transcript is another counted execution's has no invocation
+// range bounding it, so it reports that whole session as its own metrics.
 type ExecutionMetrics struct {
 	ExecutionID       string              `json:"execution_id"`
 	ParentExecutionID string              `json:"parent_execution_id"`
@@ -364,6 +371,7 @@ type ExecutionMetrics struct {
 	Lens              string              `json:"lens"`
 	Round             *int                `json:"round"`
 	Attempt           *int                `json:"attempt"`
+	DispatchID        string              `json:"dispatch_id"`
 	Transcript        *runs.TranscriptRef `json:"transcript"`
 	AgentType         string              `json:"agent_type"`
 	StartedAt         string              `json:"started_at"`
@@ -372,6 +380,7 @@ type ExecutionMetrics struct {
 	Placement         string              `json:"placement"`
 	Counted           bool                `json:"counted"`
 	CountedBy         string              `json:"counted_by"`
+	Excluded          string              `json:"excluded"`
 	DurationMs        *int64              `json:"duration_ms"`
 	Metrics           Metrics             `json:"metrics"`
 }
@@ -488,14 +497,22 @@ func open(dbPath string) (*sql.DB, *pricing.Table, error) {
 }
 
 // unit is one execution with whatever evidence there is to meter it: its
-// transcript's rows over a turn range, or a historical dispatch's subagents
-// row, or nothing.
+// transcript's rows over a turn range, or a dispatch's subagents row, or
+// nothing.
 type unit struct {
 	node      *runs.Node
 	placement string
 	// attributed is false for an unresolved execution nothing declared
-	// under this run: listed and metered, added to no scope.
+	// under this run, and for one excluded (naming why): listed and
+	// metered, added to no scope.
 	attributed bool
+	excluded   string
+	// dispatch marks a node attached from its root transcript's subagents
+	// row; agentType is that row's. Its own session meters it when it has
+	// one, the row's usage columns only when it has none: the two measure
+	// the same tokens.
+	dispatch  bool
+	agentType string
 	// counted is false when another execution (countedBy) already counts
 	// this one's transcript.
 	counted   bool
@@ -503,8 +520,8 @@ type unit struct {
 	data      *sessionData
 	startIdx  int
 	endIdx    int
-	// subagent is a historical dispatch's row off the parent transcript,
-	// whose agent is the runtime its usage is recorded under.
+	// subagent is a dispatch's row off the parent transcript, whose agent
+	// is the runtime its usage is recorded under.
 	subagent *subagentRow
 	agent    string
 }
@@ -585,17 +602,36 @@ func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 		u.attributed, u.counted = false, false
 		b.gap(fmt.Sprintf("execution %s is unresolved; not counted", n.ExecutionID))
 	}
-	if seq, ok := b.historicalSubagent(n); ok {
+	if seq, ok := b.subagentSeq(n); ok {
 		row, err := loadSubagentRow(b.db, *b.run.Root.Transcript, seq)
 		if err != nil {
 			return nil, err
 		}
-		u.subagent, u.agent = row, b.run.Root.Transcript.Agent
-		b.gap(fmt.Sprintf("execution %s tool timing not recorded", n.ExecutionID))
-		if row == nil || !row.inputTokens.Valid {
-			b.gap(fmt.Sprintf("execution %s has no transcript usage", n.ExecutionID))
+		u.dispatch = true
+		if row != nil {
+			u.agentType = row.agentType
 		}
-		return u, nil
+		// The cutoff separates the run's work from the reporting on it. A
+		// dispatch with no start cannot be placed on either side, so it stays
+		// counted and the unknown attribution is the gap.
+		if cutoff := parseTime(b.run.ReportingCutoff); !cutoff.IsZero() {
+			start := parseTime(n.StartedAt)
+			if start.IsZero() {
+				b.gap(fmt.Sprintf("execution %s has no start time; reporting cutoff attribution unresolved", n.ExecutionID))
+			} else if start.After(cutoff) {
+				u.attributed, u.counted, u.excluded = false, false, ExcludedAfterReportingCutoff
+			}
+		}
+		if n.Transcript == nil {
+			u.subagent, u.agent = row, b.run.Root.Transcript.Agent
+			if u.attributed {
+				b.gap(fmt.Sprintf("execution %s tool timing not recorded", n.ExecutionID))
+				if row == nil || !row.inputTokens.Valid {
+					b.gap(fmt.Sprintf("execution %s has no transcript usage", n.ExecutionID))
+				}
+			}
+			return u, nil
+		}
 	}
 	if n.Transcript == nil {
 		if u.counted && n != b.run.Root && n.Kind != runs.KindCommand {
@@ -758,11 +794,12 @@ func (b *builder) applyReportingCutoff(u *unit) {
 	}
 }
 
-// historicalSubagent reads the seq out of a transcript-recognized run's
-// `<run>:subagent:<seq>` child.
-func (b *builder) historicalSubagent(n *runs.Node) (int, bool) {
+// subagentSeq reads the seq out of a `<run>:subagent:<seq>` child that
+// internal/runs attached from the root transcript's subagents rows; a
+// recorded execution carries a source and is never one.
+func (b *builder) subagentSeq(n *runs.Node) (int, bool) {
 	prefix := b.run.RunID + ":subagent:"
-	if b.run.Origin != runs.OriginTranscript || n.Transcript != nil || !strings.HasPrefix(n.ExecutionID, prefix) {
+	if n.Source != nil || !strings.HasPrefix(n.ExecutionID, prefix) {
 		return 0, false
 	}
 	seq, err := strconv.Atoi(strings.TrimPrefix(n.ExecutionID, prefix))
@@ -829,12 +866,11 @@ func (b *builder) report() *Report {
 			}
 		}
 		// A recorded execution is pending until a record closes it with an
-		// outcome. A historical dispatch's row is never pending: its NULL
-		// duration means the dispatch was not measured, not that it is
-		// still running.
+		// outcome. A dispatch's row is never pending: its NULL duration means
+		// the dispatch was not measured, not that it is still running.
 		switch {
-		case u.subagent != nil:
-			if !u.subagent.durationMs.Valid {
+		case u.dispatch:
+			if u.attributed && durationOf(u) == nil {
 				b.gap(fmt.Sprintf("execution %s duration unmeasured", n.ExecutionID))
 			}
 		case n.EndedAt == "" || (n.Source != nil && n.Outcome == ""):
@@ -862,18 +898,18 @@ func (b *builder) report() *Report {
 			Lens:              n.Lens,
 			Round:             n.Round,
 			Attempt:           n.Attempt,
+			DispatchID:        n.DispatchID,
 			Transcript:        n.Transcript,
+			AgentType:         u.agentType,
 			StartedAt:         n.StartedAt,
 			EndedAt:           n.EndedAt,
 			Outcome:           n.Outcome,
 			Placement:         u.placement,
 			Counted:           u.counted,
 			CountedBy:         u.countedBy,
+			Excluded:          u.excluded,
 			DurationMs:        durationOf(u),
 			Metrics:           own.metrics(),
-		}
-		if u.subagent != nil {
-			em.AgentType = u.subagent.agentType
 		}
 		// One entry per unit, in walk order: stages() and lenses() rely on
 		// rep.Executions[i] corresponding to b.units[i].
@@ -1078,7 +1114,7 @@ func outcomeOf(run *runs.Run) string {
 }
 
 // durationOf is the execution's own span: the record's bounds, or a
-// historical dispatch's measured duration. Null when neither is known.
+// dispatch row's measured duration. Null when neither is known.
 func durationOf(u *unit) *int64 {
 	if u.subagent != nil {
 		if u.subagent.durationMs.Valid {

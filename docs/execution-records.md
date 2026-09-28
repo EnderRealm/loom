@@ -134,6 +134,20 @@ invocation-to-session-end bound. The report states the selected start in
 `time.wall_basis`; descendant transcripts keep their own process-bounded
 spans.
 
+A declared Claude run's native Agent dispatches write no records; each
+subagents row its root's `/work` invocation dispatched is attached under the
+root as a `subagent` execution `<run_id>:subagent:<seq>`, carrying the
+dispatching tool_use id as `dispatch_id`, unless a record already declares
+the same `dispatch_id` or transcript. `loom summarize` folds each subagent
+transcript as a session of its own — `claude-code`/`agent-<agentId>`, the
+file's stem, naming its parent session and dispatch — and the execution's
+`transcript` names it, so it is metered turn by turn from that session. The
+row's own usage columns measure the same tokens and are read only for a
+dispatch whose transcript never shipped. A dispatch whose transcript starts
+after the run's `reporting_cutoff` — the `/work` summarizer — is listed with
+its own metrics, `counted: false` and `excluded:
+started_after_reporting_cutoff`, and added to no scope; that is not a gap.
+
 **Rejected records.** A record with an unknown `v`, an unknown `kind`, a
 missing required id, a value outside an enum, or a timestamp that is not RFC
 3339 is skipped and a diagnostic written to `execution_diagnostics` with the

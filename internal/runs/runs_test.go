@@ -1144,3 +1144,77 @@ func TestRecordWithoutSessionJoinsItsInvocation(t *testing.T) {
 		t.Errorf("runs = %v, want %s: neither candidate is claimed", ids, want)
 	}
 }
+
+// A recorded Claude run gains one subagent child per subagents row its
+// invocation dispatched: the native Agent dispatches write no records, so
+// their rows are the only evidence. A dispatch a record already declares is
+// not added twice, and one dispatched under the next invocation is not this
+// run's.
+func TestRecordedClaudeRunAttachesSubagentRows(t *testing.T) {
+	st := openStore(t, filepath.Join(t.TempDir(), "summaries.db"))
+	defer st.Close()
+	const ticket = "loom/recorded-subagents-0001"
+
+	sum := claudeRun("rec-claude", ticket, base)
+	sum.Turns = append(sum.Turns, summary.Turn{Idx: 2, UserMessage: workInvocation("loom/next-0002"), AssistantText: "next", StartedAt: base.Add(40 * time.Minute)})
+	coderStart, coderEnd := base.Add(time.Minute), base.Add(9*time.Minute)
+	sum.Subagents = []summary.Subagent{
+		{ParentTurnIdx: 0, AgentType: "coder", ToolUseID: "toolu_coder", StartedAt: coderStart, EndedAt: coderEnd, SessionID: "agent-coder"},
+		{ParentTurnIdx: 1, AgentType: "quality-reviewer", ToolUseID: "toolu_quality", StartedAt: base.Add(21 * time.Minute)},
+		{ParentTurnIdx: 1, AgentType: "security-reviewer", ToolUseID: "toolu_security", StartedAt: base.Add(22 * time.Minute)},
+		{ParentTurnIdx: 2, AgentType: "coder", ToolUseID: "toolu_next", StartedAt: base.Add(41 * time.Minute)},
+	}
+	writeSession(t, st, sum)
+	writeSession(t, st, &summary.SessionSummary{
+		SessionID: "agent-coder", Agent: summary.AgentClaude, ParentSessionID: "rec-claude", ParentToolCallID: "toolu_coder", SpawnDepth: 1,
+		StartTime: coderStart, EndTime: coderEnd,
+		Turns: []summary.Turn{{Idx: 0, UserMessage: "code it", StartedAt: coderStart}},
+	})
+	path := filepath.Join(t.TempDir(), "executions.jsonl")
+	records := strings.Join([]string{
+		`{"v":1,"kind":"run","run_id":"run-rec","ticket":"` + ticket + `","runtime":"claude-code","agent":"claude-code","session_id":"rec-claude","started_at":"2026-09-10T09:00:30Z","ended_at":"2026-09-10T09:30:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T09:30:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-rec","run_id":"run-rec","execution_kind":"root","agent":"claude-code","session_id":"rec-claude","started_at":"2026-09-10T09:00:30Z","ended_at":"2026-09-10T09:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"lens-rec-security","run_id":"run-rec","parent_execution_id":"root-rec","execution_kind":"lens","lens":"security","round":1,"attempt":1,"dispatch_id":"toolu_security","started_at":"2026-09-10T09:22:00Z","ended_at":"2026-09-10T09:25:00Z","outcome":"completed"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(records), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importFile(t, st, path)
+
+	run, err := Load(st.DB(), "run-rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(childIDs(run.Root), ","); got != "lens-rec-security,run-rec:subagent:0,run-rec:subagent:1" {
+		t.Fatalf("root children = %s, want the security record and the coder and quality rows", got)
+	}
+	coder := child(t, run.Root, "run-rec:subagent:0")
+	if coder.Kind != KindSubagent || coder.ParentExecutionID != "root-rec" || coder.DispatchID != "toolu_coder" ||
+		coder.StartedAt != "2026-09-10T09:01:00Z" || coder.EndedAt != "2026-09-10T09:09:00Z" || coder.Source != nil {
+		t.Errorf("coder = %+v", coder)
+	}
+	wantTranscript(t, coder, "claude-code", "agent-coder")
+	quality := child(t, run.Root, "run-rec:subagent:1")
+	if quality.DispatchID != "toolu_quality" || quality.StartedAt != "2026-09-10T09:21:00Z" || quality.EndedAt != "" || quality.Transcript != nil {
+		t.Errorf("quality = %+v, want its dispatch and start with no end observed and no transcript folded", quality)
+	}
+
+	// Recognized from its transcript alone, the same session places the coder
+	// once: its session names the parent too, and is not attached again as a
+	// parent-thread child.
+	sum.SessionID = "hist-claude"
+	sum.Turns[0].UserMessage = workInvocation("loom/hist-subagents-0001")
+	sum.Turns[2].UserMessage = "no further invocation"
+	writeSession(t, st, sum)
+	writeSession(t, st, &summary.SessionSummary{
+		SessionID: "agent-hist-coder", Agent: summary.AgentClaude, ParentSessionID: "hist-claude", ParentToolCallID: "toolu_coder", SpawnDepth: 1,
+		StartTime: coderStart, EndTime: coderEnd,
+	})
+	hist, err := Load(st.DB(), "transcript:claude-code:hist-claude:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(hist.Root.Children); got != 4 || len(hist.Unresolved) != 0 {
+		t.Errorf("historical children = %v unresolved %d, want one per subagents row", childIDs(hist.Root), len(hist.Unresolved))
+	}
+}

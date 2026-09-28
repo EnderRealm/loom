@@ -1577,3 +1577,93 @@ func TestLoadRefusesAnUnknownRun(t *testing.T) {
 		t.Fatalf("err = %v, want run not found: nope", err)
 	}
 }
+
+// A recorded Claude run meters each native subagent from its own session:
+// its turns and tool calls, the subagents row's copy of the same usage added
+// nowhere. The summarizer, dispatched after the run's reporting cutoff, is
+// listed with its own usage and added to no scope, the reason named rather
+// than a gap. A dispatch with no transcript falls back to its row, and one
+// with no start cannot be placed against the cutoff, so it stays counted and
+// that is the gap.
+func TestRecordedRunMetersSubagentSessionsUpToReportingCutoff(t *testing.T) {
+	st, _ := openStore(t)
+	const (
+		runID   = "run-native-subagents"
+		ticket  = "loom/native-subagents-0001"
+		session = "sess-native-subagents"
+	)
+	importLines(t, st,
+		`{"v":1,"kind":"run","run_id":"`+runID+`","ticket":"`+ticket+`","runtime":"claude-code","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:00:00Z","ended_at":"2026-09-10T10:20:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T10:20:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-native","run_id":"`+runID+`","execution_kind":"root","agent":"claude-code","session_id":"`+session+`","started_at":"2026-09-10T10:00:00Z","ended_at":"2026-09-10T10:20:00Z","outcome":"completed"}`,
+	)
+	begin := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	coderMs, summarizerMs := int64(8*60*1000), int64(60*1000)
+	sum := oneTurn(summary.AgentClaude, session, claudeModel, begin, begin.Add(25*time.Minute), 100, 0, 10, summary.KindTask, 100)
+	sum.Turns[0].UserMessage = workInvocation(ticket)
+	sum.Subagents = []summary.Subagent{
+		{ParentTurnIdx: 0, AgentType: "coder", ToolUseID: "toolu_coder", SessionID: "agent-coder", StartedAt: begin.Add(time.Minute), EndedAt: begin.Add(9 * time.Minute), DurationMs: &coderMs,
+			Usage: &summary.SubagentUsage{Model: claudeModel, InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 5000}},
+		{ParentTurnIdx: 0, AgentType: "summarizer", ToolUseID: "toolu_summarizer", SessionID: "agent-summarizer", StartedAt: begin.Add(21 * time.Minute), EndedAt: begin.Add(22 * time.Minute), DurationMs: &summarizerMs,
+			Usage: &summary.SubagentUsage{Model: claudeModel, InputTokens: 300, OutputTokens: 30}},
+		{ParentTurnIdx: 0, AgentType: "quality-reviewer", ToolUseID: "toolu_quality"},
+	}
+	writeSession(t, st, sum)
+	for _, c := range []struct {
+		id                   string
+		start, end           time.Time
+		input, cache, output int64
+	}{
+		{"agent-coder", begin.Add(time.Minute), begin.Add(9 * time.Minute), 1000, 5000, 200},
+		{"agent-summarizer", begin.Add(21 * time.Minute), begin.Add(22 * time.Minute), 300, 0, 30},
+	} {
+		child := oneTurn(summary.AgentClaude, c.id, claudeModel, c.start, c.end, c.input, c.cache, c.output, summary.KindEdit, 2000)
+		child.ParentSessionID, child.SpawnDepth = session, 1
+		writeSession(t, st, child)
+	}
+
+	rep := build(t, st, runID)
+	if got := strings.Join(ids(rep.Executions), ","); got != "root-native,"+runID+":subagent:0,"+runID+":subagent:1,"+runID+":subagent:2" {
+		t.Fatalf("executions = %s", got)
+	}
+	coder := execution(t, rep, runID+":subagent:0")
+	if coder.Kind != runs.KindSubagent || coder.AgentType != "coder" || coder.DispatchID != "toolu_coder" || !coder.Counted || coder.Excluded != "" ||
+		coder.Transcript == nil || coder.Transcript.SessionID != "agent-coder" || coder.Metrics.Transcripts != 1 || coder.Metrics.ToolCalls != 1 {
+		t.Errorf("coder = %+v, want metered from its own session", coder)
+	}
+	if got := tokens(t, coder.Metrics, "claude-code"); got.Input != 1000 || got.Output != 200 || got.CacheRead != 5000 {
+		t.Errorf("coder tokens = %+v", got)
+	}
+	summarizer := execution(t, rep, runID+":subagent:1")
+	if summarizer.Counted || summarizer.Excluded != ExcludedAfterReportingCutoff || summarizer.DispatchID != "toolu_summarizer" || summarizer.Transcript == nil {
+		t.Errorf("summarizer = %+v, want listed with its transcript, not counted, excluded after the cutoff", summarizer)
+	}
+	if got := tokens(t, summarizer.Metrics, "claude-code"); got.Input != 300 || got.Output != 30 || summarizer.Metrics.CostUSD == nil {
+		t.Errorf("summarizer own metrics = %+v cost %v, want its usage priced", got, summarizer.Metrics.CostUSD)
+	}
+	// Each token once: the coder's session, never again from its row.
+	if got := tokens(t, rep.Metrics.Descendants, "claude-code"); got.Input != 1000 || got.Output != 200 || got.CacheRead != 5000 {
+		t.Errorf("descendant tokens = %+v, want the coder's alone, once", got)
+	}
+	if got := tokens(t, rep.Metrics.Total, "claude-code"); got.Input != 1100 || got.Output != 210 {
+		t.Errorf("total tokens = %+v, want root and coder without the summarizer", got)
+	}
+	if rep.Metrics.Descendants.Executions != 2 || rep.Metrics.Total.Executions != 3 || rep.Metrics.Total.Transcripts != 2 {
+		t.Errorf("executions descendants %d total %d transcripts %d, want 2/3/2: the summarizer is in no scope",
+			rep.Metrics.Descendants.Executions, rep.Metrics.Total.Executions, rep.Metrics.Total.Transcripts)
+	}
+	gaps := strings.Join(rep.Telemetry.Gaps, "\n")
+	if strings.Contains(gaps, runID+":subagent:0") || strings.Contains(gaps, runID+":subagent:1") {
+		t.Errorf("gaps = %v, want nothing naming the coder or the excluded summarizer", rep.Telemetry.Gaps)
+	}
+	if !strings.Contains(gaps, "execution "+runID+":subagent:2 has no start time; reporting cutoff attribution unresolved") ||
+		!strings.Contains(gaps, "execution "+runID+":subagent:2 has no transcript usage") {
+		t.Errorf("gaps = %v, want the unplaced, unmeasured dispatch named", rep.Telemetry.Gaps)
+	}
+	if got := strings.Join(rep.Telemetry.ExecutionsWithoutTranscript, ","); got != runID+":subagent:2" {
+		t.Errorf("without transcript = %s, want the unshipped dispatch alone", got)
+	}
+	quality := execution(t, rep, runID+":subagent:2")
+	if !quality.Counted || quality.Excluded != "" || quality.AgentType != "quality-reviewer" {
+		t.Errorf("quality = %+v, want counted: its placement is unknown, not excluded", quality)
+	}
+}

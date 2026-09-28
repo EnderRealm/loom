@@ -56,7 +56,7 @@ type sessionData struct {
 	errors      []errorRow
 }
 
-// subagentRow is a historical dispatch's own row in the parent's subagents
+// subagentRow is a dispatch's own row in the parent's subagents
 // table. The usage columns are NULL together when no transcript was folded;
 // inputTokens.Valid is the marker.
 type subagentRow struct {
@@ -392,10 +392,10 @@ func (m *meter) addSpan(u *unit) {
 	}
 }
 
-// addSubagent meters a historical dispatch from its row: its usage under the
+// addSubagent meters a dispatch from its row: its usage under the
 // parent runtime's semantics, or nothing when no transcript was folded.
 func (m *meter) addSubagent(u *unit) {
-	// Historical dispatch rows retain usage and elapsed duration, not the
+	// Dispatch rows retain usage and elapsed duration, not the
 	// tool records needed to compute this execution's tool time.
 	m.m.ToolTimeUnavailable = true
 	s := u.subagent

@@ -4,6 +4,21 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// schemaVersion 12: subagents gains tool_use_id, started_at and ended_at —
+// the dispatching tool_use and the span of the dispatch's own transcript, so
+// a run report can place a Claude subagent under its run's root and against
+// the run's reporting cutoff — and child_session_id: each Claude subagent
+// transcript is also folded as its own sessions row (agent-<agentId>, with
+// parent_session_id, spawn_depth 1 and parent_tool_call_id set), carrying
+// its turns and tool calls. The row's usage columns and that session's turns
+// measure the same tokens, so a reader counts one or the other, never both.
+// Its friction and unknown records stay on the parent's rows alone. The
+// Claude parser also counts assistant usage
+// once per message.id rather than once per content-block record, so every
+// Claude session's token figures drop to their per-message value. Every v11
+// database has the columns absent and the doubled counts in place, so v11
+// reads as outdated until a `loom summarize --rebuild` refolds.
+//
 // schemaVersion 11: sessions gains usage_known so producers that expose no
 // billing counters remain distinct from sessions that measured zero tokens;
 // tool_calls gains child identity, duration and explicit resume associations.
@@ -69,7 +84,7 @@ package summaries
 // end. Earlier versions used session_id alone as the PK, which disagreed with
 // every read-side join in the TUI. The summary DB is permanently disposable —
 // `loom summarize --rebuild` drops and rebuilds from ~/.loom/received/.
-const schemaVersion = 11
+const schemaVersion = 12
 
 // commitsSchemaVersion is the version that introduced the commits table.
 // Deliberately pinned rather than tracked to schemaVersion: readers that need
@@ -80,6 +95,10 @@ const commitsSchemaVersion = 4
 // lensSchemaVersion is the version that introduced the lens_responses tables,
 // pinned for the same reason as commitsSchemaVersion.
 const lensSchemaVersion = 9
+
+// subagentSessionSchemaVersion is the version that writes each Claude subagent
+// transcript as its own sessions row, pinned for the same reason.
+const subagentSessionSchemaVersion = 12
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -241,6 +260,10 @@ CREATE TABLE IF NOT EXISTS subagents (
     cache_creation_tokens    INTEGER,
     cache_creation_1h_tokens INTEGER,
     usage_mixed     INTEGER,
+    tool_use_id     TEXT,
+    started_at      TEXT,
+    ended_at        TEXT,
+    child_session_id TEXT,
     PRIMARY KEY (agent, session_id, seq)
 );
 

@@ -249,3 +249,52 @@ func TestLoadActivityWindow(t *testing.T) {
 			av.Repos[0].Sessions, av.Repos[0].Commits)
 	}
 }
+
+// A Claude subagent's session is not a session anyone started: the activity
+// view, the knowledge trigger's sources and the synthesis spans list its
+// parent alone.
+func TestClaudeSubagentSessionsAreNotListedAsSessions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOOM_HOME", dir)
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	start := time.Now().Add(-time.Hour)
+	parent := &summary.SessionSummary{SessionID: "parent", Agent: summary.AgentClaude, StartTime: start, EndTime: start.Add(time.Minute)}
+	child := &summary.SessionSummary{
+		SessionID: "agent-a0123", Agent: summary.AgentClaude, ParentSessionID: "parent", ParentToolCallID: "toolu_A", SpawnDepth: 1,
+		StartTime: start.Add(10 * time.Second), EndTime: start.Add(50 * time.Second),
+	}
+	if err := st.WriteSummary(ctx, parent, SourceInfo{Path: "/tmp/loom/parent.jsonl", CwdRaw: "/Users/steve/code/loom"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteSummary(ctx, child, SourceInfo{Path: "/tmp/loom/parent/subagents/agent-a0123.jsonl", CwdRaw: "/Users/steve/code/loom"}); err != nil {
+		t.Fatal(err)
+	}
+
+	av, err := LoadActivity(24 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(av.Sessions) != 1 {
+		t.Errorf("activity sessions = %d, want the parent alone", len(av.Sessions))
+	}
+	sources, err := LoadSessionSources(time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].SessionID != "parent" {
+		t.Errorf("session sources = %+v, want the parent alone", sources)
+	}
+	spans, _, err := LoadSessionsAndCommits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spans) != 1 || spans[0].SessionID != "parent" {
+		t.Errorf("session spans = %+v, want the parent alone", spans)
+	}
+}

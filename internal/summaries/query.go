@@ -288,7 +288,7 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 		SELECT agent, session_id, source_path, git_remote, cwd_raw, turn_count
 		FROM sessions
 		WHERE source_path IS NOT NULL AND source_path != ''
-		  AND summarized_at >= ?
+		  AND summarized_at >= ? AND `+notClaudeSubagent(db)+`
 		ORDER BY summarized_at DESC
 	`, since.UTC().Format(time.RFC3339Nano))
 	if err != nil {
@@ -512,7 +512,7 @@ func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
 	rows, err := db.Query(`
 		SELECT agent, session_id, cwd_raw, cwd, start_time, end_time
 		FROM sessions
-	`)
+		WHERE ` + notClaudeSubagent(db))
 	if err != nil {
 		return nil, nil, fmt.Errorf("query sessions: %w", err)
 	}
@@ -642,6 +642,20 @@ func LoadActivity(window time.Duration) (*ActivityView, error) {
 	return av, nil
 }
 
+// notClaudeSubagent is the WHERE term that keeps Claude subagent sessions out
+// of a read treating each session as one someone started: the knowledge
+// trigger, which would spend an extraction on every dispatch; the activity
+// counts, where one /work run would read as five sessions; and the synthesis
+// spans. The parent's transcript, subagents rows and friction already carry
+// each dispatch. A database predating those rows holds none, and may lack the
+// column the term reads.
+func notClaudeSubagent(db *sql.DB) string {
+	if schemaVersionOf(db) < subagentSessionSchemaVersion {
+		return "1"
+	}
+	return "NOT (agent = 'claude-code' AND parent_session_id IS NOT NULL)"
+}
+
 func schemaVersionOf(db *sql.DB) int {
 	var v sql.NullString
 	if err := db.QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
@@ -662,7 +676,7 @@ func loadActivitySessions(db *sql.DB, av *ActivityView, cutoff string) error {
 		SELECT agent, git_remote, cwd_raw, cwd, project, start_time,
 		       turn_count, tool_call_count, error_count
 		FROM sessions
-		WHERE start_time IS NOT NULL AND start_time >= ?
+		WHERE start_time IS NOT NULL AND start_time >= ? AND `+notClaudeSubagent(db)+`
 		ORDER BY start_time DESC
 	`, cutoff)
 	if err != nil {

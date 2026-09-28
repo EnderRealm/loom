@@ -61,7 +61,7 @@ Key fields:
 - `message.model` — e.g. `claude-opus-4-6`
 - `message.content[]` — any subset of `{text, thinking, tool_use}`
 - `message.stop_reason` — `end_turn`, `tool_use`, `stop_sequence`, or `null` (partial / interrupted / still streaming)
-- `message.usage` — token counts
+- `message.usage` — token counts. Claude Code writes one record per content block, each repeating its message's usage, so the parser counts usage once per `message.id`, the last record's figures standing
 - `requestId` — API request correlation ID
 
 ---

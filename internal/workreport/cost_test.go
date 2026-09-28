@@ -592,8 +592,8 @@ func TestCostReportRefusesAPrePricingSchema(t *testing.T) {
 	db.Close()
 
 	_, err = LoadCost(f.path, time.Time{}, time.Time{})
-	if err == nil || !strings.Contains(err.Error(), "want 11") {
-		t.Fatalf("LoadCost on a v5 DB = %v, want an error naming schema 11", err)
+	if err == nil || !strings.Contains(err.Error(), "want 12") {
+		t.Fatalf("LoadCost on a v5 DB = %v, want an error naming schema 12", err)
 	}
 	_, err = Load(f.path, time.Time{}, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "want 9") {
@@ -1052,5 +1052,50 @@ func TestCursorOccupancyOnlySessionIsUnpriced(t *testing.T) {
 		if !strings.Contains(string(out), field) {
 			t.Fatalf("json %s lacks %s", out, field)
 		}
+	}
+}
+
+// A Claude subagent's own session holds the same tokens as its dispatch's
+// subagents row. It is never a run of its own, even when its prompt reads as
+// an invocation, so cost-report counts those tokens once, through the parent.
+func TestSubagentSessionIsNotARunOfItsOwn(t *testing.T) {
+	f := newFixture(t)
+	f.add(costSession())
+	f.add(&summary.SessionSummary{
+		SessionID:        "agent-a0123",
+		Agent:            summary.AgentClaude,
+		ParentSessionID:  "cost",
+		ParentToolCallID: "toolu_contract",
+		SpawnDepth:       1,
+		StartTime:        base.Add(time.Minute),
+		EndTime:          base.Add(2 * time.Minute),
+		Turns: []summary.Turn{{
+			Idx: 0, UserMessage: workInvocation("loom/nested-2222"), AssistantText: "reviewed",
+			StartedAt: base.Add(time.Minute), EndedAt: base.Add(2 * time.Minute),
+			InputTokens: 5000, OutputTokens: 500,
+		}},
+	})
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.SessionID != "cost" || run.InputTokens != 300 || run.OutputTokens != 130 {
+		t.Errorf("run = %s %d/%d, want the parent's alone at 300/130", run.SessionID, run.InputTokens, run.OutputTokens)
+	}
+}
+
+// A v11 database counts Claude usage once per content-block record; pricing
+// it would report inflated costs, so it is refused like a pre-pricing one.
+func TestCostReportRefusesAPerRecordUsageSchema(t *testing.T) {
+	f := newFixture(t)
+	f.add(costSession())
+	db, err := sql.Open("sqlite", "file:"+f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_meta SET value = '11' WHERE key = 'schema_version'`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := LoadCost(f.path, time.Time{}, time.Time{}); err == nil || !strings.Contains(err.Error(), "want 12") {
+		t.Fatalf("LoadCost on a v11 DB = %v, want an error naming schema 12", err)
 	}
 }

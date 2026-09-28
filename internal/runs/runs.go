@@ -5,12 +5,13 @@
 //
 // Two origins feed it. A run declared through execution records
 // (docs/execution-records.md) is built from the runs and executions tables
-// and every edge in it was written by a producer. A run nobody instrumented
-// is recognized from its transcript by internal/workreport, and its children
-// come only from explicit evidence in the transcripts themselves: the
-// parent's own subagent rows, and Codex sessions whose session_meta names
-// the parent thread. Nothing is joined by project or by time alone; an
-// association the evidence cannot settle stays in Unresolved.
+// and every edge in it was written by a producer, save its root transcript's
+// subagents rows: native Claude dispatches write no records. A run nobody
+// instrumented is recognized from its transcript by internal/workreport, and
+// its children come only from explicit evidence in the transcripts
+// themselves: the parent's own subagent rows, and Codex sessions whose
+// session_meta names the parent thread. Nothing is joined by project or by
+// time alone; an association the evidence cannot settle stays in Unresolved.
 //
 // A recorded run that names no transcript — the Codex render cannot reach
 // its own session id from a shell — is joined to the /work invocation naming
@@ -382,6 +383,11 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 	if run.Root != nil && run.Root.Transcript != nil {
 		if metering, matched := SpanningInvocation(invocations, run.Root.Transcript.Agent, run.Root.Transcript.SessionID, parseTime(row.startedAt)); matched {
 			run.Invocation = &metering
+			// A Claude run's native Agent dispatches write no records; their
+			// subagents rows are the only evidence they ran under this root.
+			if err := attachSubagentRows(db, run, metering, nodes); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if run.Root != nil && run.Root.Transcript != nil {
@@ -714,7 +720,7 @@ func loadHistorical(db *sql.DB, invocations []workreport.Invocation, since, unti
 			Origin:           OriginTranscript,
 			Root:             root,
 		}
-		if err := attachSubagentRows(db, &run, inv); err != nil {
+		if err := attachSubagentRows(db, &run, inv, nil); err != nil {
 			return nil, err
 		}
 		if err := attachCodexChildren(db, &run, inv, perSession[ref]); err != nil {
@@ -764,11 +770,14 @@ func invocationKey(inv workreport.Invocation) string {
 }
 
 // attachSubagentRows adds one child per subagents row whose dispatching turn
-// falls inside the run's span. The table keeps neither the dispatch's tool
-// id nor its transcript's session id, so the node carries only its seq.
-func attachSubagentRows(db *sql.DB, run *Run, inv workreport.Invocation) error {
+// falls inside the invocation's span, skipping a dispatch a recorded node
+// already declares by its dispatch id or its transcript. The node is
+// identified by its row's seq and names the dispatch's own session as its
+// transcript — none when no transcript was folded — with the dispatching
+// tool_use id and the transcript's span.
+func attachSubagentRows(db *sql.DB, run *Run, inv workreport.Invocation, recorded []*Node) error {
 	rows, err := db.Query(`
-		SELECT seq FROM subagents
+		SELECT seq, tool_use_id, started_at, ended_at, child_session_id FROM subagents
 		WHERE agent = ? AND session_id = ? AND parent_turn_idx BETWEEN ? AND ?
 		ORDER BY seq`, inv.Agent, inv.SessionID, inv.TurnIdx, inv.EndIdx)
 	if err != nil {
@@ -776,23 +785,53 @@ func attachSubagentRows(db *sql.DB, run *Run, inv workreport.Invocation) error {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var seq int
-		if err := rows.Scan(&seq); err != nil {
+		var (
+			seq                                 int
+			dispatch, startedAt, endedAt, child sql.NullString
+		)
+		if err := rows.Scan(&seq, &dispatch, &startedAt, &endedAt, &child); err != nil {
 			return err
+		}
+		var transcript *TranscriptRef
+		if child.String != "" {
+			transcript = &TranscriptRef{Agent: inv.Agent, SessionID: child.String}
+		}
+		if declares(recorded, dispatch.String, transcript) {
+			continue
 		}
 		run.Root.Children = append(run.Root.Children, &Node{
 			ExecutionID:       fmt.Sprintf("%s:subagent:%d", run.RunID, seq),
 			RunID:             run.RunID,
 			ParentExecutionID: run.Root.ExecutionID,
 			Kind:              KindSubagent,
+			Transcript:        transcript,
+			DispatchID:        dispatch.String,
+			StartedAt:         startedAt.String,
+			EndedAt:           endedAt.String,
 		})
 	}
 	return rows.Err()
 }
 
+// declares reports whether a recorded node already stands for a dispatch:
+// the same dispatch id, or the same transcript.
+func declares(recorded []*Node, dispatchID string, transcript *TranscriptRef) bool {
+	for _, n := range recorded {
+		if dispatchID != "" && n.DispatchID == dispatchID {
+			return true
+		}
+		if transcript != nil && n.Transcript != nil && *n.Transcript == *transcript {
+			return true
+		}
+	}
+	return false
+}
+
 // attachCodexChildren adds sessions whose metadata names a parent thread.
 // Cursor also supplies dispatch identities, so each edge can be resolved
-// against its immediate parent and descendants followed transitively.
+// against its immediate parent and descendants followed transitively. A
+// Claude subagent's session names its parent too, but attachSubagentRows
+// already places it from the dispatching row, so it is not added again.
 func attachCodexChildren(db *sql.DB, run *Run, inv workreport.Invocation, runsInSession int) error {
 	dispatchColumn := "NULL"
 	if workreport.SchemaVersionOf(db) >= 11 {
@@ -837,7 +876,7 @@ func attachChildSessions(db *sql.DB, run *Run, inv workreport.Invocation, runsIn
 		rows, err := db.Query(`
 		SELECT agent, session_id, start_time, end_time, `+dispatchColumn+` FROM sessions
 		WHERE parent_session_id = ? AND (start_time IS NOT NULL OR agent = 'cursor-cli')
-		AND (agent <> 'cursor-cli' OR ? = 'cursor-cli')
+		AND (agent <> 'cursor-cli' OR ? = 'cursor-cli') AND agent <> 'claude-code'
 		ORDER BY start_time, session_id`, parent.Transcript.SessionID, parent.Transcript.Agent)
 		if err != nil {
 			return fmt.Errorf("query child sessions: %w", err)

@@ -228,8 +228,10 @@ func TestControlledPipeline(t *testing.T) {
 	if claude == nil || claude.Input != 100 || claude.Output != 50 || claude.CacheRead != 300 || claude.CacheWrite != 40 {
 		t.Fatalf("parent claude tokens = %+v, want the recorded usage", claude)
 	}
-	if rep.Metrics.Total.TotalTokens != claude.Total || rep.Metrics.Descendants.TotalTokens != 0 {
-		t.Errorf("total tokens %d, descendants %d; want the root's %d and 0: the pending lens has no usage", rep.Metrics.Total.TotalTokens, rep.Metrics.Descendants.TotalTokens, claude.Total)
+	// The subagent's transcript is folded as its own session, so the record
+	// naming it is metered from it; the pending lens has no usage.
+	if rep.Metrics.Total.TotalTokens != claude.Total+15 || rep.Metrics.Descendants.TotalTokens != 15 {
+		t.Errorf("total tokens %d, descendants %d; want the root's %d plus the subagent's 15, and 15", rep.Metrics.Total.TotalTokens, rep.Metrics.Descendants.TotalTokens, claude.Total)
 	}
 	// The routed lens's rollout was folded: the lens is metered from its
 	// own transcript rather than named as a gap.

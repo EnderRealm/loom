@@ -465,3 +465,97 @@ func TestSessionWithoutSubagentsDirIsUnchanged(t *testing.T) {
 		t.Errorf("turns=%d tools=%d, want 1 and 1", turns, tools)
 	}
 }
+
+// TestSubagentRowCarriesDispatchAndSpan pins the columns a run report places
+// a dispatch by: its tool_use id, and its transcript's first and last
+// timestamps — ended_at NULL where one record leaves no span.
+func TestSubagentRowCarriesDispatchAndSpan(t *testing.T) {
+	st := summarizeTree(t, buildReceivedTree(t))
+	rows, err := st.DB().Query(`
+		SELECT agent_type, tool_use_id, started_at, ended_at
+		FROM subagents WHERE session_id = 'sess-parent' AND agent_type IN ('reviewer', 'security')
+		ORDER BY seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string][3]sql.NullString{}
+	for rows.Next() {
+		var agentType string
+		var cols [3]sql.NullString
+		if err := rows.Scan(&agentType, &cols[0], &cols[1], &cols[2]); err != nil {
+			t.Fatal(err)
+		}
+		got[agentType] = cols
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	reviewer := got["reviewer"]
+	if reviewer[0].String != "toolu_A" || reviewer[1].String != "2026-09-01T10:01:01.5Z" || reviewer[2].String != "2026-09-01T10:05:01.5Z" {
+		t.Errorf("reviewer row: got %v, want toolu_A 10:01:01.5→10:05:01.5", reviewer)
+	}
+	security := got["security"]
+	if security[0].String != "toolu_B" || security[1].String != "2026-09-01T10:01:02Z" || security[2].Valid {
+		t.Errorf("security row: got %v, want toolu_B from 10:01:02 with ended_at NULL", security)
+	}
+}
+
+// TestSubagentTranscriptIsItsOwnSession pins that a dispatched transcript is
+// folded as a session of its own — named by its file's stem, with that file's
+// source path and size, and linked both ways to the dispatch — while its
+// drift stays on the parent alone, and the walk still files it only once.
+func TestSubagentTranscriptIsItsOwnSession(t *testing.T) {
+	received := buildReceivedTree(t)
+	st := summarizeTree(t, received)
+	path := filepath.Join(received, "claude-code", "loom", "sess-parent", "subagents", "agent-aaa.jsonl")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		sourcePath, parent, dispatch string
+		size, depth, turns, turnRows int64
+	)
+	if err := st.DB().QueryRow(`
+		SELECT source_path, source_size, parent_session_id, spawn_depth, parent_tool_call_id, turn_count,
+		       (SELECT COUNT(*) FROM turns WHERE agent = 'claude-code' AND session_id = 'agent-aaa')
+		FROM sessions WHERE agent = 'claude-code' AND session_id = 'agent-aaa'`).
+		Scan(&sourcePath, &size, &parent, &depth, &dispatch, &turns, &turnRows); err != nil {
+		t.Fatalf("agent-aaa session row: %v", err)
+	}
+	if sourcePath != path || size != info.Size() || parent != "sess-parent" || depth != 1 || dispatch != "toolu_A" || turns == 0 || turnRows != turns {
+		t.Errorf("agent-aaa session = %s size %d parent %s depth %d dispatch %s turns %d/%d, want its own file, sess-parent, 1, toolu_A",
+			sourcePath, size, parent, depth, dispatch, turns, turnRows)
+	}
+	var child sql.NullString
+	if err := st.DB().QueryRow(`
+		SELECT child_session_id FROM subagents WHERE session_id = 'sess-parent' AND agent_type = 'reviewer'`).Scan(&child); err != nil {
+		t.Fatal(err)
+	}
+	if child.String != "agent-aaa" {
+		t.Errorf("reviewer child_session_id = %v, want agent-aaa", child)
+	}
+
+	// The drifted transcript's unknown record is the parent's to report.
+	var parentUnknown, childUnknown int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM unknown_records WHERE session_id = 'sess-drift'`).Scan(&parentUnknown); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM unknown_records WHERE session_id = 'agent-fff'`).Scan(&childUnknown); err != nil {
+		t.Fatal(err)
+	}
+	if parentUnknown == 0 || childUnknown != 0 {
+		t.Errorf("unknown records: parent %d child %d, want them on the parent alone", parentUnknown, childUnknown)
+	}
+
+	// Five parents plus one session per shipped transcript, none twice.
+	var sessions, distinct int
+	if err := st.DB().QueryRow(`SELECT COUNT(*), COUNT(DISTINCT session_id) FROM sessions`).Scan(&sessions, &distinct); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 11 || distinct != 11 {
+		t.Errorf("sessions = %d (%d distinct), want 11: five parents and six transcripts", sessions, distinct)
+	}
+}

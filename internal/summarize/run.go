@@ -284,6 +284,21 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 	if sum.SessionID == "" {
 		sum.SessionID = sessionID
 	}
+	// Children first: the parent's row is the currency marker the next sweep
+	// checks, so a write cut short here re-folds the whole family.
+	for _, sa := range sum.Subagents {
+		if sa.Session == nil {
+			continue
+		}
+		sa.Session.ParentSessionID = sum.SessionID
+		child, err := subagentSource(source, sa.SessionID)
+		if err != nil {
+			return err
+		}
+		if err := st.WriteSummary(ctx, sa.Session, child); err != nil {
+			return err
+		}
+	}
 	if err := st.WriteSummary(ctx, sum, source); err != nil {
 		return err
 	}
@@ -332,6 +347,33 @@ func subagentDir(sessionPath string) string {
 	return filepath.Join(strings.TrimSuffix(sessionPath, ".jsonl"), "subagents")
 }
 
+// subagentSource is the provenance of one subagent transcript folded as its
+// own session: its own file's path, size and mtime, so a reader comparing
+// source_size against the file gets the same answer as for any session, and
+// its own identity sidecar where the receiver wrote one, else the parent's.
+func subagentSource(parent summaries.SourceInfo, sessionID string) (summaries.SourceInfo, error) {
+	path := filepath.Join(subagentDir(parent.Path), sessionID+".jsonl")
+	info, err := os.Stat(path)
+	if err != nil {
+		return summaries.SourceInfo{}, err
+	}
+	cwdRaw, gitRemote := readMetaSidecar(path)
+	if cwdRaw == "" {
+		cwdRaw = parent.CwdRaw
+	}
+	if gitRemote == "" {
+		gitRemote = parent.GitRemote
+	}
+	return summaries.SourceInfo{
+		Project:   parent.Project,
+		Path:      path,
+		Size:      info.Size(),
+		Mtime:     info.ModTime(),
+		CwdRaw:    cwdRaw,
+		GitRemote: gitRemote,
+	}, nil
+}
+
 // collectSubagents lists the subagent transcripts one Claude session
 // dispatched, each paired with the dispatch metadata written beside it.
 // Everything here is best-effort: a missing directory or an unreadable
@@ -356,6 +398,7 @@ func collectSubagents(sessionPath string) []claudeparse.SubagentInput {
 		}
 		path := filepath.Join(dir, e.Name())
 		in := readSubagentSidecar(path)
+		in.SessionID = strings.TrimSuffix(e.Name(), ".jsonl")
 		in.Open = openTranscript(path)
 		inputs = append(inputs, in)
 	}

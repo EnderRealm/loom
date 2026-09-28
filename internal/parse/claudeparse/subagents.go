@@ -10,10 +10,13 @@ import (
 
 // SubagentInput is one subagent transcript plus the dispatch metadata
 // recorded beside it. Open is called once, when the transcript is folded, so
-// a parent that dispatched dozens holds one file open at a time.
+// a parent that dispatched dozens holds one file open at a time. SessionID
+// names the transcript as a session of its own; empty folds it into the row
+// alone.
 type SubagentInput struct {
 	AgentType string
 	ToolUseID string
+	SessionID string
 	Open      func() (io.ReadCloser, error)
 }
 
@@ -62,9 +65,11 @@ func foldSubagents(st *state, subs []SubagentInput) {
 		// nil duration — unmeasured, which is the honest answer.
 		if sub := parseSubagent(st, in); sub != nil {
 			f.start = sub.s.StartTime
+			f.sa.StartedAt = sub.s.StartTime
 			if sub.stamps >= 2 {
 				ms := sub.s.EndTime.Sub(sub.s.StartTime).Milliseconds()
 				f.sa.DurationMs = &ms
+				f.sa.EndedAt = sub.s.EndTime
 			}
 			f.sa.Prompt = truncate(firstUserMessage(sub.s), resultTextLimit)
 			f.sa.ResultSummary = truncate(sub.lastAssistantText, resultTextLimit)
@@ -82,6 +87,19 @@ func foldSubagents(st *state, subs []SubagentInput) {
 				fe.TurnIdx = f.sa.ParentTurnIdx
 				fe.AgentType = in.AgentType
 				st.s.Friction = append(st.s.Friction, fe)
+			}
+			// The transcript is also a session of its own, so a run can meter
+			// it turn by turn. Its drift and friction stay the parent's alone:
+			// written twice they would be counted twice. The caller names the
+			// parent, whose id is settled only after the parse.
+			if in.SessionID != "" {
+				sub.s.SessionID = in.SessionID
+				sub.s.ParentToolCallID = in.ToolUseID
+				sub.s.SpawnDepth = 1
+				sub.s.Unknown = nil
+				sub.s.Friction = nil
+				f.sa.SessionID = in.SessionID
+				f.sa.Session = sub.s
 			}
 		}
 		out = append(out, f)

@@ -168,3 +168,70 @@ func TestSubagentPayloadDriftFoldsIntoTheParent(t *testing.T) {
 		t.Errorf("Unknown FirstSeen: got %s, want %s", u.FirstSeen, wantSeen)
 	}
 }
+
+// splitMessageSession is one turn whose first message Claude Code wrote as two
+// records — a thinking block, then the Task call — each carrying the
+// message's usage, the first with the partial output count of a streamed
+// chunk; a second message follows as one record.
+const splitMessageSession = `{"type":"user","uuid":"u1","sessionId":"sess","promptId":"p1","timestamp":"2026-09-01T10:00:00.000Z","message":{"role":"user","content":"code it"}}
+{"type":"assistant","uuid":"a1","sessionId":"sess","timestamp":"2026-09-01T10:00:01.000Z","message":{"id":"msg_1","role":"assistant","model":"claude-opus-5","content":[{"type":"thinking","thinking":"plan"}],"usage":{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":200}}}}
+{"type":"assistant","uuid":"a2","sessionId":"sess","timestamp":"2026-09-01T10:00:02.000Z","message":{"id":"msg_1","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_A","name":"Agent","input":{"description":"Implement","subagent_type":"coder","prompt":"code it"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":40,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":200}}}}
+{"type":"assistant","uuid":"a3","sessionId":"sess","timestamp":"2026-09-01T10:05:00.000Z","message":{"id":"msg_2","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":5,"cache_read_input_tokens":1200,"cache_creation_input_tokens":0}}}
+`
+
+// splitMessageSidechain is toolu_A's transcript: one message written as two
+// text records repeating the same usage.
+const splitMessageSidechain = `{"type":"user","uuid":"s1","sessionId":"sess","isSidechain":true,"promptId":"sp1","timestamp":"2026-09-01T10:00:03.000Z","message":{"role":"user","content":"code it"}}
+{"type":"assistant","uuid":"s2","sessionId":"sess","isSidechain":true,"timestamp":"2026-09-01T10:01:00.000Z","message":{"id":"msg_s1","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"editing"}],"usage":{"input_tokens":7,"output_tokens":70,"cache_read_input_tokens":5000,"cache_creation_input_tokens":300}}}
+{"type":"assistant","uuid":"s3","sessionId":"sess","isSidechain":true,"timestamp":"2026-09-01T10:04:00.000Z","message":{"id":"msg_s1","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":70,"cache_read_input_tokens":5000,"cache_creation_input_tokens":300}}}
+`
+
+// TestUsageCountsOncePerMessage pins that records repeating one message.id's
+// usage count it once, the last record's figures standing, on the parent's
+// turns, totals and token counts and on a subagent's usage alike — and that
+// the subagent row carries its dispatch id and its transcript's span.
+func TestUsageCountsOncePerMessage(t *testing.T) {
+	s, err := ParseWithSubagents(strings.NewReader(splitMessageSession), []SubagentInput{
+		{AgentType: "coder", ToolUseID: "toolu_A", SessionID: "agent-a1", Open: openString(splitMessageSidechain)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Turns) != 1 {
+		t.Fatalf("Turns len: got %d, want 1", len(s.Turns))
+	}
+	turn := s.Turns[0]
+	if turn.InputTokens != 11 || turn.OutputTokens != 45 || turn.CacheReadTokens != 2200 ||
+		turn.CacheCreationTokens != 200 || turn.CacheCreation1hTokens != 200 {
+		t.Errorf("turn tokens: got in %d out %d read %d write %d (1h %d), want 11/45/2200/200 (1h 200)",
+			turn.InputTokens, turn.OutputTokens, turn.CacheReadTokens, turn.CacheCreationTokens, turn.CacheCreation1hTokens)
+	}
+	if s.InputTokens != 11 || s.OutputTokens != 45 || s.CacheReadTokens != 2200 {
+		t.Errorf("session tokens: got %d/%d/%d, want 11/45/2200", s.InputTokens, s.OutputTokens, s.CacheReadTokens)
+	}
+	if len(s.TokenCounts) != 2 || s.TokenCounts[0].Output != 40 || s.TokenCounts[1].Output != 5 {
+		t.Errorf("TokenCounts: got %+v, want one per message, msg_1 at its last record's 40 output", s.TokenCounts)
+	}
+
+	if len(s.Subagents) != 1 {
+		t.Fatalf("Subagents len: got %d, want 1", len(s.Subagents))
+	}
+	sa := s.Subagents[0]
+	if u := sa.Usage; u == nil || u.InputTokens != 7 || u.OutputTokens != 70 || u.CacheReadTokens != 5000 || u.CacheCreationTokens != 300 {
+		t.Errorf("subagent Usage: got %+v, want 7/70/5000/300 counted once", u)
+	}
+	wantStart := time.Date(2026, 9, 1, 10, 0, 3, 0, time.UTC)
+	wantEnd := time.Date(2026, 9, 1, 10, 4, 0, 0, time.UTC)
+	if sa.ToolUseID != "toolu_A" || !sa.StartedAt.Equal(wantStart) || !sa.EndedAt.Equal(wantEnd) {
+		t.Errorf("subagent dispatch: got %q %s→%s, want toolu_A %s→%s", sa.ToolUseID, sa.StartedAt, sa.EndedAt, wantStart, wantEnd)
+	}
+	// The transcript is also its own session, carrying the same per-message
+	// usage on its turns.
+	child := sa.Session
+	if sa.SessionID != "agent-a1" || child == nil || child.SessionID != "agent-a1" || child.ParentToolCallID != "toolu_A" || child.SpawnDepth != 1 {
+		t.Fatalf("subagent session: got id %q %+v, want agent-a1 dispatched by toolu_A", sa.SessionID, child)
+	}
+	if len(child.Turns) != 1 || child.Turns[0].OutputTokens != 70 || child.Turns[0].CacheReadTokens != 5000 {
+		t.Errorf("subagent session turns: got %+v, want one turn at 70 output, 5000 read", child.Turns)
+	}
+}

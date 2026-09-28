@@ -13,11 +13,13 @@ import (
 	"loom/internal/pricing"
 )
 
-// costSchemaVersion is the summaries.db schema that added the pricing columns:
-// per-turn cache-creation tokens and speed, and each subagent's own usage
-// (schema 7; see the schemaVersion doc comment in internal/summaries/schema.go).
-// A database without them cannot price a run, so it cannot answer this report.
-const costSchemaVersion = 11
+// costSchemaVersion is the summaries.db schema this report prices from. The
+// pricing columns — per-turn cache-creation tokens and speed, and each
+// subagent's own usage — arrived in schema 7; schema 12 counts Claude usage
+// once per message rather than once per content-block record, so an older
+// database holds inflated token counts (see the schemaVersion doc comment in
+// internal/summaries/schema.go). Either way it cannot price a run.
+const costSchemaVersion = 12
 
 // fastSpeed is the usage.speed value Claude records for fast-mode requests,
 // which are priced at the model's fast rates.
@@ -128,7 +130,7 @@ func LoadCost(dbPath string, since, until time.Time) (*CostReport, error) {
 	defer db.Close()
 
 	if v := SchemaVersionOf(db); v < costSchemaVersion {
-		return nil, fmt.Errorf("summaries.db is at schema %d and predates the pricing columns (want %d) — run `loom summarize --rebuild`", v, costSchemaVersion)
+		return nil, fmt.Errorf("summaries.db is at schema %d and predates the pricing columns or per-message usage (want %d) — run `loom summarize --rebuild`", v, costSchemaVersion)
 	}
 
 	table, err := pricing.Default()

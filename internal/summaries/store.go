@@ -503,8 +503,9 @@ func writeSubagents(ctx context.Context, tx *sql.Tx,
 		INSERT INTO subagents (agent, session_id, seq, parent_turn_idx,
 		    agent_type, prompt, result_summary, duration_ms, error_count,
 		    model, speed, input_tokens, output_tokens, cache_read_tokens,
-		    cache_creation_tokens, cache_creation_1h_tokens, usage_mixed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		    cache_creation_tokens, cache_creation_1h_tokens, usage_mixed,
+		    tool_use_id, started_at, ended_at, child_session_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -531,6 +532,8 @@ func writeSubagents(ctx context.Context, tx *sql.Tx,
 			agent, sum.SessionID, i, sa.ParentTurnIdx, sa.AgentType,
 			sa.Prompt, sa.ResultSummary, dur, sa.ErrorCount,
 			model, speed, input, output, cacheRead, cacheCreation, cacheCreation1h, mixed,
+			strOrNull(sa.ToolUseID), isoOrNull(sa.StartedAt), isoOrNull(sa.EndedAt),
+			strOrNull(sa.SessionID),
 		); err != nil {
 			return err
 		}

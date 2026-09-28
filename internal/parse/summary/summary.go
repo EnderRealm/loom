@@ -41,10 +41,11 @@ type SessionSummary struct {
 
 	// ParentSessionID names the session that spawned this one, when the
 	// transcript itself says so: Codex records it in
-	// session_meta.source.subagent.thread_spawn. Empty for a top-level
-	// session and for every Claude session, whose subagents are folded into
-	// the parent's Subagents instead. SpawnDepth is the depth the same record
-	// carries and is meaningful only when ParentSessionID is set.
+	// session_meta.source.subagent.thread_spawn. A Claude subagent
+	// transcript's session names the session that dispatched it, and
+	// ParentToolCallID the dispatching tool_use. Empty for a top-level
+	// session. SpawnDepth is the depth the same record carries and is
+	// meaningful only when ParentSessionID is set.
 	ParentSessionID  string
 	ParentToolCallID string
 	SpawnDepth       int
@@ -228,9 +229,20 @@ type Subagent struct {
 	// parse, so "not measured" stays distinct from zero — the same reasoning
 	// as DurationMs.
 	Usage *SubagentUsage
-	// ToolUseID is the dispatching tool_use id. Carried in-process for the
-	// parent-turn join and for debugging; not persisted.
+	// ToolUseID is the dispatching tool_use id: the parent-turn join, and
+	// the dispatch a run report names the execution by.
 	ToolUseID string
+	// StartedAt and EndedAt are the first and last timestamps of the
+	// dispatch's own transcript. Zero with no transcript; EndedAt is zero
+	// too whenever DurationMs is nil, since the span was not observed.
+	StartedAt time.Time
+	EndedAt   time.Time
+	// SessionID is the dispatch's own session, the transcript file's stem
+	// (agent-<agentId>); empty when no transcript was folded as one. Session
+	// is that transcript's summary, written as its own sessions row beside
+	// the parent's; carried in-process only.
+	SessionID string
+	Session   *SessionSummary
 }
 
 // Origin values of a LensResponse: where in the transcript the block landed.

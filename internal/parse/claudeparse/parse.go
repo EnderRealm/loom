@@ -118,6 +118,13 @@ type state struct {
 	// handbacks holds the hand-backs already read, by agent and report.
 	handbacks map[string]bool
 
+	// messageUsage is the usage already applied for each assistant
+	// message.id. Claude Code writes one record per content block, each
+	// repeating its message's usage, so a message is counted once: a later
+	// record replaces the earlier one's contribution, since a streamed
+	// chunk can carry a partial output count.
+	messageUsage map[string]appliedUsage
+
 	// sidechain lifts the isSidechain guards: the stream *is* a subagent
 	// transcript, so its turns, tools and errors are this parse's subject.
 	sidechain bool
@@ -140,6 +147,14 @@ type state struct {
 	unknown map[string]*summary.UnknownRecord
 }
 
+// appliedUsage is one message's contribution: the turn it was added to, the
+// usage added, and its TokenCounts entry.
+type appliedUsage struct {
+	turnIdx    int
+	usage      assistantUsage
+	tokenCount int
+}
+
 type progressAccum struct {
 	first time.Time
 	last  time.Time
@@ -156,6 +171,7 @@ func newState(s *summary.SessionSummary) *state {
 		taskAgentType:     map[string]string{},
 		launchedAgents:    map[string]string{},
 		handbacks:         map[string]bool{},
+		messageUsage:      map[string]appliedUsage{},
 		unknown:           map[string]*summary.UnknownRecord{},
 		currentTurnIdx:    -1,
 	}
@@ -443,34 +459,54 @@ func (st *state) handleAssistant(line []byte) error {
 	}
 
 	if rec.Message.Usage != nil {
-		u := rec.Message.Usage
-		t.InputTokens += u.InputTokens
-		t.OutputTokens += u.OutputTokens
-		t.CacheReadTokens += u.CacheReadInputTokens
-		t.CacheCreationTokens += u.CacheCreationInputTokens
-		// The 1h-TTL share of a cache write is tracked on its own because it
-		// is priced 1.6× the 5m write; whatever the record left unlabelled
-		// stays in the 5m remainder.
-		if u.CacheCreation != nil {
-			t.CacheCreation1hTokens += u.CacheCreation.Ephemeral1h
-		}
+		u := *rec.Message.Usage
 		if t.Speed == "" {
 			t.Speed = u.Speed
 		} else if u.Speed != "" && u.Speed != t.Speed {
 			t.Mixed = true
 		}
-		st.s.InputTokens += u.InputTokens
-		st.s.OutputTokens += u.OutputTokens
-		st.s.CacheReadTokens += u.CacheReadInputTokens
-		st.s.TokenCounts = append(st.s.TokenCounts, summary.TokenCount{
+		tc := summary.TokenCount{
 			TurnIdx: turnIdx,
 			Time:    ts,
 			Input:   u.InputTokens,
 			Output:  u.OutputTokens,
 			Cached:  u.CacheReadInputTokens,
-		})
+		}
+		id := rec.Message.ID
+		if prior, ok := st.messageUsage[id]; ok {
+			st.applyUsage(prior.turnIdx, prior.usage, -1)
+			st.s.TokenCounts[prior.tokenCount] = tc
+			st.messageUsage[id] = appliedUsage{turnIdx: turnIdx, usage: u, tokenCount: prior.tokenCount}
+		} else {
+			st.s.TokenCounts = append(st.s.TokenCounts, tc)
+			// A record with no message id has nothing to match a repeat by,
+			// so it counts on its own.
+			if id != "" {
+				st.messageUsage[id] = appliedUsage{turnIdx: turnIdx, usage: u, tokenCount: len(st.s.TokenCounts) - 1}
+			}
+		}
+		st.applyUsage(turnIdx, u, 1)
 	}
 	return nil
+}
+
+// applyUsage adds (sign 1) or withdraws (sign -1) one record's usage on its
+// turn and on the session totals.
+func (st *state) applyUsage(turnIdx int, u assistantUsage, sign int64) {
+	t := &st.s.Turns[turnIdx]
+	t.InputTokens += sign * u.InputTokens
+	t.OutputTokens += sign * u.OutputTokens
+	t.CacheReadTokens += sign * u.CacheReadInputTokens
+	t.CacheCreationTokens += sign * u.CacheCreationInputTokens
+	// The 1h-TTL share of a cache write is tracked on its own because it
+	// is priced 1.6× the 5m write; whatever the record left unlabelled
+	// stays in the 5m remainder.
+	if u.CacheCreation != nil {
+		t.CacheCreation1hTokens += sign * u.CacheCreation.Ephemeral1h
+	}
+	st.s.InputTokens += sign * u.InputTokens
+	st.s.OutputTokens += sign * u.OutputTokens
+	st.s.CacheReadTokens += sign * u.CacheReadInputTokens
 }
 
 func (st *state) handleSystem(line []byte) error {

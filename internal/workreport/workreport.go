@@ -332,15 +332,24 @@ type sessionData struct {
 // the parser, which anchors on the start of the message. Deliberately loose —
 // SQLite's TRIM strips spaces only, so a prefilter that anchored would drop an
 // invocation behind a newline or a system-reminder block the parser handles.
+//
+// A Claude subagent's session (schema 12) is never a run of its own: its
+// tokens are already its parent's through the dispatch's subagents row, and a
+// prompt that read as an invocation would price them a second time.
 func loadInvocations(db *sql.DB) ([]invocationRow, error) {
+	subagents := ""
+	if SchemaVersionOf(db) >= 12 {
+		subagents = "AND NOT (t.agent = 'claude-code' AND s.parent_session_id IS NOT NULL)"
+	}
 	rows, err := db.Query(`
 		SELECT t.agent, t.session_id, t.idx, t.user_message, t.started_at, s.start_time, s.end_time
 		FROM turns t
 		LEFT JOIN sessions s ON s.agent = t.agent AND s.session_id = t.session_id
-		WHERE t.user_message LIKE '%<command-name>/work</command-name>%'
+		WHERE (t.user_message LIKE '%<command-name>/work</command-name>%'
 		   OR t.user_message LIKE '%<name>work</name>%'
 		   OR t.user_message LIKE '%#work%'
-		   OR t.user_message LIKE '%$work%'
+		   OR t.user_message LIKE '%$work%')
+		` + subagents + `
 		ORDER BY t.agent, t.session_id, t.idx
 	`)
 	if err != nil {
