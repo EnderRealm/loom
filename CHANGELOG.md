@@ -6,6 +6,51 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-09-27 — Claude subagents as executions, per-message usage and bug attribution
+
+### Upgrade
+
+- Schema 12: `subagents` gains `tool_use_id`, `started_at` and `ended_at`,
+  and each Claude subagent transcript is folded into its own `sessions`
+  row. `cost-report` and `run-report` refuse an older database; stop the
+  summarizer and run `loom summarize --rebuild` to drop and re-fold from
+  `received/`. Every Claude session's token and cost figures drop to their
+  per-message value on the re-fold.
+
+### Added
+
+- A recorded Claude run attaches one `subagent` execution per Agent
+  dispatch in its invocation, metered from the subagent's own session; a
+  dispatch that started after the run's reporting cutoff is listed but
+  left out of the totals. Readers that treat sessions as top-level exclude
+  the child sessions, so no token is counted twice.
+- `loom escapes` attributes each done bug to the sessions whose commits
+  introduced it (blame of the fix's changed lines at its parent, joined to
+  the commits table), recorded once per bug in `$LOOM_HOME/escapes.jsonl`
+  and reported per agent, model and CLI version with blame-stage precision
+  against an embedded hand-labelled fixture of 30 bugs.
+- `loom synthesis-input --project P --since <window>` classifies a
+  project's tickets as new, done or edited over the window and joins them
+  to sessions through the commits table's `[<id>]` marker.
+- `loom knowledge conflicts`, and the TUI knowledge overlay, surface
+  candidates whose `contradicts:` field names validated artifacts.
+- `claude-opus-5-5` pricing in `internal/pricing/rates.json`.
+
+### Fixed
+
+- Claude usage is counted once per message: Claude Code writes one record
+  per content block, each repeating the message's usage, which roughly
+  doubled every Claude session's tokens.
+- Native lens subagents launched async deliver their verdict as a peer
+  hand-back, now stored as the response to the dispatch that launched
+  them and placed among the turn's tool rows by time, so later review
+  rounds are no longer read as round-1 retries. run-report attempts carry
+  an explicit attribution — execution, transcript or unknown.
+- A `codex-lens.sh` row whose 200-char cut ended inside the lens name
+  takes the any-lens window join instead of joining no execution record.
+- The commits table captures `/work` commits made with `git commit -q`,
+  and reads a `[<id>]` marker at the end of a subject.
+
 ## [1.10.0] — 2026-09-21 — Run reporting bounds, costs and lens joins
 
 ### Upgrade
