@@ -1218,3 +1218,36 @@ func TestRecordedClaudeRunAttachesSubagentRows(t *testing.T) {
 		t.Errorf("historical children = %v unresolved %d, want one per subagents row", childIDs(hist.Root), len(hist.Unresolved))
 	}
 }
+
+// A recorded Codex /work run places guardian and other parent-thread children
+// the same way a transcript-recognized run does: from sessions.parent_session_id.
+func TestRecordedCodexRunAttachesCodexChildren(t *testing.T) {
+	st := openStore(t, filepath.Join(t.TempDir(), "summaries.db"))
+	defer st.Close()
+	const ticket = "loom/codex-guardian-subagent-593c"
+
+	writeSession(t, st, codexRun("codex-parent", ticket, base))
+	writeSession(t, st, codexSession("sess-guardian", "codex-parent", base.Add(2*time.Minute)))
+	path := filepath.Join(t.TempDir(), "executions.jsonl")
+	records := strings.Join([]string{
+		`{"v":1,"kind":"run","run_id":"run-guardian","ticket":"` + ticket + `","runtime":"codex-cli","agent":"codex-cli","session_id":"codex-parent","started_at":"2026-09-10T09:00:30Z","ended_at":"2026-09-10T09:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-guardian","run_id":"run-guardian","execution_kind":"root","agent":"codex-cli","session_id":"codex-parent","started_at":"2026-09-10T09:00:30Z","ended_at":"2026-09-10T09:30:00Z","outcome":"completed"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(records), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importFile(t, st, path)
+
+	run, err := Load(st.DB(), "run-guardian")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(childIDs(run.Root), ","); got != "transcript:codex-cli:sess-guardian" {
+		t.Fatalf("root children = %s, want the guardian session under the root", got)
+	}
+	guardian := child(t, run.Root, "transcript:codex-cli:sess-guardian")
+	if guardian.Kind != KindSubagent || guardian.ParentExecutionID != "root-guardian" {
+		t.Errorf("guardian child = %+v", guardian)
+	}
+	wantTranscript(t, guardian, "codex-cli", "sess-guardian")
+}

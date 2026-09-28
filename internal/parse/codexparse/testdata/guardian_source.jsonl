@@ -1,0 +1,4 @@
+{"timestamp":"2026-09-14T20:55:39.137Z","type":"session_meta","payload":{"id":"sess-guardian","timestamp":"2026-09-14T20:55:30.982Z","cwd":"/tmp/work","cli_version":"0.154.0","parent_thread_id":"sess-parent","source":{"subagent":{"other":"guardian"}},"model_provider":"openai"}}
+{"timestamp":"2026-09-14T20:55:40.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/tmp/work","model":"codex-auto-review"}}
+{"timestamp":"2026-09-14T20:55:41.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"review this action"}]}}
+{"timestamp":"2026-09-14T20:55:42.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"outcome\":\"allow\"}"}]}}

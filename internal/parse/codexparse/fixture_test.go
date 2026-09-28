@@ -162,6 +162,12 @@ func TestSessionMetaSourceShapes(t *testing.T) {
 	if len(top.Unknown) != 0 {
 		t.Errorf("Unknown len: got %d, want 0", len(top.Unknown))
 	}
+
+	guardian := parseFixture(t, "testdata/guardian_source.jsonl")
+	if guardian.ParentSessionID != "sess-parent" || guardian.SpawnDepth != 1 {
+		t.Errorf("guardian spawn: got %q depth %d, want sess-parent depth 1",
+			guardian.ParentSessionID, guardian.SpawnDepth)
+	}
 }
 
 // TestSessionMetaPayloadDriftDegrades pins the regression that motivated the

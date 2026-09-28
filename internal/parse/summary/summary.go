@@ -41,7 +41,8 @@ type SessionSummary struct {
 
 	// ParentSessionID names the session that spawned this one, when the
 	// transcript itself says so: Codex records it in
-	// session_meta.source.subagent.thread_spawn. A Claude subagent
+	// session_meta.source.subagent.thread_spawn or, for guardian review,
+	// session_meta.parent_thread_id. A Claude subagent
 	// transcript's session names the session that dispatched it, and
 	// ParentToolCallID the dispatching tool_use. Empty for a top-level
 	// session. SpawnDepth is the depth the same record carries and is

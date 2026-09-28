@@ -388,6 +388,15 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 			if err := attachSubagentRows(db, run, metering, nodes); err != nil {
 				return nil, err
 			}
+			runsInSession := 0
+			for _, candidate := range invocations {
+				if candidate.Agent == metering.Agent && candidate.SessionID == metering.SessionID {
+					runsInSession++
+				}
+			}
+			if err := attachCodexChildren(db, run, metering, runsInSession); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if run.Root != nil && run.Root.Transcript != nil {

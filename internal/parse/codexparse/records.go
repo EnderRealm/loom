@@ -20,6 +20,10 @@ type sessionMetaPayload struct {
 	Cwd              string `json:"cwd"`
 	Originator       string `json:"originator"`
 	CLIVersion       string `json:"cli_version"`
+	// ParentThreadID names the session that spawned this one when codex-cli
+	// writes it on the payload (guardian review and other subagents that do
+	// not nest the parent under source.subagent.thread_spawn).
+	ParentThreadID   string `json:"parent_thread_id"`
 	// Source is a string for a top-level session but an object describing the
 	// spawn (parent thread, depth, agent path) when codex-cli >= 0.153.4 runs
 	// the session as a subagent. Kept raw because a typed string here
@@ -57,6 +61,24 @@ func parentSpawn(source json.RawMessage) (string, int) {
 		return "", 0
 	}
 	return s.Subagent.ThreadSpawn.ParentThreadID, s.Subagent.ThreadSpawn.Depth
+}
+
+// sessionParent returns the parent session id and spawn depth read from a
+// session_meta payload. thread_spawn under source wins; otherwise the
+// payload-level parent_thread_id is used (guardian sessions). Depth defaults
+// to 1 when a parent is named but the producer omitted depth.
+func sessionParent(p sessionMetaPayload) (string, int) {
+	parent, depth := parentSpawn(p.Source)
+	if parent == "" {
+		parent = p.ParentThreadID
+	}
+	if parent == "" {
+		return "", 0
+	}
+	if depth <= 0 {
+		depth = 1
+	}
+	return parent, depth
 }
 
 // turnContextPayload starts a new model turn. Only the fields we currently
