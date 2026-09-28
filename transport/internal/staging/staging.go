@@ -227,11 +227,15 @@ func listSubagents(agent, project, parentSessionID string) ([]Entry, error) {
 }
 
 // WriteIdentity persists or updates the per-session meta sidecar. Safe
-// to call repeatedly: the file is rewritten atomically via temp+rename.
+// to call repeatedly: a write that would produce the bytes already on disk
+// is skipped; otherwise the file is rewritten atomically via temp+rename.
 // Empty Identity is a no-op so the ship pass doesn't accidentally erase
 // a sidecar written by an earlier capture pass.
 func WriteIdentity(agent, project, parentSessionID, sessionID string, id Identity) error {
 	if id == (Identity{}) {
+		return nil
+	}
+	if cur, err := ReadIdentity(agent, project, parentSessionID, sessionID); err == nil && cur == id {
 		return nil
 	}
 	p := metaPath(agent, project, parentSessionID, sessionID)

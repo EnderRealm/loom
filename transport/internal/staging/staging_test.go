@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"loom/transport/internal/source"
 )
@@ -13,6 +14,42 @@ const (
 	testProject = "-Users-steve-code-loom"
 	testParent  = "195f819e-1e11-4e08-8c16-a340f512f892"
 )
+
+func TestWriteIdentitySkipsUnchanged(t *testing.T) {
+	t.Setenv("LOOM_HOME", t.TempDir())
+	id := Identity{GitRemote: "git@github.com:EnderRealm/loom.git", Cwd: "/Users/steve/code/loom", RootSlug: testProject}
+	if err := WriteIdentity(testAgent, testProject, "", testParent, id); err != nil {
+		t.Fatal(err)
+	}
+	meta := metaPath(testAgent, testProject, "", testParent)
+	info, err := os.Stat(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstMod := info.ModTime()
+	time.Sleep(20 * time.Millisecond)
+	if err := WriteIdentity(testAgent, testProject, "", testParent, id); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(firstMod) {
+		t.Fatalf("unchanged identity rewrote meta: %v -> %v", firstMod, info.ModTime())
+	}
+	if _, err := os.Stat(meta + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("unchanged write left temp sidecar: %v", err)
+	}
+	id.Cwd = "/Users/steve/code/other"
+	if err := WriteIdentity(testAgent, testProject, "", testParent, id); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadIdentity(testAgent, testProject, "", testParent)
+	if err != nil || got != id {
+		t.Fatalf("changed identity = %+v, %v; want %+v", got, err, id)
+	}
+}
 
 // A subagent stages under its parent — mirroring the receiver layout — and
 // lists back with everything the ship pass needs to rebuild the payload.
