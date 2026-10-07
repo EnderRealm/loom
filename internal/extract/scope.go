@@ -69,6 +69,25 @@ func TruthsDir() string {
 	return filepath.Join(knowledgeRoot(), "truths")
 }
 
+// Scopes lists the store's scopes: every directory under truths/ whose name
+// clears ValidScopeName. That drops what the store keeps beside the scopes —
+// `_`-prefixed entries, which the name pattern's leading [a-z0-9] refuses,
+// and files such as _schema.md. A truths/ that cannot be read is an error,
+// not an empty list: no scopes would read as no projects.
+func Scopes() ([]string, error) {
+	entries, err := os.ReadDir(TruthsDir())
+	if err != nil {
+		return nil, err
+	}
+	var scopes []string
+	for _, e := range entries {
+		if e.IsDir() && ValidScopeName(e.Name()) == nil {
+			scopes = append(scopes, e.Name())
+		}
+	}
+	return scopes, nil
+}
+
 // markerName is the repo-root file a project declares its canonical name in.
 // This path walks for it as extractors/resolve_project.py does — nearest usable
 // marker from the cwd up to the repo root wins, an unusable one continues the

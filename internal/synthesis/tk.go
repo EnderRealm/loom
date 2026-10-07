@@ -59,12 +59,9 @@ func runTK(diag io.Writer, args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// queryProject reads every ticket in the central store through `tk query
-// --all-projects` and keeps the project's namespace. The ids stay qualified,
-// the form commit markers carry. A namespace holding no ticket at all is an
-// error: it is far likelier a mistyped project than a real one, and an empty
-// input would read as a project that did nothing.
-func queryProject(diag io.Writer, project string) ([]tkTicket, error) {
+// queryAll reads every ticket in the central store through one `tk query
+// --all-projects`. The ids stay qualified, the form commit markers carry.
+func queryAll(diag io.Writer) ([]tkTicket, error) {
 	out, err := runTK(diag, "query", "--all-projects")
 	if err != nil {
 		return nil, err
@@ -78,6 +75,22 @@ func queryProject(diag io.Writer, project string) ([]tkTicket, error) {
 		} else if err != nil {
 			return nil, fmt.Errorf("tk query: decode: %w", err)
 		}
+		tickets = append(tickets, t)
+	}
+	return tickets, nil
+}
+
+// queryProject is queryAll narrowed to the project's namespace. A namespace
+// holding no ticket at all is an error: it is far likelier a mistyped project
+// than a real one, and an empty input would read as a project that did
+// nothing.
+func queryProject(diag io.Writer, project string) ([]tkTicket, error) {
+	all, err := queryAll(diag)
+	if err != nil {
+		return nil, err
+	}
+	var tickets []tkTicket
+	for _, t := range all {
 		if ns, _ := ticket.ParseNamespacedID(t.ID); ns == project {
 			tickets = append(tickets, t)
 		}

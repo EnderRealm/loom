@@ -244,14 +244,18 @@ func installReceiver() error {
 
 // summarizerSpec builds the summarizer's launchd Spec. The sweep interval
 // is baked into the arguments at install time, so a config change takes
-// effect on reinstall.
+// effect on reinstall. The project_state rebuild shells tk, a Homebrew or Go
+// install that launchd's default PATH does not reach.
 func summarizerSpec(bin, logPath string, interval time.Duration) launchd.Spec {
 	return launchd.Spec{
-		Label:     summarizerLabel,
-		Program:   bin,
-		Args:      []string{"summarize", "--watch", "--interval", interval.String()},
-		LogPath:   logPath,
-		Env:       map[string]string{"LOOM_HOME": config.Home()},
+		Label:   summarizerLabel,
+		Program: bin,
+		Args:    []string{"summarize", "--watch", "--interval", interval.String()},
+		LogPath: logPath,
+		Env: map[string]string{
+			"LOOM_HOME": config.Home(),
+			"PATH":      canonicalPath(),
+		},
 		KeepAlive: true,
 		RunAtLoad: true,
 	}

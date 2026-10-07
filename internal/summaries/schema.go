@@ -4,6 +4,15 @@ package summaries
 // tables agent-agnostic; an `agent` column on every top-level row lets us
 // slice cleanly across producers.
 //
+// project_state carries no version of its own: one row per knowledge scope,
+// rebuilt whole at the end of a sweep from the sessions and commits tables and
+// tk (docs/project-state.md). Nothing in it is folded from a transcript, so a
+// v12 database needs no refold to gain it — the CREATE below adds it on open,
+// and the next sweep fills it. A version bump would instead stop every v12
+// summarizer until a `loom summarize --rebuild` re-folded sessions this table
+// does not change. A binary predating it leaves the rows unwritten, which
+// their computed_at shows.
+//
 // schemaVersion 12: subagents gains tool_use_id, started_at and ended_at —
 // the dispatching tool_use and the span of the dispatch's own transcript, so
 // a run report can place a Claude subagent under its run's root and against
@@ -424,5 +433,19 @@ CREATE TABLE IF NOT EXISTS execution_imports (
     size        INTEGER,
     mtime       TEXT,
     imported_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS project_state (
+    project                  TEXT PRIMARY KEY,
+    computed_at              TEXT NOT NULL,
+    window_seconds           INTEGER NOT NULL,
+    last_commit_at           TEXT,
+    last_session_at          TEXT,
+    last_ticket_closed_at    TEXT,
+    commits_in_window        INTEGER NOT NULL,
+    sessions_in_window       INTEGER NOT NULL,
+    open_tickets             INTEGER NOT NULL,
+    tickets_closed_in_window INTEGER NOT NULL,
+    dormant                  INTEGER NOT NULL
 );
 `

@@ -24,6 +24,11 @@ var summarizeCmd = &cobra.Command{
 		opts.Rebuild, _ = cmd.Flags().GetBool("rebuild")
 		opts.Interval, _ = cmd.Flags().GetDuration("interval")
 		opts.Strict, _ = cmd.Flags().GetBool("strict")
+		window, _ := cmd.Flags().GetString("state-window")
+		var err error
+		if opts.StateWindow, err = parseWindow("--state-window", window); err != nil {
+			return err
+		}
 		return summarize.Run(opts)
 	},
 }
@@ -38,6 +43,7 @@ func init() {
 	f.Bool("rebuild", false, "drop the summary DB and rebuild from received/")
 	f.Duration("interval", shipper.DefaultSummarizerInterval, "watch-mode sweep interval")
 	f.Bool("strict", false, "exit non-zero when any session errored; for ticket verify lines")
+	f.String("state-window", "30d", "liveness window project_state is computed over: whole days (30d) or a Go duration")
 
 	rootCmd.AddCommand(summarizeCmd)
 }

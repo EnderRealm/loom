@@ -29,6 +29,10 @@ Knowledge:
   synthesis-input --project <name> --since <window>
                                A project's new, done and edited tickets and the
                                  sessions behind them, as JSON
+  project-state [--project <name>] [--json]
+                               Each knowledge scope's liveness — last and recent
+                                 commits, sessions and ticket closes, open
+                                 tickets, dormancy — from summaries.db
   knowledge write              Apply one JSON write plan (stdin) to the knowledge
                                  store, committing what it touched
   knowledge scope add <name>   Create truths/<name>/ so that project's sessions

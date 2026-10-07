@@ -508,7 +508,13 @@ func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
 		return nil, nil, fmt.Errorf("open summaries.db: %w", err)
 	}
 	defer db.Close()
+	return SessionsAndCommits(db)
+}
 
+// SessionsAndCommits is LoadSessionsAndCommits over a handle the caller
+// already holds — the summarizer's own, which may name a database other than
+// $LOOM_HOME's.
+func SessionsAndCommits(db *sql.DB) ([]SessionSpan, []SessionCommit, error) {
 	if v := schemaVersionOf(db); v < commitsSchemaVersion {
 		return nil, nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, commitsSchemaVersion)
 	}

@@ -88,6 +88,10 @@ func TestSummarizerSpecCarriesTheInterval(t *testing.T) {
 	if !strings.Contains(spec.PlistXML(), "<string>30s</string>") {
 		t.Fatalf("plist XML lacks the interval:\n%s", spec.PlistXML())
 	}
+	// The project_state rebuild shells tk, which launchd's default PATH misses.
+	if path := spec.Env["PATH"]; !strings.Contains(path, "/opt/homebrew/bin") {
+		t.Fatalf("summarizer PATH = %q, want the canonical PATH", path)
+	}
 }
 
 // stubInstall records the spec handed to launchd and the (label, bin) the

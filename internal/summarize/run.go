@@ -18,11 +18,13 @@ import (
 	"syscall"
 	"time"
 
+	"loom/internal/extract"
 	"loom/internal/parse/claudeparse"
 	"loom/internal/parse/codexparse"
 	"loom/internal/parse/cursorparse"
 	"loom/internal/parse/summary"
 	"loom/internal/summaries"
+	"loom/internal/synthesis"
 )
 
 type Options struct {
@@ -34,6 +36,10 @@ type Options struct {
 	Rebuild     bool
 	Interval    time.Duration
 	Strict      bool
+	// StateWindow is the liveness window project_state is computed over. Zero
+	// leaves project_state alone, so a caller that only folds — the tests,
+	// which have no tk or knowledge store of their own — never shells tk.
+	StateWindow time.Duration
 }
 
 func Run(opts Options) error {
@@ -73,6 +79,8 @@ func run(ctx context.Context, opts Options) error {
 	r := sweep(ctx, st, opts.ReceivedDir, opts.Force, opts.Verbose)
 	report(r, opts.DBPath)
 	markSweep(ctx, st)
+	rebuildProjectState(ctx, st, opts.StateWindow, opts.Verbose)
+	stateAt := time.Now()
 
 	// An interrupted sweep stopped walking, so its counts describe only the
 	// part of the tree it reached: a clean tally is not a clean tree.
@@ -102,6 +110,10 @@ func run(ctx context.Context, opts Options) error {
 				report(r, opts.DBPath)
 			}
 			markSweep(ctx, st)
+			if time.Since(stateAt) >= projectStateInterval {
+				rebuildProjectState(ctx, st, opts.StateWindow, opts.Verbose)
+				stateAt = time.Now()
+			}
 		}
 	}
 }
@@ -116,6 +128,55 @@ func markSweep(ctx context.Context, st *summaries.Store) {
 	}
 	if err := st.SetLastSweep(time.Now()); err != nil {
 		log.Printf("mark sweep: %v", err)
+	}
+}
+
+// projectStateInterval spaces project_state rebuilds under --watch. A rebuild
+// reads every session and commit, shells tk once and resolves every checkout
+// to its tk namespace — about two seconds on a host with five thousand
+// sessions — while the sweep ticks every few seconds; liveness over a window
+// of weeks loses nothing to being minutes old. A failed rebuild waits out the
+// interval too, so a missing tk is one log line per interval, not per sweep.
+const projectStateInterval = 10 * time.Minute
+
+// rebuildProjectState replaces project_state with one row per knowledge
+// scope. A failure — tk missing or erroring, a knowledge store with no
+// truths/ or no scope under it — is logged and leaves the previous rows in place: an empty or
+// all-dormant table would read as a fact about the projects rather than about
+// this rebuild, and the rows' computed_at already says how old they are. It
+// never fails the sweep, whose fold is complete without it.
+func rebuildProjectState(ctx context.Context, st *summaries.Store, window time.Duration, verbose bool) {
+	if window <= 0 || ctx.Err() != nil {
+		return
+	}
+	scopes, err := extract.Scopes()
+	if err != nil {
+		log.Printf("project state: knowledge scopes: %v — previous rows kept", err)
+		return
+	}
+	if len(scopes) == 0 {
+		log.Print("project state: knowledge store has no scopes — previous rows kept")
+		return
+	}
+	diag := io.Discard
+	if verbose {
+		diag = log.Writer()
+	}
+	rows, err := synthesis.ProjectState(st.DB(), scopes, window, time.Now().UTC(), diag)
+	if err != nil {
+		log.Printf("project state: %v — previous rows kept", err)
+		return
+	}
+	if err := st.ReplaceProjectState(ctx, rows); err != nil {
+		log.Printf("project state: write: %v — previous rows kept", err)
+		return
+	}
+	if verbose {
+		for _, r := range rows {
+			log.Printf("project state %s: commits=%d sessions=%d open=%d closed=%d dormant=%t",
+				r.Project, r.CommitsInWindow, r.SessionsInWindow, r.OpenTickets,
+				r.TicketsClosedInWindow, r.Dormant)
+		}
 	}
 }
 

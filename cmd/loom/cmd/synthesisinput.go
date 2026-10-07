@@ -40,7 +40,7 @@ func newSynthesisInputCmd() *cobra.Command {
 			if strings.TrimSpace(sinceArg) == "" {
 				return fmt.Errorf("--since is required")
 			}
-			window, err := parseWindow(sinceArg)
+			window, err := parseWindow("--since", sinceArg)
 			if err != nil {
 				return err
 			}
@@ -65,9 +65,9 @@ func newSynthesisInputCmd() *cobra.Command {
 	return cmd
 }
 
-// parseWindow reads --since as a positive length of time: whole days as "Nd",
-// which Go durations have no unit for, or any Go duration.
-func parseWindow(value string) (time.Duration, error) {
+// parseWindow reads flag's value as a positive length of time: whole days as
+// "Nd", which Go durations have no unit for, or any Go duration.
+func parseWindow(flag, value string) (time.Duration, error) {
 	var d time.Duration
 	var err error
 	if n, ok := strings.CutSuffix(value, "d"); ok {
@@ -78,7 +78,7 @@ func parseWindow(value string) (time.Duration, error) {
 		d, err = time.ParseDuration(value)
 	}
 	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("--since: %q is not a positive window (e.g. 30d or 72h)", value)
+		return 0, fmt.Errorf("%s: %q is not a positive window (e.g. 30d or 72h)", flag, value)
 	}
 	return d, nil
 }

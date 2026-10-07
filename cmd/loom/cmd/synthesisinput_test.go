@@ -56,10 +56,10 @@ esac
 	return dir
 }
 
-// tkStoreFor binds repoDir to namespace ns in a throwaway tk config, so a
-// session whose cwd is repoDir resolves to ns and nothing reads the machine's
-// own store.
-func tkStoreFor(t *testing.T, ns, repoDir string) {
+// tkStoreFor binds each repo directory to its namespace, given as ns, repoDir
+// pairs, in a throwaway tk config, so a session whose cwd is that directory
+// resolves to the namespace and nothing reads the machine's own store.
+func tkStoreFor(t *testing.T, nsRepo ...string) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
@@ -68,10 +68,16 @@ func tkStoreFor(t *testing.T, ns, repoDir string) {
 	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(local, []byte("central_root: "+root+"\nprojects:\n  "+ns+":\n    path: "+repoDir+"\n"), 0o644); err != nil {
+	paths, stores := "", ""
+	for i := 0; i+1 < len(nsRepo); i += 2 {
+		ns, repoDir := nsRepo[i], nsRepo[i+1]
+		paths += "  " + ns + ":\n    path: " + repoDir + "\n"
+		stores += "  " + ns + ":\n    store: central\n"
+	}
+	if err := os.WriteFile(local, []byte("central_root: "+root+"\nprojects:\n"+paths), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("projects:\n  "+ns+":\n    store: central\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("projects:\n"+stores), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -278,13 +284,13 @@ func TestSynthesisInputWindowFlag(t *testing.T) {
 		in   string
 		want time.Duration
 	}{{"30d", 30 * 24 * time.Hour}, {"72h", 72 * time.Hour}, {"90m", 90 * time.Minute}} {
-		got, err := parseWindow(tc.in)
+		got, err := parseWindow("--since", tc.in)
 		if err != nil || got != tc.want {
 			t.Fatalf("parseWindow(%q) = %v, %v; want %v", tc.in, got, err, tc.want)
 		}
 	}
 	for _, bad := range []string{"", "0d", "-3d", "d", "30", "-1h"} {
-		if _, err := parseWindow(bad); err == nil {
+		if _, err := parseWindow("--since", bad); err == nil {
 			t.Fatalf("parseWindow(%q) accepted", bad)
 		}
 	}
