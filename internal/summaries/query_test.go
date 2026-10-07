@@ -298,3 +298,69 @@ func TestClaudeSubagentSessionsAreNotListedAsSessions(t *testing.T) {
 		t.Errorf("session spans = %+v, want the parent alone", spans)
 	}
 }
+
+// A Claude subagent's commit belongs to the session that dispatched it: the
+// knowledge trigger selects the parent's transcript and the synthesis commits
+// key it to the parent, while a subagent whose parent has no row contributes
+// to neither rather than surfacing as a session of its own.
+func TestClaudeSubagentCommitsAreReadAsTheParents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOOM_HOME", dir)
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	start := time.Now().Add(-time.Hour)
+	commit := func(at time.Time, hash, subject string) summary.ToolCall {
+		return summary.ToolCall{Kind: summary.KindBash, StartedAt: at,
+			ResultSummary: "[main " + hash + "] " + subject}
+	}
+	parent := &summary.SessionSummary{SessionID: "parent", Agent: summary.AgentClaude, StartTime: start, EndTime: start.Add(time.Minute),
+		ToolCalls: []summary.ToolCall{commit(start.Add(55*time.Second), "bbb2222", "[loom/x-0001] Follow up")}}
+	child := &summary.SessionSummary{
+		SessionID: "agent-a0123", Agent: summary.AgentClaude, ParentSessionID: "parent", ParentToolCallID: "toolu_A", SpawnDepth: 1,
+		StartTime: start.Add(10 * time.Second), EndTime: start.Add(50 * time.Second),
+		ToolCalls: []summary.ToolCall{commit(start.Add(40*time.Second), "aaa1111", "[loom/x-0001] Do the thing")},
+	}
+	orphan := &summary.SessionSummary{
+		SessionID: "agent-b0456", Agent: summary.AgentClaude, ParentSessionID: "absent", ParentToolCallID: "toolu_B", SpawnDepth: 1,
+		StartTime: start, EndTime: start.Add(time.Minute),
+		ToolCalls: []summary.ToolCall{commit(start.Add(30*time.Second), "ccc3333", "[loom/y-0002] Orphaned work")},
+	}
+	writes := []struct {
+		sum  *summary.SessionSummary
+		path string
+	}{
+		{parent, "/tmp/loom/parent.jsonl"},
+		{child, "/tmp/loom/parent/subagents/agent-a0123.jsonl"},
+		{orphan, "/tmp/loom/absent/subagents/agent-b0456.jsonl"},
+	}
+	for _, w := range writes {
+		if err := st.WriteSummary(ctx, w.sum, SourceInfo{Path: w.path, CwdRaw: "/Users/steve/code/loom"}); err != nil {
+			t.Fatalf("WriteSummary %s: %v", w.sum.SessionID, err)
+		}
+	}
+
+	sources, err := LoadSessionsForTickets([]string{"loom/x-0001", "loom/y-0002"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].SessionID != "parent" || sources[0].SourcePath != "/tmp/loom/parent.jsonl" {
+		t.Errorf("ticket sources = %+v, want the parent's transcript alone", sources)
+	}
+
+	_, commits, err := LoadSessionsAndCommits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range commits {
+		got = append(got, c.SessionID+":"+c.Hash)
+	}
+	if want := []string{"parent:aaa1111", "parent:bbb2222"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("commits = %v, want %v (the parent's and its subagent's in time order, the orphan's dropped)", got, want)
+	}
+}

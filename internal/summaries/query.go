@@ -353,12 +353,16 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, commitsSchemaVersion)
 	}
 
+	// A Claude subagent's commit is read as its parent's, and not at all when
+	// the parent has no row.
 	rows, err := db.Query(`
-		SELECT c.agent, c.session_id, c.subject, c.committed_at,
-		       s.source_path, s.git_remote, s.cwd_raw
+		SELECT o.agent, o.session_id, c.subject, c.committed_at,
+		       o.source_path, o.git_remote, o.cwd_raw
 		FROM commits c
-		JOIN sessions s ON s.agent = c.agent AND s.session_id = c.session_id
-		WHERE s.source_path IS NOT NULL AND s.source_path != ''
+		JOIN (SELECT agent, session_id, ` + commitOwner(db) + ` AS owner_id FROM sessions) k
+		  ON k.agent = c.agent AND k.session_id = c.session_id
+		JOIN sessions o ON o.agent = k.agent AND o.session_id = k.owner_id
+		WHERE o.source_path IS NOT NULL AND o.source_path != ''
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query ticket sessions: %w", err)
@@ -537,10 +541,19 @@ func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
 		return nil, nil, err
 	}
 
+	// A Claude subagent's commit is keyed to its parent, and dropped when the
+	// parent has no row. A commit whose session has no row at all keeps its own
+	// key. The order here is only the tiebreak for the sort below.
 	crows, err := db.Query(`
-		SELECT agent, session_id, commit_hash, branch, subject, committed_at
-		FROM commits
-		ORDER BY agent, session_id, seq
+		SELECT c.agent, COALESCE(o.session_id, c.session_id),
+		       c.commit_hash, c.branch, c.subject, c.committed_at
+		FROM commits c
+		LEFT JOIN (SELECT agent, session_id, ` + commitOwner(db) + ` AS owner_id FROM sessions) k
+		  ON k.agent = c.agent AND k.session_id = c.session_id
+		LEFT JOIN sessions o ON o.agent = k.agent AND o.session_id = k.owner_id
+		WHERE k.session_id IS NULL OR o.session_id IS NOT NULL
+		ORDER BY c.agent, COALESCE(o.session_id, c.session_id),
+		         c.session_id != COALESCE(o.session_id, c.session_id), c.session_id, c.seq
 	`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query commits: %w", err)
@@ -561,7 +574,28 @@ func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
 		c.TicketID, _ = MarkerTicketID(c.Subject)
 		commits = append(commits, c)
 	}
-	return spans, commits, crows.Err()
+	if err := crows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	// A session's commits merge its subagents' with its own, so they are put
+	// back in time order on the parsed time — RFC3339Nano trims trailing
+	// zeros, which makes the stored text misorder sub-second differences. A
+	// commit with no parseable time goes last.
+	sort.SliceStable(commits, func(i, j int) bool {
+		a, b := commits[i], commits[j]
+		if a.Agent != b.Agent {
+			return a.Agent < b.Agent
+		}
+		if a.SessionID != b.SessionID {
+			return a.SessionID < b.SessionID
+		}
+		if a.CommittedAt.IsZero() || b.CommittedAt.IsZero() {
+			return !a.CommittedAt.IsZero() && b.CommittedAt.IsZero()
+		}
+		return a.CommittedAt.Before(b.CommittedAt)
+	})
+	return spans, commits, nil
 }
 
 // ActivityView is the rolling-window rollup the "loom ui" activity screen
@@ -654,6 +688,18 @@ func notClaudeSubagent(db *sql.DB) string {
 		return "1"
 	}
 	return "NOT (agent = 'claude-code' AND parent_session_id IS NOT NULL)"
+}
+
+// commitOwner is the expression, over a sessions row, naming the session its
+// commits are read as: a Claude subagent's parent, else the row itself. The
+// commit reads join through it so a subagent's commit attaches to the session
+// someone started, not to a source notClaudeSubagent keeps out of every other
+// read.
+func commitOwner(db *sql.DB) string {
+	if schemaVersionOf(db) < subagentSessionSchemaVersion {
+		return "session_id"
+	}
+	return "CASE WHEN " + notClaudeSubagent(db) + " THEN session_id ELSE parent_session_id END"
 }
 
 func schemaVersionOf(db *sql.DB) int {
