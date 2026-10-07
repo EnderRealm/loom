@@ -303,6 +303,38 @@ func TestRetrospectRecordsTheTypesThatLandedBeforeAnInterrupt(t *testing.T) {
 	}
 }
 
+// A truth run's ticket candidates are counted as tickets, not truths: the entry
+// is the run's record of what it filed, and calling a bug report a truth there
+// is the confusion the ticket destination exists to end.
+func TestRetrospectCountsTicketCandidatesApart(t *testing.T) {
+	e := newRetroEnv(t, "loom")
+	logPath := writeKnowledgeLog(t)
+	e.addSessionWithCommits("s1", loomRemote, "["+retroTicket+"] Add the command")
+
+	orig := runExtractor
+	runExtractor = func(_ context.Context, _, script, input, scope, kind string) (extractRun, error) {
+		e.runs = append(e.runs, scope+" "+input)
+		if kind == extractTypeTruth {
+			return extractRun{Candidates: 3, Tickets: 1}, nil
+		}
+		return extractRun{Candidates: 2}, nil
+	}
+	t.Cleanup(func() { runExtractor = orig })
+
+	if err := Retrospect(RetrospectOptions{TicketID: retroTicket}); err != nil {
+		t.Fatalf("Retrospect: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log.md: %v", err)
+	}
+	want := fmt.Sprintf("## [%s] retrospect %s | loom | 2 truth candidates, 2 decision candidates, 1 ticket candidates",
+		time.Now().Format("2006-01-02"), retroTicket)
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("log.md missing %q; got:\n%s", want, data)
+	}
+}
+
 // log.md is bootstrapped at store init, not by the extractor — but the skip is
 // logged, so the omission is auditable rather than invisible.
 func TestRetrospectSkipsTheLogEntryWhenLogMdIsAbsent(t *testing.T) {

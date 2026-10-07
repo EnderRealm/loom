@@ -237,7 +237,8 @@ func Retrospect(opts RetrospectOptions) error {
 			log.Printf("retrospect %s: %s/%s %s ok in %s (candidates=%d score=%.2f)", ticketID,
 				logSafe(s.Agent), logSafe(s.SessionID), kind,
 				time.Since(start).Round(time.Second), run.Candidates, run.Score)
-			candidates[kind] += run.Candidates
+			candidates[kind] += run.Candidates - run.Tickets
+			candidates[ticketDestination] += run.Tickets
 			scopes[res.scope] = true
 			ran = true
 		}
@@ -262,9 +263,9 @@ func Retrospect(opts RetrospectOptions) error {
 		log.Printf("retrospect %s: no session was extracted (skipped=%d failed=%d) — no log.md entry", ticketID, skipped, failed)
 	}
 
-	log.Printf("retrospect %s: sessions=%d extracted=%d skipped=%d failed=%d truth candidates=%d decision candidates=%d",
+	log.Printf("retrospect %s: sessions=%d extracted=%d skipped=%d failed=%d truth candidates=%d decision candidates=%d ticket candidates=%d",
 		ticketID, len(sessions), extracted, skipped, failed,
-		candidates[extractTypeTruth], candidates[extractTypeDecision])
+		candidates[extractTypeTruth], candidates[extractTypeDecision], candidates[ticketDestination])
 
 	if failed > 0 {
 		return fmt.Errorf("retrospect %s: %d extraction(s) failed — see %s", ticketID, failed, LogPath())
@@ -317,6 +318,11 @@ func appendRetrospectLog(ticketID, scope string, candidates map[string]int) {
 	// gives a sweep, so retrospect runs read back the same way in the history.
 	label := fmt.Sprintf("retrospect %s | %s | %d truth candidates, %d decision candidates",
 		ticketID, scope, candidates[extractTypeTruth], candidates[extractTypeDecision])
+	// Appended only when there are any, so a run that filed none reads exactly
+	// as every entry before ticket candidates existed.
+	if n := candidates[ticketDestination]; n > 0 {
+		label += fmt.Sprintf(", %d ticket candidates", n)
+	}
 	entry := fmt.Sprintf("\n## [%s] %s\n", time.Now().Format("2006-01-02"), label)
 
 	warn, err := store.ApplyIn(root, label, func(tx *store.Tx) error {

@@ -16,13 +16,15 @@ import (
 var frontmatterKey = regexp.MustCompile(`^([a-z_]+):\s*(.*)$`)
 
 // pluralType maps a singular artifact type to the directory segment used in the
-// knowledge store (truth → truths, decision → decisions).
+// knowledge store (truth → truths, decision → decisions, ticket → tickets).
 func pluralType(t string) string {
 	switch t {
 	case "truth":
 		return "truths"
 	case "decision":
 		return "decisions"
+	case "ticket":
+		return "tickets"
 	}
 	return ""
 }
@@ -52,6 +54,10 @@ func promoteCandidate(a Artifact) (string, store.Commit, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
 		return "", nil, fmt.Errorf("unknown type %q", a.Type)
+	}
+	if a.Type == ticketType {
+		// A ticket's validated home is tk, not a tickets/ tree in this store.
+		return "", nil, fmt.Errorf("a ticket candidate is filed into tk, not promoted")
 	}
 	if a.Status != "candidate" {
 		return "", nil, fmt.Errorf("not a candidate")

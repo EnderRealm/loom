@@ -266,6 +266,30 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := a.setStatus(status, 3*time.Second)
 		return a, cmd
 
+	case ticketFiledMsg:
+		delete(a.knowledge.inFlight, msg.path)
+		if msg.commit == nil {
+			// Nothing was archived, so there is no record to wait on: the count
+			// the chooser took comes back down here.
+			a.knowledge.pendingCommits--
+			if a.quitting {
+				if a.knowledge.pendingCommits == 0 {
+					return a, tea.Quit
+				}
+				return a, nil
+			}
+			cmd := a.setStatus(msg.status, 3*time.Second)
+			return a, cmd
+		}
+		// The archive has landed: the count passes to the deferred commit, which
+		// knowledgeCommittedMsg brings back down — ordered against the status as
+		// promote's is, so the commit's outcome composes onto this line.
+		if a.quitting {
+			return a, commitCmd(msg.commit, msg.status, " — record not saved: ")
+		}
+		return a, tea.Batch(loadKnowledgeCmd(),
+			tea.Sequence(statusCmd(msg.status), commitCmd(msg.commit, msg.status, " — record not saved: ")))
+
 	case activityLoadedMsg:
 		a.activity.setData(msg.view, msg.tickets)
 		return a, nil
@@ -331,9 +355,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 		if a.overlay == overlayKnowledge {
-			// Detail sub-view consumes its own keys; only close the overlay
-			// from the list view, so 'q' inside detail doesn't quit unexpectedly.
-			if !a.knowledge.showDetail {
+			// Detail sub-view and the filing chooser consume their own keys; only
+			// close the overlay from the list view, so 'q' inside either doesn't
+			// quit unexpectedly.
+			if !a.knowledge.showDetail && a.knowledge.filing == nil {
 				switch msg.String() {
 				case "esc", "q":
 					a.overlay = overlayNone
@@ -595,10 +620,17 @@ func (a App) helpLine() string {
 		return "↑↓ scroll  │  t open in tk  │  esc/q close"
 	}
 	if a.overlay == overlayKnowledge {
-		if a.knowledge.showDetail {
-			return "↑↓ scroll  │  p promote  │  x reject  │  e edit  │  esc/q back"
+		if a.knowledge.filing != nil {
+			return "↑↓ choose  │  enter file  │  esc/q cancel"
 		}
-		return "↑↓ select  │  enter view  │  p promote  │  x reject  │  e edit  │  s skip  │  esc/q close"
+		p := "p promote"
+		if s := a.knowledge.selected(); s != nil && s.Type == ticketType {
+			p = "p file"
+		}
+		if a.knowledge.showDetail {
+			return "↑↓ scroll  │  " + p + "  │  x reject  │  e edit  │  esc/q back"
+		}
+		return "↑↓ select  │  enter view  │  " + p + "  │  x reject  │  e edit  │  s skip  │  esc/q close"
 	}
 	if a.overlay == overlayActivity {
 		return "↑↓ scroll  │  r refresh  │  esc/q close"

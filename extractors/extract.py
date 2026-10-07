@@ -82,6 +82,19 @@ TYPE_CONFIG = {
     },
 }
 
+# Where a truth-extractor artifact can be filed, by its `destination:`. A truth
+# is reviewed for promotion into truths/ and lands in the truth type's
+# candidates tree; a ticket is reviewed for filing into tk and lands in
+# _candidates/tickets/. Both are review queues — nothing reaches tk without a
+# human, because the ticket store is shared and replicated to every machine and
+# an LLM classification is not a filing decision. See
+# docs/candidate-destinations.md.
+DESTINATIONS = ("truth", "ticket")
+
+# The tk ticket types a ticket candidate may ask to be filed as: `tk create -t`
+# also accepts epic, which no single finding is.
+TICKET_TYPES = ("bug", "feature")
+
 STOPWORDS = set("a an and are as at be but by for from has have if in is it of on or that the this to was were will with not no which when where who why how into over under across between".split())
 
 INPUT_GUIDANCE_SUMMARY = """You will receive a session artifact. Most often it is a markdown summary with a frontmatter block (project, session_id, date) and sections like `### Overview`, `### Decisions`, `### Problems`, `### Discoveries`. Those sections tell you where to look — `### Discoveries` and `### Problems` for observed behavior, `### Decisions` for choices and their reasoning.
@@ -167,11 +180,16 @@ def parse_truth(text: str, source: str = "") -> dict:
     has_claim = bool(sections.get("claim"))
     has_choice = bool(sections.get("choice"))
     has_rationale = bool(sections.get("rationale"))
+    has_problem = bool(sections.get("problem"))
 
-    # Valid if it has id + either truth sections (claim+verify) or decision sections (choice+rationale)
+    # Valid if it has id + truth sections (claim+verify), decision sections
+    # (choice+rationale) or, on a ticket-destined artifact, a problem section.
+    # Whether a truth-extractor artifact has the shape its destination needs is
+    # split_destinations's call.
     is_truth = has_claim and has_verify
     is_decision = has_choice and has_rationale
-    has_content = is_truth or is_decision
+    is_ticket = has_problem and frontmatter.get("destination") == "ticket"
+    has_content = is_truth or is_decision or is_ticket
 
     # Validation: hard requirements vs warnings
     warnings = []
@@ -197,8 +215,11 @@ def parse_truth(text: str, source: str = "") -> dict:
         "title": frontmatter.get("title", ""),
         "scope": frontmatter.get("scope", ""),
         "type": frontmatter.get("type", ""),
+        "destination": frontmatter.get("destination", ""),
+        "ticket_type": frontmatter.get("ticket_type", ""),
         "status": frontmatter.get("status", ""),
         "claim": sections.get("claim", "") or sections.get("choice", ""),
+        "problem": sections.get("problem", ""),
         "verify": sections.get("how_to_verify", ""),
         "why": sections.get("why_it_matters", ""),
         "choice": sections.get("choice", ""),
@@ -805,6 +826,58 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
     return changes, routed
 
 
+def split_destinations(candidates: list[dict]) -> dict[str, list[dict]]:
+    """Group truth-extractor candidates by the destination each one declares.
+
+    A candidate is filed only under a destination it names explicitly and whose
+    shape it has — a truth's Claim and How to verify, a ticket's Problem and a
+    tk type. Anything else is dropped with a warning: a missing destination is
+    never defaulted, because defaulting is the reframe the destination field
+    exists to end, and a mis-shaped one would reach a reviewer as something it
+    is not.
+    """
+    out: dict[str, list[dict]] = {d: [] for d in DESTINATIONS}
+    for c in candidates:
+        cid = c.get("id") or ""
+        dest = c.get("destination") or ""
+        if dest not in DESTINATIONS:
+            # Model output reaching stderr, which loom ships in transcripts:
+            # echoed through the same bound and redaction as a declared scope.
+            print(f"  warn: dropping candidate {cid[:80]!r}: destination "
+                  f"{echo_scope(dest)!r} is not one of {', '.join(DESTINATIONS)}",
+                  file=sys.stderr)
+            continue
+        if dest == "truth" and not (c.get("claim") and c.get("verify")):
+            print(f"  warn: dropping candidate {cid[:80]!r}: destination truth "
+                  f"without Claim and How to verify", file=sys.stderr)
+            continue
+        if dest == "ticket" and not (c.get("problem") and c.get("ticket_type") in TICKET_TYPES):
+            print(f"  warn: dropping candidate {cid[:80]!r}: destination ticket "
+                  f"without a Problem and a ticket_type of {' or '.join(TICKET_TYPES)}",
+                  file=sys.stderr)
+            continue
+        out[dest].append(c)
+    return out
+
+
+def decision_candidates(candidates: list[dict]) -> list[dict]:
+    """A decision run's candidates, less any that declare the ticket destination.
+
+    parse_truth accepts a ticket-shaped artifact whatever the run, but only a
+    truth run routes by destination: a decision run files everything under
+    _candidates/decisions/, where a ticket would reach a reviewer as a decision.
+    """
+    out = []
+    for c in candidates:
+        if c.get("destination") == "ticket":
+            cid = c.get("id") or ""
+            print(f"  warn: dropping candidate {cid[:80]!r}: destination ticket "
+                  f"in a decision run", file=sys.stderr)
+            continue
+        out.append(c)
+    return out
+
+
 def append_extract_log(extract_type: str, scope: str, session_id: str, count: int,
                        routed: Counter) -> dict | None:
     """Build the log.md append for one extraction run — one entry per run, in the
@@ -1276,14 +1349,26 @@ def main():
     candidates = parse_output(output, sentinel)
     valid = [c for c in candidates if c.get("valid")]
     invalid = [c for c in candidates if not c.get("valid")]
-    print(f"[extract] parsed {len(valid)} valid / {len(invalid)} invalid candidate(s)")
+    # A truth run files each candidate under the destination it declares, and
+    # drops one that declares none; a decision run has the one destination its
+    # type names, and drops a ticket that has no route there.
+    if args.extract_type == "truth":
+        by_destination = split_destinations(valid)
+    else:
+        by_destination = {args.extract_type: decision_candidates(valid)}
+    routable = [c for group in by_destination.values() for c in group]
+    dropped = len(valid) - len(routable)
+    valid = routable
+    print(f"[extract] parsed {len(valid)} valid / {len(invalid)} invalid candidate(s)"
+          + (f", {dropped} dropped for their destination" if dropped else ""))
 
     warned = 0
     for c in valid:
         title = c["title"][:70] or "<no title>"
         ev = c.get("evidence_count", 0)
         ev_tag = f" [ev:{ev}]" if ev else " [NO-EVIDENCE]"
-        print(f"  + {c['id'] or '<no id>':50} {title}{ev_tag}")
+        dest_tag = " [ticket]" if c.get("destination") == "ticket" else ""
+        print(f"  + {c['id'] or '<no id>':50} {title}{ev_tag}{dest_tag}")
         if c.get("warnings"):
             warned += 1
             for w in c["warnings"]:
@@ -1296,27 +1381,38 @@ def main():
 
     # Persist candidates to the knowledge store unless explicitly disabled
     # or running in benchmark mode (a measurement run, not production).
-    if args.emit_candidates and not args.benchmark and valid:
+    if args.emit_candidates and not args.benchmark:
         reasoning = args.reasoning if args.provider == "codex" else None
-        # truths/, not the type's own tree, for both extract types — the gate the
-        # sweep applies (scopeInStore) and the only directory `loom knowledge
-        # scope add` creates, so gating a decision run on decisions/<scope>/
-        # would refuse every scope onboarded before it filed a decision.
-        changes, routed = emit_candidates(valid, tcfg["candidates"], args.scope,
-                                          args.provider, args.model, reasoning, session_id,
-                                          ticket_ids, TYPE_CONFIG["truth"]["training"])
-        # One write per run, covering the candidate files and the log.md append
-        # together, committed as one record by the store rather than here. A run
-        # that produced no candidate to write records nothing at all — not even
-        # a zero-count log.md entry, which would be an entry no commit of this
-        # run's could carry.
-        if changes:
+        for destination, group in by_destination.items():
+            if not group:
+                continue
+            # Resolved here rather than at import, so the tree follows the
+            # store this run writes.
+            base = (KNOWLEDGE_ROOT / "_candidates" / "tickets" if destination == "ticket"
+                    else tcfg["candidates"])
+            # truths/, not the type's own tree, for every destination — the gate
+            # the sweep applies (scopeInStore) and the only directory `loom
+            # knowledge scope add` creates, so gating a decision run on
+            # decisions/<scope>/ would refuse every scope onboarded before it
+            # filed a decision, and a ticket run on a tree nothing onboards.
+            changes, routed = emit_candidates(group, base, args.scope,
+                                              args.provider, args.model, reasoning, session_id,
+                                              ticket_ids, TYPE_CONFIG["truth"]["training"])
+            # One write per destination, covering its candidate files and the
+            # log.md append together, committed as one record by the store
+            # rather than here — so each record reads as `N <destination>
+            # candidate(s)` in the log's existing convention. A destination
+            # that produced no candidate to write records nothing at all — not
+            # even a zero-count log.md entry, which would be an entry no commit
+            # of this run's could carry.
+            if not changes:
+                continue
             count = len(changes)
-            log_change = append_extract_log(args.extract_type, args.scope,
+            log_change = append_extract_log(destination, args.scope,
                                             session_id, count, routed)
             if log_change:
                 changes.append(log_change)
-            message = run_label(args.extract_type, args.scope, session_id, count, routed)
+            message = run_label(destination, args.scope, session_id, count, routed)
             try:
                 reason = apply_changes(message, changes)
             except StoreWriteError as exc:
@@ -1326,7 +1422,7 @@ def main():
                 sys.exit(f"[extract] knowledge store write failed: {exc}")
             # Per scope, not per run: a run that re-scoped a candidate wrote to
             # more than one directory, and naming only --scope would be wrong.
-            destinations = ", ".join(f"{tcfg['candidates']}/{s}/ ({n})"
+            destinations = ", ".join(f"{base}/{s}/ ({n})"
                                      for s, n in sorted(routed.items()))
             print(f"[extract] wrote {count} candidate(s) → {destinations}", file=sys.stderr)
             if reason:
@@ -1335,6 +1431,11 @@ def main():
                 # loom flattens and bounds the subject it records, so a pathological
                 # scope or session id reads here as it was, not as it was recorded.
                 print(f"[extract] committed to knowledge store: {message}", file=sys.stderr)
+
+    # Only truth-destined candidates are scored: the references are truths, and
+    # a ticket candidate matching one would be credited for a claim it was
+    # never meant to make.
+    scored = [c for c in valid if c.get("destination") != "ticket"]
 
     if not scoring_refs:
         print("\n[extract] no scoring refs to compare against — skipping scoring")
@@ -1351,18 +1452,19 @@ def main():
                 "extract_secs": extract_secs,
                 "candidates_valid": len(valid),
                 "candidates_invalid": len(invalid),
+                "ticket_candidates": len(by_destination.get("ticket", [])),
                 "references_loaded": 0,
                 "verdict": "UNSCORED",
-                "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
+                "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "destination": c.get("destination", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
             }, indent=2))
         return
 
     judge_start = time.time()
     if args.judge == "llm":
         print(f"[extract] judging with {args.judge_provider}:{args.judge_model}...", file=sys.stderr)
-        report = compare_llm(valid, scoring_refs, args.judge_provider, args.judge_model, args.judge_reasoning)
+        report = compare_llm(scored, scoring_refs, args.judge_provider, args.judge_model, args.judge_reasoning)
     else:
-        report = compare_keyword(valid, scoring_refs)
+        report = compare_keyword(scored, scoring_refs)
     judge_secs = time.time() - judge_start
     print()
     print(f"== Coverage vs reference ({args.judge} scoring) ==")
@@ -1375,7 +1477,7 @@ def main():
     if report["extras"]:
         print(f"\n  Extra candidates not in reference: {len(report['extras'])}")
         for i in report["extras"]:
-            print(f"    + {valid[i]['id']}")
+            print(f"    + {scored[i]['id']}")
 
     print()
     print(f"Mean score: {report['mean']:.2f}")
@@ -1398,6 +1500,7 @@ def main():
             "judge_secs": judge_secs,
             "candidates_valid": len(valid),
             "candidates_invalid": len(invalid),
+            "ticket_candidates": len(by_destination.get("ticket", [])),
             "benchmark": args.benchmark,
             "training_refs": len(training_refs),
             "references_loaded": len(scoring_refs),
@@ -1405,8 +1508,8 @@ def main():
             "mean_score": report["mean"],
             "verdict": verdict,
             "references": report["results"],
-            "extras": [valid[i]["id"] for i in report["extras"]],
-            "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
+            "extras": [scored[i]["id"] for i in report["extras"]],
+            "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "destination": c.get("destination", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
         }, indent=2))
 
     sys.exit(0 if verdict == "PASS" else 1)

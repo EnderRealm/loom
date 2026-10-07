@@ -35,6 +35,16 @@ type knowledgeModel struct {
 	showDetail   bool // sub-view: full body of selected artifact
 	detailScroll int  // line offset into selected.Body when showDetail
 
+	// filing is the duplicate-check chooser open over a ticket candidate, nil
+	// when none is.
+	filing *ticketFiling
+
+	// inFlight holds the paths of ticket candidates confirmed in the chooser
+	// whose ticketFiledMsg has not yet arrived. Such a candidate is still listed
+	// until the archive lands, and filing it again would create a second ticket
+	// before the second archive failed.
+	inFlight map[string]bool
+
 	// pendingCommits counts the deferred commits still running off the update
 	// loop, which App drains before it quits: bubbletea abandons a Cmd's
 	// goroutine at exit, so the steps left in the sequence — and the outcome
@@ -97,9 +107,15 @@ func (m *knowledgeModel) clampOffset() {
 }
 
 func (m knowledgeModel) update(msg tea.Msg) (knowledgeModel, tea.Cmd) {
+	if checked, ok := msg.(ticketCheckedMsg); ok {
+		return m.openFiling(checked)
+	}
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
+	}
+	if m.filing != nil {
+		return m.updateFiling(km)
 	}
 	if m.showDetail {
 		switch km.String() {
@@ -192,6 +208,15 @@ func (m knowledgeModel) promote() (knowledgeModel, tea.Cmd) {
 	}
 	if a.Status != "candidate" {
 		return m, statusCmd("only candidates can be promoted")
+	}
+	if a.Type == ticketType {
+		if m.inFlight[a.Path] {
+			return m, statusCmd(sanitize("already filing " + a.Title))
+		}
+		// A ticket is filed rather than moved, and only once the duplicate check
+		// has been shown: the check reads the whole tk store, so it runs off the
+		// update loop and the chooser opens when it answers.
+		return m, tea.Batch(statusCmd(sanitize("checking "+a.Scope+" tickets for duplicates…")), checkTicketCmd(*a))
 	}
 	dest, commit, err := promoteCandidate(*a)
 	if err != nil {
@@ -320,6 +345,9 @@ const (
 )
 
 func (m knowledgeModel) view() string {
+	if m.filing != nil {
+		return m.filingView()
+	}
 	if m.showDetail {
 		return m.detailView()
 	}

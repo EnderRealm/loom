@@ -25,6 +25,7 @@ id: cursor-evidence
 title: Cursor preserves ordered evidence
 scope: loom
 type: truth
+destination: truth
 sources:
   - session: invented
   - ticket: wrong/invented

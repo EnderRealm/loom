@@ -48,6 +48,7 @@ id: loom-example-truth
 title: An example truth
 scope: loom
 type: truth
+destination: truth
 status: validated
 ---
 
@@ -385,6 +386,28 @@ class ExtractRunTest(unittest.TestCase):
         self.assertIn("log.md", committed)
         self.assertEqual(len([p for p in committed if p.startswith("_candidates/truths/loom/")]), 1)
         self.assertNotIn("_candidates", git(self.store, "status", "--porcelain"))
+
+    def test_each_destination_is_filed_as_its_own_record(self):
+        ticket = CANDIDATE_OUTPUT.replace("id: loom-example-truth", "id: loom-example-ticket") \
+            .replace("type: truth\ndestination: truth", "type: ticket\ndestination: ticket\nticket_type: bug") \
+            .replace("## Claim", "## Problem")
+        undeclared = CANDIDATE_OUTPUT.replace("id: loom-example-truth", "id: loom-undeclared") \
+            .replace("destination: truth\n", "")
+        self.run_extract(CANDIDATE_OUTPUT + ticket + undeclared)
+
+        subjects = git(self.store, "log", "--pretty=%s").splitlines()
+        self.assertEqual(subjects, [f"extract {SESSION[:8]} | loom | 1 ticket candidate(s)",
+                                    f"extract {SESSION[:8]} | loom | 1 truth candidate(s)",
+                                    "bootstrap"])
+        tickets = list((self.store / "_candidates/tickets/loom").glob("*.md"))
+        truths = list((self.store / "_candidates/truths/loom").glob("*.md"))
+        self.assertEqual([p.name.split("--")[0] for p in tickets], ["loom-example-ticket"])
+        self.assertEqual([p.name.split("--")[0] for p in truths], ["loom-example-truth"])
+        # The ticket carries the authoritative session like a truth does.
+        self.assertIn(f"session: {SESSION}", tickets[0].read_text())
+        # Nothing without a destination is filed anywhere.
+        self.assertNotIn("loom-undeclared", git(self.store, "log", "--name-only", "--pretty=format:"))
+        self.assertEqual(git(self.store, "status", "--porcelain"), "")
 
     def test_a_run_that_emits_nothing_writes_and_commits_nothing(self):
         self.run_extract("NO_TRUTHS\n")

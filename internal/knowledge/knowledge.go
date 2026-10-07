@@ -17,15 +17,16 @@ import (
 	"loom/internal/config"
 )
 
-// Artifact is one truth or decision file under ~/.loom/knowledge/. Both
-// validated artifacts (truths/<scope>/, decisions/<scope>/) and candidates
+// Artifact is one truth, decision or ticket file under ~/.loom/knowledge/.
+// Both validated artifacts (truths/<scope>/, decisions/<scope>/) and candidates
 // (_candidates/<type>/<scope>/) are loaded into this same shape; Status
-// distinguishes them.
+// distinguishes them. A ticket is only ever a candidate: its validated home is
+// the tk store, not this one.
 type Artifact struct {
 	ID       string
 	Title    string
 	Scope    string
-	Type     string // "truth" | "decision"
+	Type     string // "truth" | "decision" | "ticket"
 	Status   string // "validated" | "candidate"
 	Path     string
 	Body     string // full file contents (eager-loaded; corpus is small)
@@ -41,6 +42,13 @@ type Artifact struct {
 	EvidencePaths []string
 	// Claim is the text of the `## Claim` section, used for keyword overlap.
 	Claim string
+
+	// Sessions are the `sources[].session` ids, in file order: the sessions a
+	// ticket candidate cites when it is filed.
+	Sessions []string
+	// TicketType is a ticket candidate's `ticket_type:` — the tk type it is
+	// filed as.
+	TicketType string
 
 	// Contradicts holds the artifact ids named by the `contradicts:` field.
 	// Entries that are not an id — a `- file:` mapping (the doc-override shape
@@ -100,7 +108,7 @@ func Load() ([]Artifact, error) {
 	}
 
 	// Candidates: _candidates/<type>s/<scope>/*.md (skip _rejected/)
-	for _, t := range []string{"truths", "decisions"} {
+	for _, t := range []string{"truths", "decisions", "tickets"} {
 		base := filepath.Join(root, "_candidates", t)
 		more, err := walkArtifacts(base, t, "candidate")
 		if err != nil {
@@ -225,6 +233,10 @@ var evidencePath = regexp.MustCompile(`^\s*-\s*path:\s*(.*)$`)
 // `sources:` block, with or without the entry's leading dash.
 var sourceDate = regexp.MustCompile(`^\s*-?\s*date:\s*(.*)$`)
 
+// sourceSession matches a "session: <value>" sub-line inside the `sources:`
+// block, with or without the entry's leading dash.
+var sourceSession = regexp.MustCompile(`^\s*-?\s*session:\s*(.*)$`)
+
 // listItem matches a "- <value>" entry of a block list.
 var listItem = regexp.MustCompile(`^\s*-\s*(.*)$`)
 
@@ -300,6 +312,8 @@ func parseArtifact(body, path, scope, plural, status string) Artifact {
 		a.Type = "truth"
 	case "decisions":
 		a.Type = "decision"
+	case "tickets":
+		a.Type = "ticket"
 	}
 
 	// Carve out frontmatter (between the first two `---` lines).
@@ -333,6 +347,11 @@ func parseArtifact(body, path, scope, plural, status string) Artifact {
 				}
 			}
 			if curKey == "sources" {
+				if m := sourceSession.FindStringSubmatch(line); m != nil {
+					if id := strings.TrimSpace(m[1]); id != "" {
+						a.Sessions = append(a.Sessions, id)
+					}
+				}
 				if m := sourceDate.FindStringSubmatch(line); m != nil {
 					if d, ok := parseSourceDate(strings.TrimSpace(m[1])); ok {
 						if a.FirstNoticed.IsZero() || d.Before(a.FirstNoticed) {
@@ -369,6 +388,8 @@ func parseArtifact(body, path, scope, plural, status string) Artifact {
 			a.ID = strings.TrimSpace(m[2])
 		case "title":
 			a.Title = strings.TrimSpace(m[2])
+		case "ticket_type":
+			a.TicketType = strings.TrimSpace(m[2])
 		case "status":
 			if v := strings.TrimSpace(m[2]); v != "" {
 				a.Status = v

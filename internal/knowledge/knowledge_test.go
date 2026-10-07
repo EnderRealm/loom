@@ -445,3 +445,69 @@ func TestLoadLinksContradictions(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadReadsTicketCandidates: a ticket candidate is reviewed in the same list
+// as truths and decisions, and filing it needs the tk type and the sessions it
+// cites. Neither the archive of filed candidates nor a tickets/ tree outside
+// _candidates/ is read: a ticket's validated home is tk.
+func TestLoadReadsTicketCandidates(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+
+	mustWrite := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	candidate := `---
+id: ticket-create-repo-param
+title: ticket_create repo parameter fails for central-store projects
+scope: ticket
+type: ticket
+destination: ticket
+ticket_type: bug
+status: candidate
+evidence:
+  - path: mcp.go
+    note: walks up for .tickets/
+sources:
+  - session: 91d979db-8c94-4f38-999b-90b028c5b543
+    project: ticket
+    date: 2026-03-25
+  - session: 1bdf4151-b4d0-478b-8b95-22406f1dec91
+  - ticket: loom/some-ticket-1234
+---
+
+## Problem
+
+It walks up.
+`
+	mustWrite("_candidates/tickets/ticket/ticket-create-repo-param--20261007-110543.md", candidate)
+	mustWrite("_candidates/_filed/tickets/ticket/ticket-old--20261007-110543.md", candidate)
+	mustWrite("tickets/ticket/ticket-create-repo-param.md", candidate)
+
+	arts, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(arts) != 1 {
+		t.Fatalf("got %d artifacts, want the one ticket candidate", len(arts))
+	}
+	a := arts[0]
+	if a.Type != "ticket" || a.Status != "candidate" || a.Scope != "ticket" {
+		t.Errorf("Type/Status/Scope = %q/%q/%q, want ticket/candidate/ticket", a.Type, a.Status, a.Scope)
+	}
+	if a.TicketType != "bug" {
+		t.Errorf("TicketType = %q, want bug", a.TicketType)
+	}
+	wantSessions := []string{"91d979db-8c94-4f38-999b-90b028c5b543", "1bdf4151-b4d0-478b-8b95-22406f1dec91"}
+	if !reflect.DeepEqual(a.Sessions, wantSessions) {
+		t.Errorf("Sessions = %v, want %v", a.Sessions, wantSessions)
+	}
+}

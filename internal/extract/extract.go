@@ -82,6 +82,11 @@ const (
 	extractTypeDecision = "decision"
 )
 
+// ticketDestination is the truth extractor's second destination (DESTINATIONS
+// in extract.py): ticket candidates, which a truth run reports apart from its
+// truths so a retrospect does not count them as truths.
+const ticketDestination = "ticket"
+
 // extractType pins extract.py's --extract-type instead of relying on its
 // default, for the same reason provider and model are pinned: the trigger
 // runs unattended, so a change to the script's defaults must not silently
@@ -593,6 +598,7 @@ func (o logOnce) printf(format string, args ...any) {
 // references scored.
 type extractRun struct {
 	Candidates int     `json:"candidates_valid"`
+	Tickets    int     `json:"ticket_candidates"` // of Candidates, the ticket-destined
 	Score      float64 `json:"mean_score"`
 }
 
