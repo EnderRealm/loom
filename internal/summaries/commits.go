@@ -9,7 +9,7 @@ import (
 	"loom/internal/parse/summary"
 )
 
-// commitRecord is one git commit derived from a session's bash tool output.
+// commitRecord is one git commit derived from a session's shell tool output.
 // filesChanged is nil when git's summary stat line wasn't captured.
 type commitRecord struct {
 	committedAt  time.Time
@@ -55,11 +55,14 @@ const truncationMark = "…"
 const minCutSubjectPrefix = 20
 
 // extractCommits derives commit records from a session's tool calls, from
-// bash results only; non-bash output produces nothing.
+// shell results only: bash calls, and the custom calls through which a Codex
+// code-mode cell runs commands (their results decoded to the commands' own
+// output by codexparse, their key argument the cell's source). Other output
+// produces nothing.
 //
 // A plain git commit prints a "[branch hash] subject" line only when it
 // succeeds. Git hooks can print preamble, so every line is scanned, and a
-// single bash call may commit more than once, so every matching line yields a
+// single call may commit more than once, so every matching line yields a
 // record.
 //
 // "git commit -q" suppresses that line, so a commit made quietly and then
@@ -86,7 +89,7 @@ const minCutSubjectPrefix = 20
 func extractCommits(calls []summary.ToolCall) []commitRecord {
 	var recs []commitRecord
 	for _, tc := range calls {
-		if tc.Kind != summary.KindBash {
+		if tc.Kind != summary.KindBash && tc.Kind != summary.KindCustom {
 			continue
 		}
 		lines := strings.Split(tc.ResultSummary, "\n")

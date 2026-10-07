@@ -2,6 +2,7 @@ package codexparse
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -374,5 +375,34 @@ func TestAttributeTokenUsageDeltas(t *testing.T) {
 			t.Errorf("%s: reasoning %d exceeds output %d", step.name,
 				got.ReasoningOutputTokens, got.OutputTokens)
 		}
+	}
+}
+
+// TestCodeModeOutputReadsAsCommandOutput pins how a code-mode exec cell's
+// result reads: its custom_tool_call_output is an array of input_text chunks,
+// and an exec_command chunk is a JSON object whose `output` is the command's
+// own text. The result summary carries that text in place of the object, so
+// git's lines stay lines; other text chunks are kept in order and the image
+// chunk is dropped. The first call is a real cell that committed a5e2cbd.
+func TestCodeModeOutputReadsAsCommandOutput(t *testing.T) {
+	s := parseFixture(t, "testdata/code_mode_commit.jsonl")
+	if len(s.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len: got %d, want 2", len(s.ToolCalls))
+	}
+	commit, quiet := s.ToolCalls[0], s.ToolCalls[1]
+	if commit.Kind != summary.KindCustom || !strings.HasPrefix(commit.KeyArg, `text(await tools.exec_command({cmd:"git commit -m '[loom/capture-ship-complete-60ab]`) {
+		t.Errorf("commit call = %s %q, want a custom call keyed by the cell's source", commit.Kind, commit.KeyArg)
+	}
+	wantCommit := "Script completed\nWall time 0.1 seconds\nOutput:\n\n" +
+		"[main a5e2cbd] [loom/capture-ship-complete-60ab] Capture and ship lossless Cursor CLI session journals\n" +
+		" 10 files changed, 1337 insertions(+), 6 deletions(-)\n"
+	if !strings.HasPrefix(commit.ResultSummary, wantCommit) || strings.Contains(commit.ResultSummary, "chunk_id") {
+		t.Errorf("commit result = %q, want git's own lines after the cell header", commit.ResultSummary)
+	}
+	wantQuiet := "Script completed\nWall time 0.3 seconds\nOutput:\n\n" +
+		"0123abc [loom/quiet-code-mode-0001] Commit quietly from a code-mode cell\n\n" +
+		"{}\n M README.md\n{\"recorded\":true}"
+	if quiet.ResultSummary != wantQuiet {
+		t.Errorf("quiet result = %q, want %q", quiet.ResultSummary, wantQuiet)
 	}
 }

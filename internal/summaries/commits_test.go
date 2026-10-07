@@ -3,10 +3,12 @@ package summaries
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"loom/internal/parse/codexparse"
 	"loom/internal/parse/summary"
 )
 
@@ -242,6 +244,65 @@ func TestWriteSummaryCommits(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("commits count after re-fold: got %d, want 1", n)
+	}
+}
+
+// TestWriteSummaryCodexCodeModeCommits folds a Codex rollout whose commits
+// ran through code-mode exec cells — a plain commit and a quiet one echoed
+// by git log — and asserts both land in the commits table under the
+// session, the quiet one keyed by the cell's source as its command.
+func TestWriteSummaryCodexCodeModeCommits(t *testing.T) {
+	f, err := os.Open("../parse/codexparse/testdata/code_mode_commit.jsonl")
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	defer f.Close()
+	sum, err := codexparse.Parse(f)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+
+	st, err := Open(filepath.Join(t.TempDir(), "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	src := SourceInfo{Project: "loom", Path: "/tmp/loom/codex.jsonl", GitRemote: "https://github.com/EnderRealm/loom.git"}
+	if err := st.WriteSummary(context.Background(), sum, src); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+
+	rows, err := st.DB().Query(`SELECT agent, session_id, commit_hash, branch, subject, files_changed FROM commits ORDER BY seq`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	type row struct {
+		agent, session, hash, branch, subject string
+		files                                 sql.NullInt64
+	}
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.agent, &r.session, &r.hash, &r.branch, &r.subject, &r.files); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	want := []row{
+		{string(summary.AgentCodex), "sess-code-mode", "a5e2cbd", "main", "[loom/capture-ship-complete-60ab] Capture and ship lossless Cursor CLI session journals", sql.NullInt64{Int64: 10, Valid: true}},
+		{string(summary.AgentCodex), "sess-code-mode", "0123abc", "", "[loom/quiet-code-mode-0001] Commit quietly from a code-mode cell", sql.NullInt64{}},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("commits: got %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("commit %d: got %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 

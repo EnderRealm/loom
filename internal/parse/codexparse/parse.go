@@ -603,7 +603,11 @@ func (st *state) applyToolOutput(callID string, output json.RawMessage,
 	tc := &st.s.ToolCalls[idx]
 	st.recordCallLenses(callID, decodeFunctionOutput(output), tc.TurnIdx, ts)
 	if tc.ResultSummary == "" {
-		tc.ResultSummary = truncate(decodeFunctionOutput(output), 800)
+		text := decodeFunctionOutput(output)
+		if tc.Kind == summary.KindCustom {
+			text = decodeCustomOutput(output)
+		}
+		tc.ResultSummary = truncate(text, 800)
 	}
 	if tc.DurationMs == 0 && !tc.StartedAt.IsZero() && !ts.IsZero() {
 		tc.DurationMs = ts.Sub(tc.StartedAt).Milliseconds()
@@ -853,6 +857,37 @@ func decodeFunctionOutput(raw json.RawMessage) string {
 		return s
 	}
 	return string(raw)
+}
+
+// decodeCustomOutput renders a custom_tool_call_output as text. A code-mode
+// exec cell's output is an array of content chunks, one input_text per
+// print in order; a chunk carrying an exec_command result is a JSON object
+// whose string `output` is the command's own output, read in place of the
+// object so its lines (git's commit line among them) stay lines rather than
+// escaped JSON. Other text chunks are kept as written, non-text chunks
+// (images) are dropped, and chunks are joined by newlines so one ending
+// mid-line can't run into the next. An output that is not a chunk array
+// decodes as a function output does.
+func decodeCustomOutput(raw json.RawMessage) string {
+	var chunks []responseContentItem
+	if err := json.Unmarshal(raw, &chunks); err != nil {
+		return decodeFunctionOutput(raw)
+	}
+	var parts []string
+	for _, c := range chunks {
+		if c.Type != "input_text" {
+			continue
+		}
+		var res struct {
+			Output *string `json:"output"`
+		}
+		if err := json.Unmarshal([]byte(c.Text), &res); err == nil && res.Output != nil {
+			parts = append(parts, *res.Output)
+			continue
+		}
+		parts = append(parts, c.Text)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func joinContent(items []responseContentItem) string {

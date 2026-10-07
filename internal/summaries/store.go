@@ -368,7 +368,7 @@ func usageValue(unavailable bool, value int64) any {
 	return value
 }
 
-// writeCommits derives git commits from the session's bash tool output and
+// writeCommits derives git commits from the session's shell tool output and
 // inserts one row each. git_remote/cwd are stamped from the same SourceInfo
 // the sessions row uses so the 24h activity view can group by repo. The
 // DELETE-first loop in WriteSummary already cleared this session's rows, so a
