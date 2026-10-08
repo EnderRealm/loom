@@ -153,7 +153,9 @@ func showBodies(diag io.Writer, project string, ids []string) (map[string]ticket
 // parseBody reads one rendered ticket: the frontmatter is skipped, the text
 // between the `# title` line and the first `## ` heading is the description,
 // and the Design and Acceptance Criteria sections run to the next `## `. A
-// `## ` line inside a fenced code block is text, not a heading. The document
+// `## ` line inside a fenced code block is text, not a heading: a fence opens
+// on three or more backticks or tildes and closes only on a bare run of the
+// same character at least as long, as CommonMark has it. The document
 // has to open with id's frontmatter, so output for another ticket is refused
 // rather than filed under this one.
 func parseBody(id, doc string) (ticketBody, error) {
@@ -172,12 +174,22 @@ func parseBody(id, doc string) (ticketBody, error) {
 	}
 	sections := map[string][]string{}
 	current := ""
-	fenced := false
+	// fenceLen is the open fence's run length, 0 outside a fence.
+	var fenceCh byte
+	fenceLen := 0
 	for ; i < len(lines); i++ {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
-			fenced = !fenced
+		if ch, n, rest, ok := fence(lines[i]); ok {
+			if fenceLen == 0 {
+				// A backtick fence's info string cannot hold a backtick; such
+				// a line is inline code, not a fence.
+				if ch != '`' || !strings.Contains(rest, "`") {
+					fenceCh, fenceLen = ch, n
+				}
+			} else if ch == fenceCh && n >= fenceLen && strings.TrimSpace(rest) == "" {
+				fenceLen = 0
+			}
 		}
-		if h, ok := strings.CutPrefix(lines[i], "## "); ok && !fenced {
+		if h, ok := strings.CutPrefix(lines[i], "## "); ok && fenceLen == 0 {
 			current = strings.TrimSpace(h)
 			continue
 		}
@@ -191,4 +203,22 @@ func parseBody(id, doc string) (ticketBody, error) {
 		Design:             text("Design"),
 		AcceptanceCriteria: text("Acceptance Criteria"),
 	}, nil
+}
+
+// fence reads line as a code-fence marker: at most three spaces of
+// indentation, then a run of three or more identical backticks or tildes. It
+// returns the run's character and length and the text after it.
+func fence(line string) (ch byte, n int, rest string, ok bool) {
+	s := strings.TrimLeft(line, " ")
+	if len(line)-len(s) > 3 || s == "" || (s[0] != '`' && s[0] != '~') {
+		return 0, 0, "", false
+	}
+	ch = s[0]
+	for n < len(s) && s[n] == ch {
+		n++
+	}
+	if n < 3 {
+		return 0, 0, "", false
+	}
+	return ch, n, s[n:], true
 }
