@@ -1,0 +1,66 @@
+---
+id: loom-redact-by-shape-before-truncate
+title: Redact credential shapes before truncating transcript-derived artifacts
+scope: loom
+type: decision
+status: candidate
+tag: human
+sources:
+  - session: 5c37b3b4-fb29-4e2e-8468-f63119e0d930
+    project: loom
+    date: 2026-09-15
+    role: documented existing project decision on transcript redaction ordering
+related: []
+recorded_at: 2026-09-15
+---
+
+## Choice
+
+Shape-based redaction of transcript-derived artifacts runs before tool-result truncation, and credential detection uses recognizable shape patterns rather than entropy filtering.
+
+## Alternatives
+
+Entropy-based secret detection, or truncating tool results before redacting them.
+
+## Rationale
+
+Shape-based patterns are deterministic and testable, preserve evidentiary identifiers that entropy filtering would erase, and centralize redaction policy at a single choke point. Truncating first risks shortening a secret below its pattern's minimum detectable length, letting it pass through unredacted.
+
+## Principle
+
+When both truncation and redaction apply to the same data, redact first — truncation can destroy the signal a detector needs, but redaction never needs the full untruncated length to be effective.
+
+===END-OF-DECISION===
+---
+id: loom-single-entry-point-knowledge-writes
+title: Route all knowledge-store writes through one Go entry point
+scope: loom
+type: decision
+status: candidate
+tag: human
+sources:
+  - session: 5c37b3b4-fb29-4e2e-8468-f63119e0d930
+    project: loom
+    date: 2026-09-15
+    role: documented existing project decision on knowledge-store write path
+related: []
+recorded_at: 2026-09-15
+---
+
+## Choice
+
+Every write to `~/.loom/knowledge` goes through a single entry point: Go callers use `internal/knowledge/store` directly, and Python callers must delegate through the `loom knowledge write` CLI command rather than reimplementing store or Git logic.
+
+## Alternatives
+
+Letting Python callers write to the knowledge store's git repo directly, duplicating the commit/push logic in each language.
+
+## Rationale
+
+Committing and pushing are properties of the single entry point itself, not of the caller, which guarantees every mutation is path-scoped and consistently versioned. Allowing multiple write paths would risk callers omitting Git handling or diverging in behavior. The accepted cost is that Python-side knowledge writes require the Loom binary to be present.
+
+## Principle
+
+When a resource requires an invariant on every write (here: commit + push), enforce it by funneling all writers through one implementation rather than trusting each caller to replicate it.
+
+===END-OF-DECISION===

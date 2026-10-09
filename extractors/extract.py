@@ -395,18 +395,35 @@ def parse_output(text: str, sentinel: str = "===END-OF-TRUTH===") -> list[dict]:
 
 
 def inject_frontmatter(raw: str, fields: dict) -> str:
-    """Append fields to a candidate's `---` frontmatter block.
+    """Set fields in a candidate's `---` frontmatter block, each exactly once.
 
-    The truth/decision parser is last-write-wins, so appended keys override
-    any earlier value (e.g., a model-emitted `status: validated` becomes
-    `status: candidate` once we re-write).
+    Every top-level occurrence of an injected key is dropped, along with the
+    indented, `-` or blank continuation lines of its block value, and the
+    injected value is appended once at the end. The injected value therefore
+    overrides the model's (e.g., a model-emitted `status: validated` becomes
+    `status: candidate`) without writing a duplicate key, which strict YAML
+    loaders reject. Line-anchored at column 0, so a nested or prose occurrence
+    of the key is untouched.
     """
     m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.DOTALL)
     if not m:
         return raw
     fm, body = m.group(1), m.group(2)
-    extra = "\n".join(f"{k}: {v}" for k, v in fields.items())
-    return f"---\n{fm}\n{extra}\n---\n{body}"
+    # The YAML spellings SCOPE_MISMATCH_ENTRY_RE accepts for a top-level key:
+    # bare, quoted, space before the colon.
+    key_re = re.compile(r"^[\"']?(?:" + "|".join(re.escape(k) for k in fields)
+                        + r")[\"']?[ \t]*:")
+    lines = []
+    dropping = False
+    for ln in fm.split("\n"):
+        if dropping and ln[:1] in ("", " ", "\t", "-"):
+            continue
+        dropping = bool(key_re.match(ln))
+        if not dropping:
+            lines.append(ln)
+    lines.extend(f"{k}: {v}" for k, v in fields.items())
+    fm = "\n".join(lines)
+    return f"---\n{fm}\n---\n{body}"
 
 
 def override_source_sessions(raw: str, session_id: str) -> str:
@@ -637,10 +654,11 @@ def inject_source_tickets(raw: str, ticket_ids: list[str]) -> str:
 def strip_scope_mismatch(raw: str) -> str:
     """Drop every model-emitted `scope_mismatch:` key from the frontmatter.
 
-    `inject_frontmatter` appends, so without this a model-emitted key survives
-    verbatim on a candidate that routed cleanly and tells a reviewer — the TUI
-    renders the body as written — that this process flagged a correctly-filed
-    candidate. Dropped whether or not a verdict follows, the way
+    `inject_frontmatter` replaces the key only on a candidate filed somewhere
+    other than the scope it declares, so without this a model-emitted key
+    survives verbatim on a candidate that routed cleanly and tells a reviewer —
+    the TUI renders the body as written — that this process flagged a
+    correctly-filed candidate. Dropped whether or not a verdict follows, the way
     `inject_source_tickets` drops model-emitted `ticket:` entries.
     """
     m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.DOTALL)

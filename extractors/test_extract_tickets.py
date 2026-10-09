@@ -396,7 +396,7 @@ class EmitCandidatesTest(unittest.TestCase):
         self.assertTrue(parsed["valid"])
         self.assertEqual(parsed["source_sessions"], [session])
         # The override appends `sources:`, the tickets land inside it, and the
-        # top-level keys land after — so `status:` is last-write-wins.
+        # injected top-level keys land after, replacing the model's `status:`.
         self.assertIn(f"sources:\n  - session: {session}\n"
                       f"  - ticket: {TICKET}\n  - ticket: {OTHER_TICKET}\n", parsed["raw"])
         self.assertEqual(parsed["status"], "candidate")

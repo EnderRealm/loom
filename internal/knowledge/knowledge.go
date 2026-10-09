@@ -382,7 +382,8 @@ func parseArtifact(body, path, scope, plural, status string) Artifact {
 			continue
 		}
 		curKey = m[1]
-		// Last-write-wins matches the extractor's inject_frontmatter behavior.
+		// Last-write-wins: candidates written before inject_frontmatter replaced
+		// keys carry a duplicate status line, and the later one is authoritative.
 		switch m[1] {
 		case "id":
 			a.ID = strings.TrimSpace(m[2])

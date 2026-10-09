@@ -255,7 +255,8 @@ func gestureMessage(gesture string, a Artifact) string {
 }
 
 // promoteFrontmatter rewrites a candidate's frontmatter for the validated tree:
-// status→validated (deduped — the extractor appends a second status line),
+// status→validated (deduped — candidates written before inject_frontmatter
+// replaced keys carry a duplicate status line),
 // verified_at bumped to today, extracted_at/extracted_by dropped. The body and
 // indented sub-fields (evidence/sources children) pass through untouched.
 func promoteFrontmatter(body string) string {
