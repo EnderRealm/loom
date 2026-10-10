@@ -9,10 +9,11 @@ RESULTS_DIR="$LOOM_ROOT/extractors/results"
 mkdir -p "$RESULTS_DIR"
 
 # Test sessions: label|path|scope
+FORGE_DATA_SESSIONS="${FORGE_DATA_SESSIONS:-$HOME/code/forge-data/sessions}"
 SESSIONS=(
-  "apr08-forge-bugs|/Users/smacbeth/code/forge-data/sessions/forge/2026-04-08-88f1615b-69cc-4330-9c8b-3affd4494229.md|forge"
-  "mar14-forge-feature|/Users/smacbeth/code/forge-data/sessions/forge/2026-03-14-b9b4c0be-4180-40ec-b1e3-b0dc77b0669b.md|forge"
-  "mar25-ticket-multistore|/Users/smacbeth/code/forge-data/sessions/ticket/2026-03-25-91d979db-8c94-4f38-999b-90b028c5b543.md|forge"
+  "apr08-forge-bugs|$FORGE_DATA_SESSIONS/forge/2026-04-08-88f1615b-69cc-4330-9c8b-3affd4494229.md|forge"
+  "mar14-forge-feature|$FORGE_DATA_SESSIONS/forge/2026-03-14-b9b4c0be-4180-40ec-b1e3-b0dc77b0669b.md|forge"
+  "mar25-ticket-multistore|$FORGE_DATA_SESSIONS/ticket/2026-03-25-91d979db-8c94-4f38-999b-90b028c5b543.md|forge"
 )
 
 # Model configs: label|provider|model|reasoning
