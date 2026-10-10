@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"loom/internal/parse/codexparse"
 )
 
 // CodexAgent is the Adapter.Agent() value for Codex CLI.
@@ -32,8 +34,10 @@ func codexSessionsDir() (string, error) {
 // List walks the Codex sessions tree and returns one Session per rollout file.
 // Missing directory returns (nil, nil) so machines without Codex installed
 // are silently skipped. A rollout whose first line isn't yet a session_meta
-// record (brand-new session still warming up) is skipped this tick and picked
-// up on the next.
+// record, or has no record after it yet (brand-new session still warming
+// up), is skipped this tick and picked up on the next. A Codex Desktop
+// external import is never listed: it copies a session captured under its
+// own agent.
 func (codexAdapter) List() ([]Session, error) {
 	base, err := codexSessionsDir()
 	if err != nil {
@@ -61,13 +65,13 @@ func (codexAdapter) List() ([]Session, error) {
 		if sid == "" {
 			return nil
 		}
-		cwd, start, err := readCodexMeta(path)
+		cwd, start, imported, err := readCodexMeta(path)
 		if err != nil {
 			// Parse errors on the first line are logged at the capture layer
 			// via the surrounding io-class failure path; silently skip here.
 			return nil
 		}
-		if cwd == "" {
+		if imported || cwd == "" {
 			return nil
 		}
 		// The slug is the storage directory and stays keyed on the directory
@@ -130,30 +134,32 @@ func looksLikeUUID(s string) bool {
 	return true
 }
 
-// readCodexMeta reads only the first line and parses out
-// session_meta.payload.cwd plus the record's timestamp, which dates the
-// session for stamp matching. Returns "" with no error when the file is
-// empty, the first line isn't yet terminated by \n, or the first record
-// isn't a session_meta — all of which are "check back next tick" states,
-// not failures. An unparseable or absent timestamp yields the zero time:
-// the cwd is the answer this function exists for, and stamp matching
-// degrades to "newest record wins" without it.
-func readCodexMeta(path string) (string, time.Time, error) {
+// readCodexMeta parses session_meta.payload.cwd plus the record's timestamp
+// off the first line, which dates the session for stamp matching, then reads
+// the second to tell a Codex Desktop external import from a genuine session.
+// Returns "" with no error when the file is empty, either line isn't yet
+// terminated by \n, or the first record isn't a session_meta — all of which
+// are "check back next tick" states, not failures: until the second record
+// is on disk an import is indistinguishable from a real session. An
+// unparseable or absent timestamp yields the zero time: the cwd is the
+// answer this function exists for, and stamp matching degrades to "newest
+// record wins" without it.
+func readCodexMeta(path string) (string, time.Time, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, false, err
 	}
 	defer f.Close()
 
 	r := bufio.NewReader(f)
 	line, err := r.ReadBytes('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", time.Time{}, err
+		return "", time.Time{}, false, err
 	}
 	// Bail unless we saw a terminating newline — a half-written first line
 	// could give us truncated JSON.
 	if len(line) == 0 || line[len(line)-1] != '\n' {
-		return "", time.Time{}, nil
+		return "", time.Time{}, false, nil
 	}
 	var meta struct {
 		Type      string `json:"type"`
@@ -164,10 +170,20 @@ func readCodexMeta(path string) (string, time.Time, error) {
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(line[:len(line)-1], &meta); err != nil {
-		return "", time.Time{}, fmt.Errorf("parse codex session_meta %s: %w", path, err)
+		return "", time.Time{}, false, fmt.Errorf("parse codex session_meta %s: %w", path, err)
 	}
 	if meta.Type != "session_meta" {
-		return "", time.Time{}, nil
+		return "", time.Time{}, false, nil
+	}
+	imported, decided, err := codexparse.ExternalImport(r)
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	if imported {
+		return "", time.Time{}, true, nil
+	}
+	if !decided {
+		return "", time.Time{}, false, nil
 	}
 	// The record carries the wrapper's timestamp and the payload's own; they
 	// differ by the few milliseconds codex spent writing the line. Either
@@ -176,7 +192,7 @@ func readCodexMeta(path string) (string, time.Time, error) {
 	if start.IsZero() {
 		start = parseCodexTime(meta.Payload.Timestamp)
 	}
-	return meta.Payload.Cwd, start, nil
+	return meta.Payload.Cwd, start, false, nil
 }
 
 // parseCodexTime reads a codex record timestamp, returning the zero time for

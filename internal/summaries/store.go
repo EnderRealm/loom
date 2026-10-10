@@ -177,18 +177,7 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 	defer tx.Rollback()
 
 	agent := string(sum.Agent)
-	for _, table := range []string{
-		"sessions", "turns", "tool_calls", "commits", "errors", "compactions",
-		"token_counts", "files_touched", "subagents", "friction",
-		"unknown_records",
-	} {
-		if _, err := tx.ExecContext(ctx,
-			"DELETE FROM "+table+" WHERE agent = ? AND session_id = ?",
-			agent, sum.SessionID); err != nil {
-			return fmt.Errorf("clear %s: %w", table, err)
-		}
-	}
-	if err := clearLenses(ctx, tx, agent, sum.SessionID); err != nil {
+	if err := clearSession(ctx, tx, agent, sum.SessionID); err != nil {
 		return err
 	}
 
@@ -279,6 +268,48 @@ func (s *Store) WriteSummary(ctx context.Context, sum *summary.SessionSummary,
 	}
 
 	return tx.Commit()
+}
+
+// clearSession deletes every row WriteSummary writes for (agent, sessionID).
+func clearSession(ctx context.Context, tx *sql.Tx, agent, sessionID string) error {
+	for _, table := range []string{
+		"sessions", "turns", "tool_calls", "commits", "errors", "compactions",
+		"token_counts", "files_touched", "subagents", "friction",
+		"unknown_records",
+	} {
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM "+table+" WHERE agent = ? AND session_id = ?",
+			agent, sessionID); err != nil {
+			return fmt.Errorf("clear %s: %w", table, err)
+		}
+	}
+	return clearLenses(ctx, tx, agent, sessionID)
+}
+
+// DeleteSession removes a session the sweep no longer folds, reporting
+// whether it had a row. WriteSummary writes the sessions row in the same
+// transaction as every child row, so a session without one has nothing to
+// clear and costs a single read.
+func (s *Store) DeleteSession(ctx context.Context, agent, sessionID string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM sessions WHERE agent = ? AND session_id = ?`,
+		agent, sessionID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if err := clearSession(ctx, tx, agent, sessionID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // SourceInfo is the per-file provenance the writer needs to mark a session

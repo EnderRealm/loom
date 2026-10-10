@@ -84,3 +84,25 @@ one today, and a record loom cannot parse is skipped rather than fatal.
 The registry is a handoff, not an archive: once a session has been captured and
 shipped, its record has done its job. Truncating the file loses nothing but the
 attribution of runs not yet captured.
+
+## Codex Desktop imports are not sessions
+
+Codex Desktop can import another agent's session, writing a rollout under
+`~/.codex/sessions/` that copies it: `originator: "Codex Desktop"`, the
+record after `session_meta` a `task_started` whose `turn_id` starts
+`external-import-turn-`, and an `<EXTERNAL SESSION IMPORTED>` agent message.
+The copies imported loom's own `claude -p` extraction and summarizer runs,
+whose launchd cwd `/` filed them all under one `_default` project, and
+duplicated real project Claude sessions besides. The original is always
+captured under `claude-code`, so a copy is a second record of a transcript
+loom already holds, not a project's session.
+
+They are excluded, wherever they ran. Capture
+(`transport/internal/source/codex.go`) never lists one, and holds back a
+rollout whose second record is not written yet, since until then a copy
+cannot be told from a session. The sweep (`internal/summarize/run.go`)
+skips the copies the receiver already holds and deletes any rows an earlier
+fold wrote for them; the received files are left in place. Both sides use
+`codexparse.ExternalImport`. A genuine Codex session at cwd `/` is still
+captured and still files under `_default`; its turn id is what tells it
+apart, not its cwd.

@@ -4,6 +4,7 @@
 package summarize
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -285,6 +286,29 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		}
 		project := projectSlug(root, path)
 		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		// Checked ahead of currency so an import copy an earlier sweep
+		// folded is purged rather than skipped as current.
+		if agent == summary.AgentCodex {
+			imported, err := codexImportCopy(path)
+			if err != nil {
+				log.Printf("check %s: %v", path, err)
+				r.errored++
+				return nil
+			}
+			if imported {
+				removed, err := st.DeleteSession(ctx, string(agent), sessionID)
+				if err != nil {
+					log.Printf("purge %s: %v", path, err)
+					r.errored++
+					return nil
+				}
+				if removed {
+					log.Printf("purge %s: codex external import", path)
+				}
+				r.skipped++
+				return nil
+			}
+		}
 		cwdRaw, gitRemote := readMetaSidecar(path)
 		// A background dispatch outlives the parent's last record, so a
 		// subagent transcript can still be growing while the parent file
@@ -369,6 +393,28 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 			len(sum.Errors), len(sum.Subagents), len(sum.Unknown))
 	}
 	return nil
+}
+
+// codexImportCopy reports whether a received codex rollout is a Codex
+// Desktop external import. The receiver keeps the copies capture shipped
+// before it learned to drop them; transport/internal/source/codex.go applies
+// the same codexparse.ExternalImport check at capture. A file with nothing
+// after its session_meta is folded as before.
+func codexImportCopy(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	if _, err := br.ReadBytes('\n'); err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		return false, err
+	}
+	imported, _, err := codexparse.ExternalImport(br)
+	return imported, err
 }
 
 // projectSlug returns the first path component below an agent root. Cursor
