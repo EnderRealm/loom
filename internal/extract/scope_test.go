@@ -189,10 +189,11 @@ func TestSweepEscapesHostileRemoteInTheDisagreementLog(t *testing.T) {
 
 	sweep(context.Background(), Options{})
 
-	// The disagreement, extract + ok, and the sweep summary.
+	// The extractors revision, the disagreement, extract + ok, and the sweep
+	// summary.
 	logs := e.logs.String()
-	if got := strings.Count(logs, "\n"); got != 4 {
-		t.Fatalf("log has %d lines, want 4 — one per statement:\n%q", got, logs)
+	if got := strings.Count(logs, "\n"); got != 5 {
+		t.Fatalf("log has %d lines, want 5 — one per statement:\n%q", got, logs)
 	}
 	if strings.ContainsFunc(strings.ReplaceAll(logs, "\n", ""), unicode.IsControl) {
 		t.Fatalf("log carries a raw control character:\n%q", logs)

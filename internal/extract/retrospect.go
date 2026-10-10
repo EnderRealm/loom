@@ -141,6 +141,9 @@ func Retrospect(opts RetrospectOptions) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Logged, not gated, as the backfill does: the line is what traces this
+	// run's store commits.
+	logExtractorsRevision(ctx, filepath.Dir(script))
 
 	// Resolved after the tee so the expansion — and what the store could not
 	// read — is on the run's own record. An epic's children are the graph's to

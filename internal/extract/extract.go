@@ -155,7 +155,9 @@ func teeToLog() func() {
 // ExtractorsDir returns the directory holding extract.py. The script lives in
 // a loom checkout and is not part of the release tarball the updater
 // installs, so the agent resolves it from the LOOM_EXTRACTORS_DIR tunable and
-// falls back to the conventional checkout location.
+// falls back to the conventional checkout location. That checkout is the
+// production pipeline: the sweep runs whatever it holds, which is why sweep
+// gates on extractorsRevision (docs/knowledge-store-writes.md).
 func ExtractorsDir() string {
 	if v := tunable(EnvExtractorsDir); v != "" {
 		return v
@@ -187,6 +189,53 @@ func ScriptPath() (string, error) {
 		return "", fmt.Errorf("%s not found — point LOOM_EXTRACTORS_DIR at a loom checkout", p)
 	}
 	return p, nil
+}
+
+// extractorsRevision reports the commit dir's checkout is at and whether dir
+// holds changes that commit does not: modified, staged, deleted or untracked
+// files under it. Ignored files (__pycache__/, results/) do not count — they
+// are not code a run executes. An error means dir is not in a git work tree or
+// git could not answer; either way the code a run would execute cannot be traced
+// to a commit.
+func extractorsRevision(ctx context.Context, dir string) (rev string, dirty bool, err error) {
+	out, err := gitIn(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", false, err
+	}
+	rev = strings.TrimSpace(out)
+	out, err = gitIn(ctx, dir, "status", "--porcelain", "--untracked-files=all", "--", ".")
+	if err != nil {
+		return "", false, err
+	}
+	return rev, strings.TrimSpace(out) != "", nil
+}
+
+// gitIn runs git read-only in dir. --no-optional-locks keeps status from
+// refreshing the index under .git/index.lock: the daemon checks a checkout a
+// developer is working in, and must not collide with their own git add/commit.
+func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks", "-C", dir}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, tail(stderr.String(), 200))
+	}
+	return string(out), nil
+}
+
+// logExtractorsRevision states which extractor code a run that writes the store
+// is about to run, so the store commits it produces trace back to a revision.
+// It returns what extractorsRevision found, for the sweep's gate; the
+// foreground commands log it and run regardless.
+func logExtractorsRevision(ctx context.Context, dir string) (rev string, dirty bool, err error) {
+	rev, dirty, err = extractorsRevision(ctx, dir)
+	if err != nil {
+		log.Printf("extractors dir=%s: %s", logSafe(dir), logSafe(err.Error()))
+		return "", false, err
+	}
+	log.Printf("extractors dir=%s rev=%s dirty=%t", logSafe(dir), rev, dirty)
+	return rev, dirty, nil
 }
 
 // Run performs one sweep and, in watch mode, keeps sweeping on a ticker until
@@ -239,6 +288,11 @@ type sweepResult struct {
 	// extractor.log now that these sessions are neither marked nor logged one by
 	// one.
 	unresolvedReasons map[string]int
+	// gated is set when the extractors checkout was dirty or untraceable — at
+	// the start, or before any extraction after it — or moved to another
+	// commit mid-sweep, and the sweep stopped there, so its remaining sessions
+	// wait for the next sweep.
+	gated bool
 }
 
 // scopeFailureReason labels a resolveScope failure for that breakdown. The label
@@ -282,6 +336,23 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 	script, err := ScriptPath()
 	if err != nil {
 		log.Printf("extractor unavailable: %v", err)
+		return r
+	}
+	// The checkout is the production pipeline, and nobody watches the sweep, so
+	// only committed code may write the store from here. Checked before the
+	// ledger is touched: a gated sweep visits nothing, so its sessions are
+	// extracted once the change is committed rather than marked failed by a
+	// half-saved edit.
+	dir := filepath.Dir(script)
+	rev, dirty, err := logExtractorsRevision(ctx, dir)
+	if err != nil {
+		r.gated = true
+		log.Print("sweep skipped: the extractors dir is not a git checkout at a commit — sessions stay queued until it is")
+		return r
+	}
+	if dirty {
+		r.gated = true
+		log.Print("sweep skipped: the extractors dir has uncommitted or untracked changes — sessions stay queued until they are committed")
 		return r
 	}
 	st, err := loadState()
@@ -354,6 +425,25 @@ func sweep(ctx context.Context, opts Options) sweepResult {
 		if r.extracted+r.failed >= maxPerSweep {
 			r.deferred++
 			continue
+		}
+
+		// Rechecked per extraction: each one runs extract.py afresh from the
+		// checkout, minutes after the last, so an edit or commit landing
+		// mid-sweep would otherwise run unchecked under the revision logged
+		// above. Stopping on a moved HEAD keeps every extraction in this sweep
+		// attributable to that one line; the next sweep logs the new revision.
+		if now, nowDirty, err := extractorsRevision(ctx, dir); err != nil || nowDirty || now != rev {
+			r.gated = true
+			switch {
+			case err != nil:
+				log.Printf("sweep stopped: the extractors dir is no longer traceable to a commit (%s) — remaining sessions stay queued",
+					logSafe(err.Error()))
+			case nowDirty:
+				log.Print("sweep stopped: the extractors dir gained uncommitted or untracked changes mid-sweep — remaining sessions stay queued until they are committed")
+			default:
+				log.Printf("sweep stopped: the extractors dir moved from rev=%s to rev=%s mid-sweep — remaining sessions stay queued for the next sweep", rev, now)
+			}
+			break
 		}
 
 		outcome := extractOne(ctx, st, script, s, res, seen)

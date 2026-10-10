@@ -169,6 +169,82 @@ own: it resolves the store as the Go side does (`LOOM_KNOWLEDGE_ROOT`, else
 `$LOOM_HOME/knowledge`, else `~/.loom/knowledge`), and a path under any other
 store comes back refused.
 
+## The extractor checkout is the production pipeline
+
+The extraction daemon (`com.loom.extractor`, `loom extract --watch`) sweeps every
+15 minutes and runs `extract.py` from the directory `LOOM_EXTRACTORS_DIR` names,
+by default `~/code/loom/extractors`. The extractors are Python and are not in
+the release tarball the updater installs, so there is no installed copy: that
+checkout is what writes candidates into the live store. Editing
+`extractors/*.py` there is editing production.
+
+Every run that writes the store from that checkout — each sweep, each
+`loom extract --backfill`, each `loom retrospect` — asks git for the checkout's
+`HEAD` and whether `extractors/` holds uncommitted or untracked changes (ignored
+files such as `__pycache__/` and `results/` do not count), and logs one line to
+`~/.loom/extractor.log` before it extracts anything:
+
+```
+extractors dir=/Users/you/code/loom/extractors rev=<sha> dirty=false
+```
+
+That line is how a store commit is traced back to the extractor code that
+produced it: the store commit's time falls inside a run, and the run names the
+revision and whether the tree was dirty. When git cannot place the directory at
+a commit (not a checkout, no commits yet, git unavailable) the line carries git's
+error in place of the revision.
+
+### The unattended sweep runs only committed code
+
+Nobody watches the sweep, so it is the one run that is gated. When the directory
+is dirty, or git cannot place it at a commit, the sweep logs `sweep skipped` with
+the reason and stops before it reads or writes the ledger
+(`~/.loom/extract.state`). Nothing is marked, so the sessions it would have
+taken stay queued and are extracted by the first sweep after the change is
+committed. While you edit, the daemon waits; commit to let it resume.
+
+The check is repeated immediately before each extraction, since each one runs
+`extract.py` afresh from the checkout and a sweep's extractions span minutes. If
+the directory has become dirty or untraceable, or `HEAD` has moved off the
+revision the sweep logged (a commit landed mid-sweep), the sweep logs
+`sweep stopped` with the cause and ends there. The sessions it had not reached
+stay unmarked and queued, and every extraction it did run is attributable to the
+one revision line; the next sweep logs the new revision.
+
+`loom extract --backfill` and `loom retrospect` are not gated: a human starts
+them and watches their output in the foreground, and they run whatever the
+checkout holds. The revision line says which.
+
+### Failed sessions stay failed
+
+A session the extractor fails on during a sweep or a backfill is recorded
+`failed` in the ledger, and nothing retries it: the sweep and the backfill both
+skip every session the ledger holds, and the only records ever dropped
+automatically are scope skips, which never reached the extractor. `loom
+retrospect` neither reads nor writes the ledger, so its failures burn nothing —
+re-running the command is the retry.
+
+That permanence is accepted rather than given retry machinery, on two different
+grounds:
+
+- **Sweep.** With the gate, the sweep can only fail a session on committed code.
+  A committed extractor broken enough to burn sessions is a defect in reviewed
+  code, handled as one — not a half-saved edit the sweep should have waited out,
+  which is the case the gate removes.
+- **Backfill.** A backfill run from a dirty tree can burn sessions on a
+  half-saved edit, and those records are just as permanent. That is accepted
+  because a human started the run and is watching it: every failure is logged
+  as `FAILED` with its reason, and the revision line shows `dirty=true`.
+
+To re-admit a burned session, delete its entry from `~/.loom/extract.state`
+(the ledger is JSON keyed `<agent>/<session-id>`) while no sweep or backfill is
+running — a running one rewrites the file from its own snapshot and would put the
+entry back. A session summarized after the watermark is then picked up by the
+next sweep; one from before it needs another `loom extract --backfill`. A
+session that landed a ticket-marked commit can also be re-extracted without
+touching the ledger through `loom retrospect <ticket>`, though its `failed`
+record stays. There is no flag that does any of this.
+
 ## The plan contract
 
 `loom knowledge write` reads one JSON plan on stdin:

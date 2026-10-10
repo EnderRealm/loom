@@ -69,6 +69,11 @@ func TestRetrospectExtractsEverySessionOfTheTicketForBothTypes(t *testing.T) {
 	if !reflect.DeepEqual(e.kinds, wantKinds) {
 		t.Fatalf("extract types = %v, want %v", e.kinds, wantKinds)
 	}
+	// The run writes the store, so it names the extractor code that did.
+	rev := testGit(t, e.extractors, "rev-parse", "HEAD")
+	if want := fmt.Sprintf("extractors dir=%s rev=%s dirty=false", e.extractors, rev); !strings.Contains(e.logs.String(), want) {
+		t.Fatalf("log missing %q:\n%s", want, e.logs.String())
+	}
 }
 
 func TestRetrospectReportsATicketWithNoSessions(t *testing.T) {

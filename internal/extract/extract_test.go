@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -29,10 +30,11 @@ var errExtractorFailed = errors.New("extract.py: exit status 1: input not found"
 // env wires an isolated LOOM_HOME + knowledge store + extractors checkout,
 // captures the log, and returns the recorded extractor invocations.
 type env struct {
-	t     *testing.T
-	logs  *bytes.Buffer
-	runs  []string // "<scope> <input>" per invocation
-	kinds []string // --extract-type per invocation, parallel to runs
+	t          *testing.T
+	logs       *bytes.Buffer
+	runs       []string // "<scope> <input>" per invocation
+	kinds      []string // --extract-type per invocation, parallel to runs
+	extractors string   // the committed checkout LOOM_EXTRACTORS_DIR names
 }
 
 func newEnv(t *testing.T, scopes ...string) *env {
@@ -46,13 +48,29 @@ func newEnv(t *testing.T, scopes ...string) *env {
 		}
 	}
 
+	// A committed checkout, since the sweep runs nothing from a dirty one.
+	// Global and system git config are isolated so the developer's identity,
+	// hooks or core.excludesFile cannot change what the fixture commits or what
+	// the dirty check reports.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	extractors := t.TempDir()
 	if err := os.WriteFile(filepath.Join(extractors, "extract.py"), []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(extractors, ".gitignore"), []byte("__pycache__/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, extractors, "init", "-q")
+	testGit(t, extractors, "config", "user.email", "test@example.com")
+	testGit(t, extractors, "config", "user.name", "loom test")
+	commitAll(t, extractors)
 	t.Setenv("LOOM_EXTRACTORS_DIR", extractors)
 
-	e := &env{t: t, logs: &bytes.Buffer{}}
+	e := &env{t: t, logs: &bytes.Buffer{}, extractors: extractors}
 
 	orig := runExtractor
 	runExtractor = func(ctx context.Context, _, script, input, scope, kind string) (extractRun, error) {
@@ -72,6 +90,14 @@ func newEnv(t *testing.T, scopes ...string) *env {
 	// installed for a while; the tests' own sessions land after it.
 	e.setWatermark(time.Now().Add(-time.Hour))
 	return e
+}
+
+// commitAll commits everything in the extractors checkout, which is what lifts
+// the sweep's gate.
+func commitAll(t *testing.T, dir string) {
+	t.Helper()
+	testGit(t, dir, "add", "-A")
+	testGit(t, dir, "commit", "-q", "-m", "extractors")
 }
 
 // setWatermark rewrites the ledger with the given watermark and no visited
@@ -499,10 +525,11 @@ func TestSweepEscapesHostileIdentityInTheLog(t *testing.T) {
 
 			sweep(context.Background(), Options{})
 
-			// extract + ok, extract + FAILED, two skips, and the sweep summary.
+			// The extractors revision, extract + ok, extract + FAILED, two skips,
+			// and the sweep summary.
 			logs := e.logs.String()
-			if got := strings.Count(logs, "\n"); got != 7 {
-				t.Fatalf("log has %d lines, want 7 — one per statement:\n%q", got, logs)
+			if got := strings.Count(logs, "\n"); got != 8 {
+				t.Fatalf("log has %d lines, want 8 — one per statement:\n%q", got, logs)
 			}
 			if strings.ContainsFunc(strings.ReplaceAll(logs, "\n", ""), unicode.IsControl) {
 				t.Fatalf("log carries a raw control character:\n%q", logs)
@@ -622,6 +649,168 @@ func TestSweepNoOpsWithoutExtractorScript(t *testing.T) {
 	}
 	if len(st.Sessions) != 0 {
 		t.Fatalf("ledger recorded %v despite no extractor — sessions must stay unvisited", st.Sessions)
+	}
+}
+
+// Every sweep names the commit it ran, so a store commit traces back to the
+// extractor code that produced it.
+func TestSweepLogsTheExtractorsRevision(t *testing.T) {
+	e := newEnv(t, "loom")
+	e.addSession("s1", "https://github.com/EnderRealm/loom.git")
+	// Ignored files are not code the sweep runs, so they must not gate it.
+	if err := os.MkdirAll(filepath.Join(e.extractors, "__pycache__"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.extractors, "__pycache__", "extract.cpython-312.pyc"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := sweep(context.Background(), Options{})
+
+	if r.gated || len(e.runs) != 1 {
+		t.Fatalf("gated=%t runs=%v, want one run from a clean checkout:\n%s", r.gated, e.runs, e.logs.String())
+	}
+	rev := testGit(t, e.extractors, "rev-parse", "HEAD")
+	want := fmt.Sprintf("extractors dir=%s rev=%s dirty=false", e.extractors, rev)
+	if !strings.Contains(e.logs.String(), want) {
+		t.Fatalf("log missing %q:\n%s", want, e.logs.String())
+	}
+}
+
+// Uncommitted extractor code must not write the store. The gated sweep visits
+// nothing, so the session is extracted once the change is committed.
+func TestSweepSkipsADirtyExtractorsCheckout(t *testing.T) {
+	cases := map[string]func(dir string) error{
+		"modified": func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "extract.py"), []byte("#!/usr/bin/env python3\nbroken(\n"), 0o755)
+		},
+		"untracked": func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "helper.py"), []byte("x = 1\n"), 0o644)
+		},
+	}
+	for name, dirty := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, "loom")
+			e.addSession("s1", "https://github.com/EnderRealm/loom.git")
+			if err := dirty(e.extractors); err != nil {
+				t.Fatal(err)
+			}
+
+			r := sweep(context.Background(), Options{})
+
+			if !r.gated || len(e.runs) != 0 {
+				t.Fatalf("gated=%t runs=%v, want a gated sweep that ran nothing", r.gated, e.runs)
+			}
+			if !strings.Contains(e.logs.String(), "dirty=true") ||
+				!strings.Contains(e.logs.String(), "sweep skipped") {
+				t.Fatalf("log missing the dirty flag and skip line:\n%s", e.logs.String())
+			}
+			st, err := loadState()
+			if err != nil {
+				t.Fatalf("load state: %v", err)
+			}
+			if len(st.Sessions) != 0 {
+				t.Fatalf("ledger recorded %v during a gated sweep — sessions must stay queued", st.Sessions)
+			}
+
+			commitAll(t, e.extractors)
+			if r := sweep(context.Background(), Options{}); r.gated || len(e.runs) != 1 {
+				t.Fatalf("gated=%t runs=%v after the commit, want the queued session extracted", r.gated, e.runs)
+			}
+		})
+	}
+}
+
+// Each extraction runs extract.py afresh from the checkout, so an edit or a
+// commit landing while the first one runs must stop the sweep before the next:
+// the edit is unreviewed, and a moved HEAD is not the revision the sweep logged.
+// The session not yet reached stays queued.
+func TestSweepStopsWhenTheExtractorsCheckoutChangesMidSweep(t *testing.T) {
+	cases := map[string]struct {
+		change func(t *testing.T, dir string)
+		want   string
+	}{
+		"dirtied": {
+			change: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "extract.py"), []byte("#!/usr/bin/env python3\nbroken(\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "gained uncommitted or untracked changes mid-sweep",
+		},
+		"committed": {
+			change: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "extract.py"), []byte("#!/usr/bin/env python3\n# v2\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				commitAll(t, dir)
+			},
+			want: "mid-sweep — remaining sessions stay queued for the next sweep",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, "loom")
+			e.addSession("s1", "https://github.com/EnderRealm/loom.git")
+			e.addSession("s2", "https://github.com/EnderRealm/loom.git")
+
+			stub := runExtractor
+			runExtractor = func(ctx context.Context, key, script, input, scope, kind string) (extractRun, error) {
+				if len(e.runs) == 0 {
+					tc.change(t, e.extractors)
+				}
+				return stub(ctx, key, script, input, scope, kind)
+			}
+			t.Cleanup(func() { runExtractor = stub })
+
+			r := sweep(context.Background(), Options{})
+
+			if !r.gated || len(e.runs) != 1 {
+				t.Fatalf("gated=%t runs=%v, want the sweep stopped after the first extraction:\n%s", r.gated, e.runs, e.logs.String())
+			}
+			if !strings.Contains(e.logs.String(), "sweep stopped: ") || !strings.Contains(e.logs.String(), tc.want) {
+				t.Fatalf("log missing the stop line %q:\n%s", tc.want, e.logs.String())
+			}
+			st, err := loadState()
+			if err != nil {
+				t.Fatalf("load state: %v", err)
+			}
+			if len(st.Sessions) != 1 {
+				t.Fatalf("ledger recorded %v, want only the first session — the second must stay queued", st.Sessions)
+			}
+		})
+	}
+}
+
+// A checkout git cannot place at a commit is gated like a dirty one: the code
+// the sweep would run cannot be traced.
+func TestSweepSkipsAnExtractorsDirOutsideGit(t *testing.T) {
+	e := newEnv(t, "loom")
+	e.addSession("s1", "https://github.com/EnderRealm/loom.git")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "extract.py"), []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOM_EXTRACTORS_DIR", dir)
+	// Stops git's discovery at dir, so a temp dir that happens to sit inside a
+	// repo still reads as outside one.
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+
+	r := sweep(context.Background(), Options{})
+
+	if !r.gated || len(e.runs) != 0 {
+		t.Fatalf("gated=%t runs=%v, want a gated sweep that ran nothing", r.gated, e.runs)
+	}
+	if !strings.Contains(e.logs.String(), "extractors dir="+dir) ||
+		!strings.Contains(e.logs.String(), "sweep skipped") {
+		t.Fatalf("log missing the dir and skip line:\n%s", e.logs.String())
+	}
+	st, err := loadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(st.Sessions) != 0 {
+		t.Fatalf("ledger recorded %v during a gated sweep — sessions must stay queued", st.Sessions)
 	}
 }
 

@@ -76,6 +76,28 @@ func TestBackfillReachesSessionsBeforeTheWatermark(t *testing.T) {
 	}
 }
 
+// A backfill is foreground and watched, so a dirty checkout does not stop it —
+// but its store commits still have to trace back to the code that made them.
+func TestBackfillLogsTheExtractorsRevisionWithoutGating(t *testing.T) {
+	e := newEnv(t, "loom")
+	e.historical()
+	e.addSession("historical", loomRemote)
+	if err := os.WriteFile(filepath.Join(e.extractors, "helper.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backfill(context.Background(), Options{Backfill: true})
+
+	if len(e.runs) != 1 {
+		t.Fatalf("runs = %v, want one — a backfill is not gated on a dirty checkout", e.runs)
+	}
+	rev := testGit(t, e.extractors, "rev-parse", "HEAD")
+	want := fmt.Sprintf("extractors dir=%s rev=%s dirty=true", e.extractors, rev)
+	if !strings.Contains(e.logs.String(), want) {
+		t.Fatalf("log missing %q:\n%s", want, e.logs.String())
+	}
+}
+
 func TestBackfillDryRunSpendsNothing(t *testing.T) {
 	e := newEnv(t, "loom")
 	e.historical()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -74,6 +75,9 @@ func backfill(ctx context.Context, opts Options) backfillResult {
 		log.Printf("extractor unavailable: %v", err)
 		return r
 	}
+	// Logged, not gated: a backfill is started and watched by a human, who owns
+	// what the checkout holds. The line is what traces its store commits.
+	logExtractorsRevision(ctx, filepath.Dir(script))
 	load := loadState
 	if opts.DryRun {
 		load = peekState
