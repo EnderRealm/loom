@@ -72,7 +72,8 @@ def summary_table(results):
 
 
 def config_sort_key(label):
-    order = {"haiku": 0, "sonnet": 1, "opus": 2, "gpt5-low": 3, "gpt54-low": 4, "gpt54-med": 5, "gpt54-high": 6}
+    order = {"haiku": 0, "sonnet": 1, "opus": 2, "gpt5-low": 3, "gpt54-low": 4, "gpt54-med": 5, "gpt54-high": 6,
+             "gpt56-low": 7, "gpt56-med": 8, "gpt56-high": 9}
     return order.get(label, 99)
 
 

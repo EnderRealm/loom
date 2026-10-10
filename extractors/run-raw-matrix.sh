@@ -11,15 +11,14 @@ CONFIGS=(
   "haiku|claude|haiku|-"
   "sonnet|claude|sonnet|-"
   "opus|claude|opus|-"
-  "gpt5-low|codex|gpt-5|low"
-  "gpt54-low|codex|gpt-5.4|low"
-  "gpt54-med|codex|gpt-5.4|medium"
-  "gpt54-high|codex|gpt-5.4|high"
+  "gpt56-low|codex|gpt-5.6-sol|low"
+  "gpt56-med|codex|gpt-5.6-sol|medium"
+  "gpt56-high|codex|gpt-5.6-sol|high"
 )
 
 JUDGE_ARGS=(--judge llm --judge-provider claude --judge-model haiku)
 
-echo "=== Raw extraction matrix: 7 configs × 1 session (apr08 jsonl) ==="
+echo "=== Raw extraction matrix: ${#CONFIGS[@]} configs × 1 session (apr08 jsonl) ==="
 echo
 
 total_start=$(date +%s)

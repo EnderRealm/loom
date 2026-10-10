@@ -20,10 +20,9 @@ CONFIGS=(
   "haiku|claude|haiku|-"
   "sonnet|claude|sonnet|-"
   "opus|claude|opus|-"
-  "gpt5-low|codex|gpt-5|low"
-  "gpt54-low|codex|gpt-5.4|low"
-  "gpt54-med|codex|gpt-5.4|medium"
-  "gpt54-high|codex|gpt-5.4|high"
+  "gpt56-low|codex|gpt-5.6-sol|low"
+  "gpt56-med|codex|gpt-5.6-sol|medium"
+  "gpt56-high|codex|gpt-5.6-sol|high"
 )
 
 # Judge is fixed: claude haiku (LLM scoring) for consistency and cost.

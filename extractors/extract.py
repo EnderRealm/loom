@@ -1102,8 +1102,12 @@ def compare_llm(candidates: list[dict], refs: list[dict], provider: str, model: 
     return {"results": results, "mean": mean, "extras": extras}
 
 
+# Must be an alias the configured codex account accepts: plain gpt-5 and
+# gpt-5.4 are rejected with a 400 on ChatGPT-account codex.
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+
 PRESETS = {
-    "fast": {"provider": "codex", "model": "gpt-5", "reasoning": "low"},
+    "fast": {"provider": "codex", "model": DEFAULT_CODEX_MODEL, "reasoning": "low"},
     "deep": {"provider": "claude", "model": "sonnet", "reasoning": "medium"},
 }
 
@@ -1160,7 +1164,7 @@ def summary_provenance(path: Path) -> tuple[str | None, list[str]]:
 def main():
     p = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
-        epilog="Presets: --preset fast (gpt-5 low, default) | --preset deep (sonnet)",
+        epilog=f"Presets: --preset fast ({DEFAULT_CODEX_MODEL} low, default) | --preset deep (sonnet)",
     )
     p.add_argument("--extract-type", default="truth", choices=list(TYPE_CONFIG),
                     help="what to extract: truth or decision (default: truth)")
@@ -1171,9 +1175,9 @@ def main():
                     help="scope directory under knowledge/truths, or 'auto' to resolve it "
                          "from --project-path via the repo's .loom-project marker")
     p.add_argument("--project-path", default=".", help="path --scope auto resolves from (default: cwd)")
-    p.add_argument("--preset", choices=list(PRESETS), help="shortcut: fast (gpt-5 low) or deep (sonnet)")
+    p.add_argument("--preset", choices=list(PRESETS), help=f"shortcut: fast ({DEFAULT_CODEX_MODEL} low) or deep (sonnet)")
     p.add_argument("--provider", default="codex", choices=["claude", "codex"], help="LLM provider (default: codex)")
-    p.add_argument("--model", default="gpt-5", help="model alias/id (default: gpt-5)")
+    p.add_argument("--model", default=DEFAULT_CODEX_MODEL, help=f"model alias/id (default: {DEFAULT_CODEX_MODEL})")
     p.add_argument("--reasoning", default="low", choices=["low", "medium", "high", "xhigh"], help="codex reasoning effort (default: low)")
     p.add_argument("--threshold", type=float, default=0.5, help="pass threshold for mean score")
     p.add_argument("--dry-run", action="store_true", help="print the full prompt and exit")
