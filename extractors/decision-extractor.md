@@ -72,7 +72,7 @@ Example: A decision to "clamp effort:max to high in the orchestrator dispatch la
 4. **If the input yields zero decisions**, return the single line `NO_DECISIONS` and nothing else.
 5. **Separate multiple decisions with the sentinel `===END-OF-DECISION===` on its own line.** Emit the sentinel after each decision, including the last one.
 6. **All paths must be project-relative.** Same convention as truth files.
-7. **A typical session summary yields 2-5 extractable decisions.** If the input has a populated `### Decisions` section with 5+ bullets and you find fewer than 2 worth extracting, you may be filtering too aggressively.
+7. **Two is the expected ceiling, not a quota — more is rare, and only when each one independently passes the three tests.** Zero is a correct output, and many sessions have none: they carry out choices already made, or make local implementation and process choices that bind nothing past the session, and `NO_DECISIONS` (rule 4) is that answer, not a failure to look hard enough. The number of bullets in a `### Decisions` section is not a reason to emit more. Do not fill the ceiling. Going past two is exceptional — emit each additional decision only after re-applying the three tests to it on its own and finding it survives.
 
 ## Reference examples
 
