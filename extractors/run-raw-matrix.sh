@@ -4,7 +4,18 @@ set -u
 LOOM_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RESULTS_DIR="$LOOM_ROOT/extractors/results-raw"
 EXTRACT="$LOOM_ROOT/extractors/extract.py"
-JSONL="/Users/smacbeth/.claude/projects/-Users-smacbeth-code-forge/88f1615b-69cc-4330-9c8b-3affd4494229.jsonl"
+# Raw counterpart of run-matrix.sh's apr08-forge-bugs session, as stored by `loom receiver`
+# under $LOOM_HOME/received/<agent>/<project-slug>/. The slug is the project dir on the machine
+# that recorded the session, so search every slug by session id. The same session can be
+# shipped from more than one slug; the receiver appends, so a truncated copy is a byte prefix
+# of the complete one and the largest match is the most complete.
+RAW_SESSION_DIR="${LOOM_HOME:-$HOME/.loom}/received/claude-code"
+RAW_SESSION_FILE="88f1615b-69cc-4330-9c8b-3affd4494229.jsonl"
+RAW_SESSION_JSONL="${RAW_SESSION_JSONL:-$(ls -S "$RAW_SESSION_DIR"/*/"$RAW_SESSION_FILE" 2>/dev/null | head -n 1)}"
+if [[ ! -f "$RAW_SESSION_JSONL" ]]; then
+  echo "run-raw-matrix.sh: raw session JSONL not found: ${RAW_SESSION_JSONL:-$RAW_SESSION_DIR/*/$RAW_SESSION_FILE} (set RAW_SESSION_JSONL to override)" >&2
+  exit 1
+fi
 mkdir -p "$RESULTS_DIR"
 
 CONFIGS=(
@@ -35,7 +46,7 @@ for cfg_entry in "${CONFIGS[@]}"; do
   echo -n "  [run ] $cfg_label ... "
 
   cmd=(python3 "$EXTRACT"
-    --input "$JSONL"
+    --input "$RAW_SESSION_JSONL"
     --input-format raw
     --scope forge
     --provider "$provider"
