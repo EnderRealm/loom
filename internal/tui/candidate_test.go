@@ -135,6 +135,9 @@ func TestPromoteCandidate(t *testing.T) {
 	if strings.Contains(s, "extracted_at") || strings.Contains(s, "extracted_by") {
 		t.Errorf("promoted file retains candidate-only provenance:\n%s", s)
 	}
+	if strings.Contains(s, "scope_mismatch") {
+		t.Errorf("promoted file carries a scope_mismatch key:\n%s", s)
+	}
 	if !strings.Contains(s, "verified_at:") {
 		t.Errorf("promoted file missing verified_at:\n%s", s)
 	}
@@ -150,6 +153,92 @@ func TestPromoteCandidate(t *testing.T) {
 	}
 	if len(arts) != 1 || arts[0].Status != "validated" {
 		t.Errorf("after promote, expected 1 validated artifact, got %+v", arts)
+	}
+}
+
+// seedFlaggedCandidate rewrites the seeded candidate as the extractor files one
+// it could not route: scope: set to declared, scope_mismatch: warp appended.
+func seedFlaggedCandidate(t *testing.T, declared string) (string, Artifact) {
+	t.Helper()
+	root, art := seedCandidate(t)
+	body := strings.Replace(candidateFixture, "scope: loom\n", "scope: "+declared+"\n", 1)
+	body = strings.Replace(body, "extracted_by: claude:sonnet\n", "extracted_by: claude:sonnet\nscope_mismatch: warp\n", 1)
+	if err := os.WriteFile(art.Path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	arts, err := LoadKnowledge()
+	if err != nil || len(arts) != 1 {
+		t.Fatalf("LoadKnowledge: %v, %d artifacts", err, len(arts))
+	}
+	return root, arts[0]
+}
+
+// TestPromoteRefusesUnresolvedScopeMismatch: a candidate the extractor flagged
+// declares a scope other than the directory it sits in, and promoting it would
+// move that schema violation into the validated tree, which derives scope from
+// the directory alone.
+func TestPromoteRefusesUnresolvedScopeMismatch(t *testing.T) {
+	for _, declared := range []string{"warp", `"warp"`} {
+		root, art := seedFlaggedCandidate(t, declared)
+
+		_, _, err := promoteNow(art)
+		if err == nil {
+			t.Fatalf("scope %s: promote of a flagged candidate was not refused", declared)
+		}
+		if !strings.Contains(err.Error(), `"warp"`) || !strings.Contains(err.Error(), "loom") {
+			t.Errorf("refusal %q does not name the declared scope and the directory", err)
+		}
+		if _, err := os.Stat(art.Path); err != nil {
+			t.Errorf("candidate should remain after a refused promote: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "truths")); !os.IsNotExist(err) {
+			t.Errorf("refused promote wrote into the validated tree: %v", err)
+		}
+	}
+}
+
+// TestPromoteRefusesFlaggedCandidateWithoutScope: with the verdict present and
+// no scope: to compare, agreement with the directory cannot be shown.
+func TestPromoteRefusesFlaggedCandidateWithoutScope(t *testing.T) {
+	_, art := seedFlaggedCandidate(t, "loom")
+	art.Body = strings.Replace(art.Body, "scope: loom\n", "", 1)
+
+	if _, _, err := promoteNow(art); err == nil {
+		t.Fatal("promote of a flagged candidate with no scope: was not refused")
+	}
+}
+
+// TestPromoteCorrectedScopeMismatch: once the human corrects scope: to the
+// directory the mismatch is resolved, the candidate promotes, and the stale
+// verdict stays behind at the review gate.
+func TestPromoteCorrectedScopeMismatch(t *testing.T) {
+	_, art := seedFlaggedCandidate(t, "loom")
+
+	dest, _, err := promoteNow(art)
+	if err != nil {
+		t.Fatalf("promoteCandidate: %v", err)
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "scope_mismatch") {
+		t.Errorf("promoted file carries a scope_mismatch key:\n%s", body)
+	}
+	if !strings.Contains(string(body), "scope: loom\n") {
+		t.Errorf("promoted file lost its scope:\n%s", body)
+	}
+}
+
+func TestPromoteFrontmatterDropsScopeMismatch(t *testing.T) {
+	in := "---\nid: x\nscope: loom\nstatus: candidate\nscope_mismatch: warp\n---\n\nscope_mismatch: warp stays in prose\n"
+	out := promoteFrontmatter(in)
+	fm, prose, _ := strings.Cut(strings.TrimPrefix(out, "---\n"), "---\n")
+	if strings.Contains(fm, "scope_mismatch") {
+		t.Errorf("frontmatter retains scope_mismatch:\n%s", out)
+	}
+	if !strings.Contains(prose, "scope_mismatch: warp stays in prose") {
+		t.Errorf("body text was altered:\n%s", out)
 	}
 }
 

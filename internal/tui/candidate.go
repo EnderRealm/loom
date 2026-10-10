@@ -41,15 +41,16 @@ func candidateKebab(id, scope string) string {
 
 // promoteCandidate moves a candidate from _candidates/<type>s/<scope>/ to its
 // validated home <type>s/<scope>/, cleaning candidate-only frontmatter (drops
-// extracted_at/extracted_by, flips status to validated, bumps verified_at), and
-// defers the commit of the written destination and the removed source — those
-// paths only, so unrelated working-tree dirt stays out of the record. The move
+// extracted_at/extracted_by/scope_mismatch, flips status to validated, bumps
+// verified_at), and defers the commit of the written destination and the
+// removed source — those paths only, so unrelated working-tree dirt stays out
+// of the record. The move
 // has landed when it returns, so the list can be reloaded before the record is
 // attempted; the returned Commit performs it and yields the reason the commit
 // did not happen or was not published. Returns the destination path and that
 // Commit, which is nil only alongside an error — the gesture itself did not
 // land, so there is nothing to record. It never overwrites an existing validated
-// file.
+// file, and it refuses a candidate whose scope mismatch is unresolved.
 func promoteCandidate(a Artifact) (string, store.Commit, error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
@@ -61,6 +62,13 @@ func promoteCandidate(a Artifact) (string, store.Commit, error) {
 	}
 	if a.Status != "candidate" {
 		return "", nil, fmt.Errorf("not a candidate")
+	}
+	// The validated tree derives scope from the directory and never reads the
+	// declaration again, so promoting past the extractor's scope_mismatch verdict
+	// would bury a file whose scope: disagrees with where it lives.
+	if declared, ok := unresolvedScopeMismatch(a.Body, a.Scope); ok {
+		return "", nil, fmt.Errorf("scope %q disagrees with directory %s — onboard it and move the file, or correct scope: (e)",
+			logField(declared, logFieldScopeMax), a.Scope)
 	}
 	// Resolved once and handed to the store: KnowledgeRoot() twice — once to
 	// build the paths, once inside Apply — is two answers waiting to differ.
@@ -254,23 +262,63 @@ func gestureMessage(gesture string, a Artifact) string {
 	return gesture + " " + a.Type + " " + a.Scope + "/" + a.ID
 }
 
+// frontmatterEnd is the index of the line closing the `---` block that opens
+// lines, or -1 when lines open no complete block.
+func frontmatterEnd(lines []string) int {
+	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "---" {
+		return -1
+	}
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return i
+		}
+	}
+	return -1
+}
+
+// unresolvedScopeMismatch reports a candidate that still carries the
+// extractor's scope_mismatch verdict while its top-level scope: — last one
+// wins, one pair of surrounding quotes stripped — disagrees with dir, the
+// directory-derived scope. A missing scope: counts as disagreeing, since
+// agreement cannot be shown. Returns the declared value. A candidate whose
+// scope: has been corrected to dir is resolved: the stale key is dropped at
+// promotion.
+func unresolvedScopeMismatch(body, dir string) (string, bool) {
+	lines := strings.Split(body, "\n")
+	end := frontmatterEnd(lines)
+	if end < 0 {
+		return "", false
+	}
+	flagged := false
+	declared := ""
+	for _, line := range lines[1:end] {
+		m := frontmatterKey.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		switch m[1] {
+		case "scope_mismatch":
+			flagged = true
+		case "scope":
+			declared = strings.TrimSpace(m[2])
+			if len(declared) >= 2 && (declared[0] == '"' || declared[0] == '\'') && declared[len(declared)-1] == declared[0] {
+				declared = declared[1 : len(declared)-1]
+			}
+		}
+	}
+	return declared, flagged && declared != dir
+}
+
 // promoteFrontmatter rewrites a candidate's frontmatter for the validated tree:
 // status→validated (deduped — candidates written before inject_frontmatter
 // replaced keys carry a duplicate status line),
-// verified_at bumped to today, extracted_at/extracted_by dropped. The body and
-// indented sub-fields (evidence/sources children) pass through untouched.
+// verified_at bumped to today, extracted_at/extracted_by dropped, and
+// scope_mismatch dropped — the extractor's routing verdict for the review gate,
+// not artifact content. The body and indented sub-fields (evidence/sources
+// children) pass through untouched.
 func promoteFrontmatter(body string) string {
 	lines := strings.Split(body, "\n")
-	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "---" {
-		return body
-	}
-	end := -1
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			end = i
-			break
-		}
-	}
+	end := frontmatterEnd(lines)
 	if end < 0 {
 		return body
 	}
@@ -289,8 +337,8 @@ func promoteFrontmatter(body string) string {
 			continue
 		}
 		switch m[1] {
-		case "extracted_at", "extracted_by":
-			// drop candidate-only provenance
+		case "extracted_at", "extracted_by", "scope_mismatch":
+			// drop candidate-only provenance and the routing verdict
 		case "status":
 			if !statusDone {
 				fm = append(fm, "status: validated")

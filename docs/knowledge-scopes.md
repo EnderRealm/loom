@@ -68,8 +68,11 @@ TUI renders a candidate's body verbatim, while `Artifact.Scope` comes from the
 directory. The key in a stored file is always this process's verdict — a
 model-emitted one is stripped from the frontmatter first, or a candidate that
 routed cleanly would carry a flag loom never raised. A human then either
-onboards the declared scope and moves the file, or corrects the declaration. The
-trade-off is that an un-onboarded subject scope still costs a manual move — but
+onboards the declared scope and moves the file, or corrects the declaration.
+Until one of those happens the TUI refuses to promote the candidate — a flagged
+file whose `scope:` still disagrees with its directory — and a promotion drops
+the key, since it is a verdict for the review gate rather than artifact
+content. The trade-off is that an un-onboarded subject scope still costs a manual move — but
 a candidate misfiled loudly is recoverable where one misfiled silently, as ~200
 in the store were, is not.
 
