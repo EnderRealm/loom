@@ -32,7 +32,7 @@ Remaining:
 
 ## Extractor improvements
 
-- [ ] Haiku defect-as-truth false positive — the reframe rule in the prompt doesn't stick on haiku. Candidates like `ticket-edit-acceptance-append` appear in nearly every haiku run. Either strengthen the prompt or add a post-extraction filter.
+- [x] Haiku defect-as-truth false positive — the reframe rule in the prompt doesn't stick on haiku. Candidates like `ticket-edit-acceptance-append` appear in nearly every haiku run. Re-measured 2026-10-10 against the current prompt: 0/12 haiku truth candidates were defect-shaped over 6 runs; defects now route to the `ticket` destination.
 - [ ] gpt54-med anomaly — non-monotonic scoring (worse than both low and high). Investigate whether this is consistent or a fluke. If consistent, remove medium from the matrix.
 - [ ] Claude preamble resilience — parser is fixed, but the prompt should also be strengthened to reduce preamble frequency. Codex never emits preambles; claude does ~50% of the time.
 
