@@ -16,6 +16,9 @@ import (
 // Indented lines (sub-fields under sources:, evidence:) are ignored.
 var frontmatterKey = regexp.MustCompile(`^([a-z_]+):\s*(.*)$`)
 
+// relatedItem matches an entry of a related: block list, capturing its indent.
+var relatedItem = regexp.MustCompile(`^(\s*)-\s`)
+
 // pluralType maps a singular artifact type to the directory segment used in the
 // knowledge store (truth → truths, decision → decisions, ticket → tickets).
 func pluralType(t string) string {
@@ -134,14 +137,17 @@ func universalDest(root string, a Artifact) (string, error) {
 	return dest, nil
 }
 
-// promoteUniversal moves a validated truth from truths/<scope>/ to
-// truths/universal/ under the same filename, rewriting scope: to universal and
-// recording promoted_from: <scope>, and removes the project copy — one store
-// unit of work, its commit deferred as promoteCandidate's is. The claim is not
-// rewritten here: a universal truth is abstracted from the project one, which
-// is the human's rewrite in $EDITOR after this returns. Returns the destination
-// path and the Commit, nil only alongside an error. It refuses what
-// universalDest refuses, and never overwrites an existing universal file.
+// promoteUniversal copies a validated truth from truths/<scope>/ to
+// truths/universal/ under the same filename, leaving the project file
+// untouched as the verified instance the universal claim rests on: its
+// evidence paths and verify commands are relative to that project's root, so
+// it is the instance that can still be checked. The copy's frontmatter is
+// rewritten by universalFrontmatter — one store unit of work, its commit
+// deferred as promoteCandidate's is. The claim is not rewritten here: a
+// universal truth is abstracted from the project one, which is the human's
+// rewrite in $EDITOR after this returns. Returns the destination path and the
+// Commit, nil only alongside an error. It refuses what universalDest refuses,
+// and never overwrites an existing universal file.
 func promoteUniversal(a Artifact) (string, store.Commit, error) {
 	// Resolved once, for promoteCandidate's reason.
 	root := KnowledgeRoot()
@@ -149,10 +155,6 @@ func promoteUniversal(a Artifact) (string, store.Commit, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	// Write-then-remove for promoteCandidate's reasons: once the universal file
-	// exists the promotion has landed and is reported as such, and a leftover
-	// project copy would list the truth twice.
-	written := false
 	commit, err := store.ApplyDeferred(root, gestureMessage(universalGesture, a), func(tx *store.Tx) error {
 		// Read again through the store rather than publishing a.Body: the load
 		// follows symlinks, so a source linked out of the store would otherwise
@@ -161,48 +163,74 @@ func promoteUniversal(a Artifact) (string, store.Commit, error) {
 		if err != nil {
 			return err
 		}
-		promoted, err := universalFrontmatter(string(body), a.Scope)
+		promoted, err := universalFrontmatter(string(body), a.Scope, filepath.Base(a.Path))
 		if err != nil {
 			return err
 		}
-		if err := tx.WriteFile(dest, []byte(promoted)); err != nil {
-			return err
-		}
-		written = true
-		return tx.Remove(a.Path)
+		return tx.WriteFile(dest, []byte(promoted))
 	})
 	if err != nil {
-		if !written {
-			return "", nil, err
-		}
-		return dest, withReason(commit, store.ShortReason(err)), nil
+		return "", nil, err
 	}
 	return dest, commit, nil
 }
 
+// universalID is the id of the universal truth filed as name: distinct from the
+// project truth's, since both stay in the store and ids key contradiction
+// matching.
+func universalID(name string) string {
+	return knowledge.UniversalScope + "-" + strings.TrimSuffix(name, ".md")
+}
+
 // universalFrontmatter rewrites a project truth's frontmatter for
-// truths/universal/: the first top-level scope: becomes universal followed by
-// promoted_from: <from>, and any further scope: or prior promoted_from: lines
-// are dropped so the file carries one of each. A file with no scope: gets both
-// appended. The body passes through untouched. A file with no complete
-// frontmatter block is an error rather than a pass-through: promoted_from: is
-// the only record of the source project once the file has moved.
-func universalFrontmatter(body, from string) (string, error) {
+// truths/universal/<name>: the first top-level id: becomes universalID(name)
+// and the first scope: becomes universal followed by promoted_from: <from>,
+// with any further id:, scope: or prior promoted_from: lines dropped so the
+// file carries one of each; a file missing id: or scope: gets them appended.
+// <from>/<name>, the project truth it cites, is appended to related: — to a
+// block list after its last entry, to a flow list inside its brackets, beside a
+// single scalar entry as a block list — or added as a new related: list. The
+// body passes through untouched. A file with no complete frontmatter block is
+// an error rather than a pass-through: there is nowhere to record the source.
+func universalFrontmatter(body, from, name string) (string, error) {
 	lines := strings.Split(body, "\n")
 	end := frontmatterEnd(lines)
 	if end < 0 {
 		return "", fmt.Errorf("no frontmatter block to rewrite")
 	}
+	source := from + "/" + name
 
 	var fm []string
-	scopeDone := false
+	idDone, scopeDone, relatedDone := false, false, false
+	// inRelated is set while the lines of a related: block list are passing
+	// through; the source is appended where that block ends, at the indent its
+	// own entries use.
+	inRelated := false
+	indent := "  "
+	closeRelated := func() {
+		if inRelated {
+			fm = append(fm, indent+"- "+source)
+			inRelated = false
+		}
+	}
 	for _, line := range lines[1:end] {
 		m := frontmatterKey.FindStringSubmatch(line)
 		if m == nil {
+			if inRelated {
+				if item := relatedItem.FindStringSubmatch(line); item != nil {
+					indent = item[1]
+				}
+			}
 			fm = append(fm, line)
 			continue
 		}
+		closeRelated()
 		switch m[1] {
+		case "id":
+			if !idDone {
+				fm = append(fm, "id: "+universalID(name))
+				idDone = true
+			}
 		case "scope":
 			if !scopeDone {
 				fm = append(fm, "scope: "+knowledge.UniversalScope, "promoted_from: "+from)
@@ -210,15 +238,45 @@ func universalFrontmatter(body, from string) (string, error) {
 			}
 		case "promoted_from":
 			// replaced by this promotion's own
+		case "related":
+			if relatedDone {
+				fm = append(fm, line)
+				continue
+			}
+			relatedDone = true
+			v := strings.TrimSpace(m[2])
+			switch {
+			case v == "" || strings.HasPrefix(v, "#"):
+				fm = append(fm, line)
+				inRelated = true
+			case v == "null" || v == "~":
+				fm = append(fm, "related:")
+				inRelated = true
+			case strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]"):
+				if inner := strings.TrimSpace(v[1 : len(v)-1]); inner != "" {
+					fm = append(fm, "related: ["+inner+", "+source+"]")
+				} else {
+					fm = append(fm, "related: ["+source+"]")
+				}
+			default:
+				fm = append(fm, "related:", indent+"- "+v, indent+"- "+source)
+			}
 		default:
 			fm = append(fm, line)
 		}
 	}
+	closeRelated()
+	if !idDone {
+		fm = append(fm, "id: "+universalID(name))
+	}
 	if !scopeDone {
 		fm = append(fm, "scope: "+knowledge.UniversalScope, "promoted_from: "+from)
 	}
+	if !relatedDone {
+		fm = append(fm, "related:", indent+"- "+source)
+	}
 
-	out := make([]string, 0, len(lines)+2)
+	out := make([]string, 0, len(lines)+5)
 	out = append(out, "---")
 	out = append(out, fm...)
 	out = append(out, "---")

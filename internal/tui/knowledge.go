@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -274,11 +275,12 @@ func commitCmd(commit store.Commit, status, notCommitted string) tea.Cmd {
 	}
 }
 
-// promoteToUniversal moves the selected validated truth to truths/universal/
-// and, once the move is recorded, opens $EDITOR on the moved file for the
-// project-agnostic rewrite. The editor waits on the move's commit rather than
-// running beside it: the edit commits from the editor's callback, and two units
-// of work running git against one store at once would race for its index lock.
+// promoteToUniversal copies the selected validated truth to truths/universal/,
+// linked back to the project truth it leaves in place, and, once the copy is
+// recorded, opens $EDITOR on the universal file for the project-agnostic
+// rewrite. The editor waits on the copy's commit rather than running beside it:
+// the edit commits from the editor's callback, and two units of work running
+// git against one store at once would race for its index lock.
 func (m knowledgeModel) promoteToUniversal() (knowledgeModel, tea.Cmd) {
 	a := m.selected()
 	if a == nil {
@@ -289,7 +291,7 @@ func (m knowledgeModel) promoteToUniversal() (knowledgeModel, tea.Cmd) {
 	if _, err := universalDest(KnowledgeRoot(), *a); err != nil {
 		return m, statusCmd("promote to universal failed: " + err.Error())
 	}
-	// The rewrite is half the gesture, and moving a truth with no editor to
+	// The rewrite is half the gesture, and copying a truth with no editor to
 	// rewrite it would leave a project claim filed as universal.
 	if editorFromEnv() == "" {
 		return m, statusCmd("$VISUAL/$EDITOR not set")
@@ -298,15 +300,16 @@ func (m knowledgeModel) promoteToUniversal() (knowledgeModel, tea.Cmd) {
 	if err != nil {
 		return m, statusCmd("promote to universal failed: " + err.Error())
 	}
-	moved := *a
-	moved.Path = dest
-	moved.Scope = knowledge.UniversalScope
+	universal := *a
+	universal.Path = dest
+	universal.Scope = knowledge.UniversalScope
+	universal.ID = universalID(filepath.Base(dest))
 	m.showDetail = false
 	m.pendingCommits++
 	status := "promoted → " + shortenPath(dest)
 	return m, tea.Batch(loadKnowledgeCmd(), tea.Sequence(statusCmd(status), func() tea.Msg {
 		return knowledgeCommittedMsg{status: status, notCommitted: " — not committed, rewrite not opened: ",
-			warn: commit(), edit: &moved}
+			warn: commit(), edit: &universal}
 	}))
 }
 

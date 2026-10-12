@@ -187,32 +187,39 @@ project it was learned in and wins the tie-break against an equal-scoring truth
 from an unrelated one.
 
 A truth gets there from the knowledge TUI: select a validated truth and press
-`u`, in the list or the detail view. One store unit of work
-(`docs/knowledge-store-writes.md`), committed as
-`promote-universal truth <scope>/<id>`:
+`u`, in the list or the detail view. The gesture copies and links rather than
+moves: the project truth stays where it is, byte-identical, as the verified
+instance the universal claim rests on. Its evidence paths are relative to that
+project's root and its verify commands run from there, so moving it would cut
+both from their anchor and leave the original claim only in store history. One
+store unit of work (`docs/knowledge-store-writes.md`), committed as
+`promote-universal truth <scope>/<id>`, writes `truths/universal/<name>.md`
+under the same filename, with frontmatter rewritten:
 
-- writes `truths/universal/<name>.md`, keeping the filename and the id;
-- rewrites the frontmatter's `scope:` to `universal` and adds
-  `promoted_from: <scope>`, the project it came from — the only record of it
-  once the file has left that directory;
-- removes `truths/<scope>/<name>.md`.
+- `id:` becomes `universal-<name>` (the filename without `.md`) — distinct from
+  the project truth's, since both stay in the store and the loader keys
+  contradiction matching on id;
+- `scope:` becomes `universal`, followed by `promoted_from: <scope>`, the
+  project it came from;
+- `<scope>/<name>.md` — the schema's cross-scope reference form — is appended
+  to `related:`, or a `related:` list is added when the truth has none.
 
 Once that commit has landed, `$VISUAL`/`$EDITOR` opens on the universal file,
-and what it writes is committed through the store as `e`'s edit is. A move whose
+and what it writes is committed through the store as `e`'s edit is. A copy whose
 commit did not land says so on the status line and opens no editor: the edit's
-commit records the universal file alone, and would leave the project copy's
-removal unrecorded. The rewrite is expected, not optional: a universal truth is
-abstracted from the project one (`docs/overview.md`), and a project claim copied
-verbatim — its paths, its names, its id's project prefix — reads as universal
-while still describing one repo. Saving nothing leaves the moved file as the
-only record.
+commit would then record the universal file as an edit, folding the promotion
+into it. The rewrite is expected, not optional: a universal truth is abstracted
+from the project one (`docs/overview.md`), and a project claim copied verbatim —
+its paths, its names — reads as universal while still describing one repo.
+Saving nothing leaves that verbatim copy in `truths/universal/`.
 
 The gesture refuses, on the status line and with nothing written, a candidate
 (those keep `p`), a decision, a truth already in `universal`, a destination
-that already exists, a truth with no complete frontmatter block — there is
-nowhere to write `promoted_from:`, and without it the source project is lost —
+that already exists — so pressing `u` again on a truth already promoted is
+refused, since its universal copy is there — a truth with no complete
+frontmatter block — there is nowhere to write `promoted_from:` and the link —
 and a session with neither `$VISUAL` nor `$EDITOR` set,
-since the move without the rewrite is half the gesture. The source is read
+since the copy without the rewrite is half the gesture. The source is read
 through the store's checks, so a truth file that is a symlink is refused before
 anything is written rather than copying what it points at into
 `truths/universal/`.

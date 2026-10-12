@@ -73,7 +73,7 @@ func selectArtifact(t *testing.T, id string) knowledgeModel {
 
 // universalHarness runs the App over a knowledge view under a real bubbletea
 // program, so the gesture's Batch, Sequence and ExecProcess are dispatched, and
-// the move's commit handled, the way the TUI does it. It presses u at start and
+// the copy's commit handled, the way the TUI does it. It presses u at start and
 // quits once no commit is outstanding.
 type universalHarness struct {
 	app       App
@@ -125,13 +125,19 @@ func runUniversal(t *testing.T, id string) universalHarness {
 }
 
 // TestUniversalPromoteFromTheTUI drives u on a validated loom truth: the truth
-// moves to truths/universal/ with its frontmatter rewritten and the project copy
-// gone, that move is its own store commit, and $EDITOR then opens on the moved
-// file — after the move's commit, which the editor observes — and what it wrote
-// is the next commit.
+// is copied to truths/universal/ with its frontmatter rewritten to a distinct id
+// that cites the project truth, the project truth stays byte-identical, that
+// copy is its own store commit, and $EDITOR then opens on the universal file —
+// after the copy's commit, which the editor observes — and what it wrote is the
+// next commit. Both truths then load, and u on the project truth again is
+// refused for the occupied destination.
 func TestUniversalPromoteFromTheTUI(t *testing.T) {
 	root, arts := seedUniversalStore(t)
 	art := arts["loom-retry-backoff"]
+	original, err := os.ReadFile(art.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	marker := filepath.Join(t.TempDir(), "head-at-edit")
 	editor := filepath.Join(t.TempDir(), "editor.sh")
@@ -150,22 +156,23 @@ func TestUniversalPromoteFromTheTUI(t *testing.T) {
 		t.Errorf("pendingCommits = %d after the gesture, want 0", h.app.knowledge.pendingCommits)
 	}
 	if len(h.committed) != 1 || h.committed[0].warn.NotCommitted != "" {
-		t.Fatalf("the move's commit did not report cleanly: %+v", h.committed)
+		t.Fatalf("the copy's commit did not report cleanly: %+v", h.committed)
 	}
 	if h.edited == nil || h.edited.status != "" || h.edited.warn.NotCommitted != "" {
 		t.Fatalf("the edit did not commit: %+v", h.edited)
 	}
 
 	dest := filepath.Join(root, "truths", "universal", "retry-backoff.md")
-	if _, err := os.Stat(art.Path); !os.IsNotExist(err) {
-		t.Errorf("project copy still present after the promotion: %v", err)
+	if kept, err := os.ReadFile(art.Path); err != nil || string(kept) != string(original) {
+		t.Errorf("project truth changed by the promotion (%v):\n%s", err, kept)
 	}
 	body, err := os.ReadFile(dest)
 	if err != nil {
 		t.Fatalf("universal file: %v", err)
 	}
 	fm, _, _ := strings.Cut(strings.TrimPrefix(string(body), "---\n"), "\n---\n")
-	for _, want := range []string{"scope: universal", "promoted_from: loom"} {
+	for _, want := range []string{"id: universal-retry-backoff", "scope: universal", "promoted_from: loom",
+		"related:\n  - loom/retry-backoff.md"} {
 		if !strings.Contains(fm, want+"\n") && !strings.HasSuffix(fm, want) {
 			t.Errorf("frontmatter missing %q:\n%s", want, fm)
 		}
@@ -174,21 +181,21 @@ func TestUniversalPromoteFromTheTUI(t *testing.T) {
 		t.Errorf("frontmatter carries %d scope: lines, want 1:\n%s", n, fm)
 	}
 	if !strings.Contains(string(body), "evidence:\n  - path: internal/x.go") {
-		t.Errorf("sub-fields did not survive the move:\n%s", body)
+		t.Errorf("sub-fields did not survive the copy:\n%s", body)
 	}
 
-	moveSubject := universalGesture + " truth loom/" + art.ID
-	if got, _ := os.ReadFile(marker); strings.TrimSpace(string(got)) != moveSubject {
-		t.Errorf("editor opened with HEAD at %q, want the move's commit %q", strings.TrimSpace(string(got)), moveSubject)
+	copySubject := universalGesture + " truth loom/" + art.ID
+	if got, _ := os.ReadFile(marker); strings.TrimSpace(string(got)) != copySubject {
+		t.Errorf("editor opened with HEAD at %q, want the copy's commit %q", strings.TrimSpace(string(got)), copySubject)
 	}
-	if got := testGit(t, root, "log", "-1", "--format=%s", "HEAD~1"); got != moveSubject {
-		t.Errorf("move commit subject = %q, want %q", got, moveSubject)
+	if got := testGit(t, root, "log", "-1", "--format=%s", "HEAD~1"); got != copySubject {
+		t.Errorf("copy commit subject = %q, want %q", got, copySubject)
 	}
 	names := testGit(t, root, "show", "--name-status", "--no-renames", "--format=", "HEAD~1")
-	if !strings.Contains(names, "A\ttruths/universal/retry-backoff.md") || !strings.Contains(names, "D\ttruths/loom/retry-backoff.md") {
-		t.Errorf("move commit does not record the write and the removal:\n%s", names)
+	if names != "A\ttruths/universal/retry-backoff.md" {
+		t.Errorf("copy commit records more than the universal file:\n%s", names)
 	}
-	if got := testGit(t, root, "log", "-1", "--format=%s"); got != "edit truth universal/"+art.ID {
+	if got := testGit(t, root, "log", "-1", "--format=%s"); got != "edit truth universal/universal-retry-backoff" {
 		t.Errorf("edit commit subject = %q, want the universal artifact's", got)
 	}
 	if committed := testGit(t, root, "show", "HEAD:truths/universal/retry-backoff.md"); !strings.Contains(committed, "Rewritten for every project.") {
@@ -196,6 +203,23 @@ func TestUniversalPromoteFromTheTUI(t *testing.T) {
 	}
 	if st := testGit(t, root, "status", "--porcelain", "-uall"); st != "" {
 		t.Errorf("store dirty after the gesture:\n%s", st)
+	}
+
+	loaded, err := LoadKnowledge()
+	if err != nil {
+		t.Fatalf("LoadKnowledge: %v", err)
+	}
+	found := map[string]string{}
+	for _, a := range loaded {
+		found[a.ID] = a.Path
+	}
+	if found[art.ID] != art.Path || found["universal-retry-backoff"] != dest {
+		t.Errorf("after the promotion want both truths loaded, got %s=%q universal-retry-backoff=%q",
+			art.ID, found[art.ID], found["universal-retry-backoff"])
+	}
+	_, cmd := selectArtifact(t, art.ID).update(universalKey)
+	if msgs := drainCmd(cmd); len(msgs) != 1 || !strings.Contains(string(msgs[0].(statusMsg)), "already exists") {
+		t.Errorf("u again on the promoted project truth = %+v, want the already-exists refusal", msgs)
 	}
 }
 
@@ -292,12 +316,11 @@ func TestUniversalPromoteRefusesSymlinkSource(t *testing.T) {
 	}
 }
 
-// TestUniversalPromoteUncommittedMoveOpensNoEditor: when the move lands but its
+// TestUniversalPromoteUncommittedCopyOpensNoEditor: when the copy lands but its
 // commit does not — here truths/universal/ is ignored, which no promoted file
 // may be — the reason reaches the status line and $EDITOR never opens, since
-// the edit's commit would record the universal file alone and leave the
-// project copy's removal unrecorded.
-func TestUniversalPromoteUncommittedMoveOpensNoEditor(t *testing.T) {
+// the edit's commit would fold the promotion into the edit.
+func TestUniversalPromoteUncommittedCopyOpensNoEditor(t *testing.T) {
 	root, arts := seedUniversalStore(t)
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("truths/universal/\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -315,26 +338,26 @@ func TestUniversalPromoteUncommittedMoveOpensNoEditor(t *testing.T) {
 	h := runUniversal(t, arts["loom-retry-backoff"].ID)
 
 	if len(h.committed) != 1 || h.committed[0].warn.NotCommitted == "" {
-		t.Fatalf("the move's commit was expected to fail: %+v", h.committed)
+		t.Fatalf("the copy's commit was expected to fail: %+v", h.committed)
 	}
 	if h.edited != nil {
-		t.Errorf("the edit ran over an uncommitted move: %+v", h.edited)
+		t.Errorf("the edit ran over an uncommitted copy: %+v", h.edited)
 	}
 	if _, err := os.Stat(opened); !os.IsNotExist(err) {
-		t.Errorf("$EDITOR opened over an uncommitted move")
+		t.Errorf("$EDITOR opened over an uncommitted copy")
 	}
 	if h.app.knowledge.pendingCommits != 0 {
 		t.Errorf("pendingCommits = %d, want 0", h.app.knowledge.pendingCommits)
 	}
 	if !strings.Contains(h.app.status, "not committed") || !strings.Contains(h.app.status, h.committed[0].warn.NotCommitted) {
-		t.Errorf("status = %q, want the move's not-committed reason", h.app.status)
+		t.Errorf("status = %q, want the copy's not-committed reason", h.app.status)
 	}
 }
 
 // TestUniversalPromoteRefusesMissingFrontmatter: the loader lists only files
 // with frontmatter, but the gesture re-reads the source through the store, so a
 // truth rewritten after the list loaded — its frontmatter removed, or left
-// unclosed — has nowhere to carry scope: universal and promoted_from:. The
+// unclosed — has nowhere to carry scope: universal, promoted_from: and related:. The
 // gesture refuses it on the status line rather than filing a universal truth
 // with no provenance.
 func TestUniversalPromoteRefusesMissingFrontmatter(t *testing.T) {
@@ -380,22 +403,77 @@ func TestUniversalPromoteRefusesMissingFrontmatter(t *testing.T) {
 }
 
 // TestUniversalFrontmatterKeepsOneOfEach: a promoted file carries exactly one
-// scope: and one promoted_from:, whatever duplicates the source had, and a
-// source with no scope: still gets both. A source with no complete frontmatter
-// block is an error, not a pass-through.
+// id:, one scope: and one promoted_from:, whatever duplicates the source had,
+// and a source with no id: or scope: still gets them. A source with no complete
+// frontmatter block is an error, not a pass-through.
 func TestUniversalFrontmatterKeepsOneOfEach(t *testing.T) {
-	in := "---\nid: x\nscope: loom\npromoted_from: old\nscope: loom\n---\n\nscope: loom stays in prose\n"
-	want := "---\nid: x\nscope: universal\npromoted_from: loom\n---\n\nscope: loom stays in prose\n"
-	if got, err := universalFrontmatter(in, "loom"); err != nil || got != want {
+	in := "---\nid: loom-x\nscope: loom\npromoted_from: old\nscope: loom\nid: loom-x\n---\n\nscope: loom stays in prose\n"
+	want := "---\nid: universal-x\nscope: universal\npromoted_from: loom\nrelated:\n  - loom/x.md\n---\n\nscope: loom stays in prose\n"
+	if got, err := universalFrontmatter(in, "loom", "x.md"); err != nil || got != want {
 		t.Errorf("universalFrontmatter =\n%q, %v\nwant\n%q", got, err, want)
 	}
-	noScope := "---\nid: x\n---\nbody\n"
-	if got, err := universalFrontmatter(noScope, "loom"); err != nil || got != "---\nid: x\nscope: universal\npromoted_from: loom\n---\nbody\n" {
-		t.Errorf("universalFrontmatter without scope: =\n%q, %v", got, err)
+	bare := "---\ntitle: t\n---\nbody\n"
+	if got, err := universalFrontmatter(bare, "loom", "x.md"); err != nil ||
+		got != "---\ntitle: t\nid: universal-x\nscope: universal\npromoted_from: loom\nrelated:\n  - loom/x.md\n---\nbody\n" {
+		t.Errorf("universalFrontmatter without id: or scope: =\n%q, %v", got, err)
 	}
 	for _, body := range []string{"body only\n", "---\nid: x\nscope: loom\nbody\n"} {
-		if got, err := universalFrontmatter(body, "loom"); err == nil {
+		if got, err := universalFrontmatter(body, "loom", "x.md"); err == nil {
 			t.Errorf("universalFrontmatter(%q) = %q, want an error", body, got)
 		}
+	}
+}
+
+// TestUniversalFrontmatterLinksSource: the project truth is appended to
+// whatever related: the source already carries, in the form it carries it, and
+// sub-fields of other keys pass through.
+func TestUniversalFrontmatterLinksSource(t *testing.T) {
+	const head = "---\nid: loom-x\nscope: loom\n"
+	const out = "---\nid: universal-x\nscope: universal\npromoted_from: loom\n"
+	const tail = "verified_at: 2026-01-01\n---\nbody\n"
+	cases := map[string]struct{ in, want string }{
+		"block list": {
+			head + "related:\n  - a.md\n  - b.md\n" + tail,
+			out + "related:\n  - a.md\n  - b.md\n  - loom/x.md\n" + tail,
+		},
+		"block list at column zero": {
+			head + "related:\n- a.md\n" + tail,
+			out + "related:\n- a.md\n- loom/x.md\n" + tail,
+		},
+		"block list closing the frontmatter": {
+			head + "related:\n  - a.md\n---\nbody\n",
+			out + "related:\n  - a.md\n  - loom/x.md\n---\nbody\n",
+		},
+		"empty key": {
+			head + "related:\n" + tail,
+			out + "related:\n  - loom/x.md\n" + tail,
+		},
+		"null": {
+			head + "related: ~\n" + tail,
+			out + "related:\n  - loom/x.md\n" + tail,
+		},
+		"empty flow list": {
+			head + "related: []\n" + tail,
+			out + "related: [loom/x.md]\n" + tail,
+		},
+		"flow list": {
+			head + "related: [a.md, b.md]\n" + tail,
+			out + "related: [a.md, b.md, loom/x.md]\n" + tail,
+		},
+		"scalar": {
+			head + "related: a.md\n" + tail,
+			out + "related:\n  - a.md\n  - loom/x.md\n" + tail,
+		},
+		"none": {
+			head + "evidence:\n  - path: internal/x.go\nverified_at: 2026-01-01\n---\nbody\n",
+			out + "evidence:\n  - path: internal/x.go\nverified_at: 2026-01-01\nrelated:\n  - loom/x.md\n---\nbody\n",
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got, err := universalFrontmatter(c.in, "loom", "x.md"); err != nil || got != c.want {
+				t.Errorf("universalFrontmatter =\n%q, %v\nwant\n%q", got, err, c.want)
+			}
+		})
 	}
 }

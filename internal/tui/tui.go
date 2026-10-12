@@ -251,10 +251,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// rest of the wait without being re-armed here.
 			return a, nil
 		}
-		// The rewrite opens only over a recorded move: its commit records the
-		// universal file alone, so an edit after a move that did not commit would
-		// leave the project copy's removal unrecorded with nothing on screen. An
-		// unpushed move is recorded, and the edit's own push carries it.
+		// The rewrite opens only over a recorded copy: its commit records the
+		// universal file as an edit, so an edit after a copy that did not commit
+		// would fold the promotion into that edit, leaving no record of the
+		// verbatim copy or of the promotion itself. An unpushed copy is recorded,
+		// and the edit's own push carries it.
 		var edit tea.Cmd
 		if msg.edit != nil && msg.warn.NotCommitted == "" {
 			a.knowledge, edit = a.knowledge.editArtifact(*msg.edit)
