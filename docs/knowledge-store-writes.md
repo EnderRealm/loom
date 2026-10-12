@@ -110,6 +110,18 @@ would record something git never had. `Touch` additionally refuses a directory:
 it is the only op that records without writing, and a directory in the pathspec
 would stage everything dirty beneath it.
 
+A hard link is the same hazard without a link in the name: an in-store file
+hard-linked to `.git/config` has no `.git` component and no symlink component,
+so neither check above sees it, and a write through it rewrites the repository.
+`WriteFile`, `Append` and `Touch` therefore refuse an existing regular file
+whose link count is above 1 before they change it — `WriteFile` and `Append`
+read the count from the handle they opened, so the inode checked is the inode
+written, and `WriteFile` truncates only after the check. This costs nothing
+real: git never creates a hard link in a working tree, so a legitimate store
+file always has one link. `Remove` and `Rename` act on the name, not the inode,
+and write through nothing, so they do not take the check — removing the link is
+how it is cleared.
+
 Both sides of a `Rename` go through every one of these checks.
 
 Refusal is per op, not a pass over the whole unit of work: a closure whose second
@@ -264,11 +276,23 @@ record stays. There is no flag that does any of this.
 - `droppable` applies to `rename`'s destination; it is the only op that takes it,
   and a plan that sets it on any other is refused rather than quietly losing the
   declaration.
+- Each op takes only the fields shown for it above. A change that sets any other
+  — `text` on a write, `body` on an append, a payload on a remove or touch,
+  `path`, `body` or `text` on a rename — is refused by name
+  (`changes[0]: write does not take text`): applied, a mis-keyed write would
+  truncate the file and commit that as deliberate, and a mis-keyed append would
+  report success having appended nothing. "Sets" means non-empty, the same test
+  the required fields take.
+- A key outside the shape above — on the plan or on a change, `content` as much
+  as `txt` — is a parse error naming it (`parse plan: json: unknown field
+  "content"`), not a key the decoder drops, for the same reason. So is anything
+  after the plan's closing brace.
 - Unknown op, missing required field, or unparseable JSON: exit non-zero with the
   reason on stderr, nothing written. The plan is validated whole before anything
   is applied.
 - A path that does not land inside the store, that names the store's own `.git`,
-  or that is reached through a symlink, is refused by the store rather than by
+  that is reached through a symlink, or — for a write, append or touch — that is
+  a hard-linked file, is refused by the store rather than by
   the plan's own validation, so every op and both sides of a rename are covered.
   That refusal is per change:
   a plan whose second change is refused has already applied and committed its

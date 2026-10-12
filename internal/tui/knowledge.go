@@ -223,13 +223,18 @@ func (m knowledgeModel) promote() (knowledgeModel, tea.Cmd) {
 		// update loop and the chooser opens when it answers.
 		return m, tea.Batch(statusCmd(sanitize("checking "+a.Scope+" tickets for duplicates…")), checkTicketCmd(*a))
 	}
-	dest, commit, err := promoteCandidate(*a)
+	dest, commit, leftover, err := promoteCandidate(*a)
 	if err != nil {
 		return m, statusCmd("promote failed: " + err.Error())
 	}
 	m.showDetail = false
 	m.pendingCommits++
 	status := "promoted → " + shortenPath(dest)
+	if leftover != "" {
+		// Part of the gesture's own line, not the commit's: the promotion is
+		// recorded either way, and what is wrong is the candidate still listed.
+		status += " — candidate not removed, will resurface as a duplicate: " + leftover
+	}
 	// The move has landed, so the status and the reload go first and the git work
 	// follows off the update loop: the promoted candidate leaves the list at the
 	// gesture rather than at the end of the commit. Sequenced against the status,

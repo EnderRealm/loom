@@ -90,7 +90,10 @@ extract.main()
 def setUpModule():
     """Build the loom the client writes through. Skipped, not failed, without a
     go toolchain: the Python side is a client, and a machine that cannot build
-    its server has nothing to say about the client's behaviour."""
+    its server has nothing to say about the client's behaviour. A build that
+    runs and fails is an error, not a skip: it is a compile error in cmd/loom,
+    and skipping on it would silently retire the only end-to-end check of the
+    Python-Go boundary while the suite stayed green."""
     global LOOM_BIN, _BUILD_DIR
     if shutil.which("go") is None:
         raise unittest.SkipTest("go toolchain not available")
@@ -99,7 +102,9 @@ def setUpModule():
     build = subprocess.run(["go", "build", "-o", LOOM_BIN, "./cmd/loom"],
                            cwd=str(LOOM_ROOT), capture_output=True, text=True)
     if build.returncode != 0:
-        raise unittest.SkipTest(f"go build failed: {build.stderr.strip()}")
+        # tearDownModule does not run after a failed setUpModule.
+        _BUILD_DIR.cleanup()
+        raise RuntimeError(f"go build ./cmd/loom failed:\n{build.stderr.strip()}")
 
 
 def tearDownModule():

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"loom/internal/knowledge"
 )
@@ -114,6 +115,24 @@ func (t *Tx) noSymlinks(rel string) error {
 	return nil
 }
 
+// noHardLinks refuses a regular file that has more than one link. It is the
+// symlink rule's other half: a hard link to .git/config is an in-store name with
+// no .git component and no symlink in it, and writing through it rewrites the
+// repository — or, for Touch, stages the repository's file as content. git
+// never creates a hard link in a working tree, so a legitimate store file always
+// has one link and the refusal costs nothing real. Remove and Rename act on the
+// name rather than the inode, so they write through nothing and do not take it.
+// info describes the file the op is about to change: the opened handle's, where
+// there is one, so the inode checked is the inode written.
+func noHardLinks(path string, info fs.FileInfo) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || st.Nlink <= 1 {
+		return nil
+	}
+	return fmt.Errorf("%s has %d hard links, which the knowledge store does not write through",
+		shortenPath(path), st.Nlink)
+}
+
 // isGitPath reports whether any component of a store-relative path names .git.
 // The repository is the store's history, not its content: a plan that rewrote
 // .git/config or .git/HEAD would corrupt it, and one that dropped a hook would
@@ -156,12 +175,26 @@ func (t *Tx) WriteFile(path string, body []byte) error {
 	// Opened rather than handed to the root's own WriteFile so the record can be
 	// taken between the two failures: an open that failed changed nothing, while a
 	// write that failed part-way has still changed the file, and only the second
-	// belongs in the record.
-	f, err := t.dir.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	// belongs in the record. Truncated after the open rather than by O_TRUNC, so
+	// a hard-linked file is refused before anything in it has changed; a file
+	// the open created has one link and passes.
+	f, err := t.dir.OpenFile(rel, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
+	info, err := f.Stat()
+	if err == nil {
+		err = noHardLinks(path, info)
+	}
+	if err != nil {
+		f.Close()
+		return err
+	}
 	t.record(rel)
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return err
+	}
 	if _, err := f.Write(body); err != nil {
 		f.Close()
 		return err
@@ -239,6 +272,15 @@ func (t *Tx) Append(path, text string) error {
 		return fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}
 	defer f.Close()
+	// Checked on the handle, so the inode refused is the one that would be
+	// appended to; nothing has been written yet, so nothing is recorded.
+	info, err := f.Stat()
+	if err == nil {
+		err = noHardLinks(path, info)
+	}
+	if err != nil {
+		return err
+	}
 	t.record(rel)
 	if _, err := f.WriteString(text); err != nil {
 		return fmt.Errorf("%s: %w", filepath.Base(path), err)
@@ -261,8 +303,13 @@ func (t *Tx) Touch(path string) error {
 	// stages everything dirty beneath it, which is the absorption the path
 	// scoping exists to prevent — and the store root itself is a directory, so
 	// this covers a declared path that resolved to the whole store.
-	if info, err := t.dir.Stat(rel); err == nil && info.IsDir() {
-		return fmt.Errorf("%s is a directory, not a file the store can record", shortenPath(path))
+	if info, err := t.dir.Stat(rel); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("%s is a directory, not a file the store can record", shortenPath(path))
+		}
+		if err := noHardLinks(path, info); err != nil {
+			return err
+		}
 	}
 	t.record(rel)
 	return nil

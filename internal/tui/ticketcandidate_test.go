@@ -280,7 +280,7 @@ func TestTicketCandidateIsNotPromotedIntoTheStore(t *testing.T) {
 	if err != nil || len(arts) != 1 {
 		t.Fatalf("LoadKnowledge: %d artifacts, %v", len(arts), err)
 	}
-	if _, _, err := promoteCandidate(arts[0]); err == nil {
+	if _, _, _, err := promoteCandidate(arts[0]); err == nil {
 		t.Fatal("promoteCandidate moved a ticket candidate")
 	}
 	if _, err := os.Stat(filepath.Join(root, "tickets")); !os.IsNotExist(err) {

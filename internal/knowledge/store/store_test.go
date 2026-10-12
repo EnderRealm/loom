@@ -1220,6 +1220,68 @@ func TestApplyRefusesASymlinkInTheStore(t *testing.T) {
 	}
 }
 
+// TestApplyRefusesAHardLinkInTheStore is the symlink rule's other half: a hard
+// link to .git/config is an in-store name with no .git component and no symlink
+// in it, so neither check sees it, and a write through it rewrites the
+// repository. git never creates a hard link in a working tree, so every op that
+// changes a file's contents — or, for Touch, stages them — refuses one.
+func TestApplyRefusesAHardLinkInTheStore(t *testing.T) {
+	root := seedStore(t)
+	config := filepath.Join(root, ".git", "config")
+	before, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "cfg.md")
+	if err := os.Link(config, link); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		op   func(tx *Tx) error
+	}{
+		{"write through a hard link to config", func(tx *Tx) error {
+			return tx.WriteFile(link, []byte("[core]\n\tbare = true\n"))
+		}},
+		{"append through a hard link to config", func(tx *Tx) error {
+			return tx.Append(link, "\n[core]\n\tbare = true\n")
+		}},
+		{"touch a hard link to config", func(tx *Tx) error { return tx.Touch(link) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			head := testGit(t, root, "rev-parse", "HEAD")
+
+			warn, err := Apply("write through a hard link", tc.op)
+
+			if err == nil {
+				t.Fatal("a hard-linked file was accepted")
+			}
+			if !strings.Contains(err.Error(), "hard links") {
+				t.Errorf("err = %v, want a reason naming the hard link", err)
+			}
+			if warn.NotCommitted != "" {
+				t.Errorf("warn = %q, want no commit for a unit of work that wrote nothing", warn.NotCommitted)
+			}
+			if now, err := os.ReadFile(config); err != nil || string(now) != string(before) {
+				t.Errorf("the repository's config was written through the link: %v", err)
+			}
+			if now := testGit(t, root, "rev-parse", "HEAD"); now != head {
+				t.Errorf("HEAD moved for a refused write: %s -> %s", head, now)
+			}
+		})
+	}
+
+	// Removing the name writes through nothing, so it is not refused: it is how
+	// the link is cleared.
+	if _, err := Apply("remove the hard link", func(tx *Tx) error { return tx.Remove(link) }); err != nil {
+		t.Errorf("removing a hard link was refused: %v", err)
+	}
+	if now, err := os.ReadFile(config); err != nil || string(now) != string(before) {
+		t.Errorf("removing the link touched the repository's config: %v", err)
+	}
+}
+
 // TestApplyRefusesTouchingADirectory: Touch records without writing, so it is
 // the one op a directory can reach — and a directory in the pathspec stages
 // everything dirty beneath it, which is the absorption the path scoping exists

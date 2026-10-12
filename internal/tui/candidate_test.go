@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"loom/internal/config"
 	"loom/internal/knowledge/store"
@@ -82,10 +85,15 @@ func seedCandidate(t *testing.T) (string, Artifact) {
 
 // promoteNow and rejectNow run a gesture and its deferred commit together, for
 // the tests that assert on the record rather than on the ordering of the two.
+// promoteNow fails a promote that left its candidate behind, which none of its
+// callers set up: that outcome is asserted where it is caused.
 func promoteNow(a Artifact) (string, store.Warn, error) {
-	dest, commit, err := promoteCandidate(a)
+	dest, commit, leftover, err := promoteCandidate(a)
 	if err != nil {
 		return dest, store.Warn{}, err
+	}
+	if leftover != "" {
+		return dest, store.Warn{}, fmt.Errorf("candidate left behind: %s", leftover)
 	}
 	return dest, commit(), nil
 }
@@ -371,9 +379,9 @@ func TestPromoteMovesTheFileBeforeTheCommit(t *testing.T) {
 	root, art := seedGitCandidate(t)
 	head := testGit(t, root, "rev-parse", "HEAD")
 
-	dest, commit, err := promoteCandidate(art)
-	if err != nil {
-		t.Fatalf("promoteCandidate: %v", err)
+	dest, commit, leftover, err := promoteCandidate(art)
+	if err != nil || leftover != "" {
+		t.Fatalf("promoteCandidate: err=%v leftover=%q", err, leftover)
 	}
 	if _, err := os.Stat(dest); err != nil {
 		t.Errorf("promoted file missing before the commit ran: %v", err)
@@ -925,28 +933,33 @@ func TestEditWithoutChangesLeavesNoCommit(t *testing.T) {
 	}
 }
 
-// TestPromoteWithAnUnremovableCandidateStillLands: the promoted file is written
-// and committed before the candidate is dropped, so a failure at the removal is
-// a gesture that landed with an incomplete record — not "promote failed", which
-// would leave the candidate listed and the next attempt refused for a
-// destination that is now there. The store still commits and pushes what the
-// write left behind, so its own outcome — here an unpublished commit, the seeded
-// store having no upstream — has to survive the removal's reason rather than be
-// replaced by it.
-func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
+// lockCandidateDir makes the seeded candidate unremovable: removing a file needs
+// write permission on its directory, not on the file.
+func lockCandidateDir(t *testing.T, art Artifact) {
+	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
-	root, art := seedGitCandidate(t)
-	// Removing a file needs write permission on its directory, not on the file.
 	dir := filepath.Dir(art.Path)
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	// Restored before the temp directory's own cleanup, which runs after this.
 	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+}
 
-	dest, warn, err := promoteNow(art)
+// TestPromoteWithAnUnremovableCandidateStillLands: the promoted file is written
+// and committed before the candidate is dropped, so a failure at the removal is
+// a gesture that landed with a candidate left behind — not "promote failed",
+// which would leave the next attempt refused for a destination that is now
+// there, and not a commit failure, since the commit landed. The leftover is
+// reported on its own, and the store's own outcome — here an unpublished commit,
+// the seeded store having no upstream — is the commit's, untouched by it.
+func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
+	root, art := seedGitCandidate(t)
+	lockCandidateDir(t, art)
+
+	dest, commit, leftover, err := promoteCandidate(art)
 
 	if err != nil {
 		t.Fatalf("promote reported a failure for a gesture that landed: %v", err)
@@ -954,8 +967,12 @@ func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
 	if dest == "" {
 		t.Fatal("promote returned no destination for a file it wrote")
 	}
-	if warn.NotCommitted == "" {
-		t.Error("promote reported a clean record despite the candidate surviving")
+	if leftover == "" {
+		t.Error("promote did not report the candidate it left behind")
+	}
+	warn := commit()
+	if warn.NotCommitted != "" {
+		t.Errorf("the leftover candidate was reported as a commit failure: %q", warn.NotCommitted)
 	}
 	if warn.NotPushed == "" {
 		t.Error("promote dropped the store's own outcome: the commit that landed is unpushed")
@@ -963,8 +980,57 @@ func TestPromoteWithAnUnremovableCandidateStillLands(t *testing.T) {
 	if _, err := os.Stat(dest); err != nil {
 		t.Errorf("promoted file missing: %v", err)
 	}
+	if _, err := os.Stat(art.Path); err != nil {
+		t.Errorf("the candidate reported as left behind is not there: %v", err)
+	}
 	if names := testGit(t, root, "show", "--name-status", "--format=", "HEAD"); !strings.Contains(names, "A\ttruths/loom/notify-state-default-path.md") {
 		t.Errorf("the write that landed was not committed:\n%s", names)
+	}
+}
+
+// TestPromoteLeftoverAndFailedCommitBothReachTheStatusLine drives the gesture
+// through the App: a candidate left behind and a commit that failed are two
+// outcomes, and the status line says each — the leftover on the gesture's own
+// line, the commit's reason composed onto it — rather than one standing in for
+// the other. The commit is failed by a stale lock on the branch ref, as in
+// TestRejectCommitFailureKeepsArchive.
+func TestPromoteLeftoverAndFailedCommitBothReachTheStatusLine(t *testing.T) {
+	requireRefFormatFiles(t)
+	root, art := seedGitCandidate(t, "--ref-format=files")
+	branch := testGit(t, root, "symbolic-ref", "--short", "HEAD")
+	if err := os.WriteFile(filepath.Join(root, ".git", "refs", "heads", branch+".lock"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lockCandidateDir(t, art)
+
+	a := App{overlay: overlayKnowledge}
+	a.knowledge.setArtifacts([]Artifact{art})
+	var cmd tea.Cmd
+	a.knowledge, cmd = a.knowledge.promote()
+	var commitWarn store.Warn
+	for _, msg := range drainCmd(cmd) {
+		switch msg := msg.(type) {
+		case statusMsg:
+		case knowledgeCommittedMsg:
+			commitWarn = msg.warn
+		default:
+			continue
+		}
+		m, _ := a.Update(msg)
+		a = m.(App)
+	}
+
+	if commitWarn.NotCommitted == "" {
+		t.Fatal("the stale ref lock did not fail the commit")
+	}
+	if !strings.Contains(a.status, "promoted → ") {
+		t.Errorf("status = %q, does not report the promotion", a.status)
+	}
+	if !strings.Contains(a.status, "candidate not removed") {
+		t.Errorf("status = %q, does not report the candidate left behind", a.status)
+	}
+	if !strings.Contains(a.status, "not committed: "+commitWarn.NotCommitted) {
+		t.Errorf("status = %q, dropped the commit's own reason %q", a.status, commitWarn.NotCommitted)
 	}
 }
 

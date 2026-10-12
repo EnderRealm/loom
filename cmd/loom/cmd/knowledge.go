@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -117,9 +119,18 @@ func newKnowledgeWriteCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("read plan: %w", err)
 			}
+			// Unknown keys refused at the parse: a mis-keyed field — content for
+			// body — would otherwise be dropped by the decoder, and the write it
+			// belonged to would truncate the file and commit that as deliberate.
+			// The Token check keeps Unmarshal's refusal of data after the plan.
 			var plan writePlan
-			if err := json.Unmarshal(raw, &plan); err != nil {
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&plan); err != nil {
 				return fmt.Errorf("parse plan: %w", err)
+			}
+			if _, err := dec.Token(); err != io.EOF {
+				return fmt.Errorf("parse plan: unexpected data after the plan")
 			}
 			// Validated whole before anything is applied: a plan that names an
 			// op we would refuse half way through would leave the store holding
@@ -260,7 +271,7 @@ func addKnowledgeScopes(out io.Writer, names []string) error {
 }
 
 // validatePlan rejects a plan whose ops or required fields the store could not
-// act on.
+// act on, or whose changes name a field their op does not consume.
 func validatePlan(plan writePlan) error {
 	if plan.Message == "" {
 		return fmt.Errorf("plan: message is required")
@@ -288,8 +299,38 @@ func validatePlan(plan writePlan) error {
 		default:
 			return fmt.Errorf("changes[%d]: unknown op %q", i, c.Op)
 		}
+		// Refused by name, as droppable is: applyChanges reads only the op's own
+		// fields, so a mis-keyed write — text for body — would truncate the file
+		// and commit that as deliberate, and a mis-keyed append would report
+		// success having appended nothing. Set means non-empty, the same test the
+		// required fields above take.
+		for _, f := range []struct {
+			name string
+			set  bool
+		}{
+			{"path", c.Path != ""},
+			{"body", c.Body != ""},
+			{"text", c.Text != ""},
+			{"from", c.From != ""},
+			{"to", c.To != ""},
+		} {
+			if f.set && !slices.Contains(opFields[c.Op], f.name) {
+				return fmt.Errorf("changes[%d]: %s does not take %s", i, c.Op, f.name)
+			}
+		}
 	}
 	return nil
+}
+
+// opFields is the payload each op consumes, by JSON key — applyChanges' reads,
+// stated for validatePlan to refuse everything else. droppable is ruled on
+// separately, ahead of the op check.
+var opFields = map[string][]string{
+	opWrite:  {"path", "body"},
+	opAppend: {"path", "text"},
+	opRemove: {"path"},
+	opRename: {"from", "to"},
+	opTouch:  {"path"},
 }
 
 // applyChanges performs a validated plan's changes in order, stopping at the

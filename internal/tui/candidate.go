@@ -53,33 +53,37 @@ func candidateKebab(id, scope string) string {
 // attempted; the returned Commit performs it and yields the reason the commit
 // did not happen or was not published. Returns the destination path and that
 // Commit, which is nil only alongside an error — the gesture itself did not
-// land, so there is nothing to record. It never overwrites an existing validated
-// file, and it refuses a candidate whose scope mismatch is unresolved.
-func promoteCandidate(a Artifact) (string, store.Commit, error) {
+// land, so there is nothing to record. leftover is the reason the candidate
+// could not be removed once the destination was written, empty otherwise: the
+// promotion landed and the Commit records it, but the candidate is still there
+// and resurfaces as a duplicate, which is no part of the commit's outcome. It
+// never overwrites an existing validated file, and it refuses a candidate whose
+// scope mismatch is unresolved.
+func promoteCandidate(a Artifact) (dest string, commit store.Commit, leftover string, err error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
-		return "", nil, fmt.Errorf("unknown type %q", a.Type)
+		return "", nil, "", fmt.Errorf("unknown type %q", a.Type)
 	}
 	if a.Type == ticketType {
 		// A ticket's validated home is tk, not a tickets/ tree in this store.
-		return "", nil, fmt.Errorf("a ticket candidate is filed into tk, not promoted")
+		return "", nil, "", fmt.Errorf("a ticket candidate is filed into tk, not promoted")
 	}
 	if a.Status != "candidate" {
-		return "", nil, fmt.Errorf("not a candidate")
+		return "", nil, "", fmt.Errorf("not a candidate")
 	}
 	// The validated tree derives scope from the directory and never reads the
 	// declaration again, so promoting past the extractor's scope_mismatch verdict
 	// would bury a file whose scope: disagrees with where it lives.
 	if declared, ok := unresolvedScopeMismatch(a.Body, a.Scope); ok {
-		return "", nil, fmt.Errorf("scope %q disagrees with directory %s — onboard it and move the file, or correct scope: (e)",
+		return "", nil, "", fmt.Errorf("scope %q disagrees with directory %s — onboard it and move the file, or correct scope: (e)",
 			logField(declared, logFieldScopeMax), a.Scope)
 	}
 	// Resolved once and handed to the store: KnowledgeRoot() twice — once to
 	// build the paths, once inside Apply — is two answers waiting to differ.
 	root := KnowledgeRoot()
-	dest := filepath.Join(root, plural, a.Scope, candidateKebab(a.ID, a.Scope)+".md")
+	dest = filepath.Join(root, plural, a.Scope, candidateKebab(a.ID, a.Scope)+".md")
 	if _, err := os.Stat(dest); err == nil {
-		return "", nil, fmt.Errorf("%s already exists", shortenPath(dest))
+		return "", nil, "", fmt.Errorf("%s already exists", shortenPath(dest))
 	}
 	// The files move inside the closure, so a failed commit is reported rather
 	// than rolled back: undoing the move to keep history tidy would throw away the
@@ -88,7 +92,7 @@ func promoteCandidate(a Artifact) (string, store.Commit, error) {
 	// whose ignore rules cover the validated tree fails the commit loudly
 	// rather than recording the candidate's removal alone.
 	written := false
-	commit, err := store.ApplyDeferred(root, gestureMessage("promote", a), func(tx *store.Tx) error {
+	commit, err = store.ApplyDeferred(root, gestureMessage("promote", a), func(tx *store.Tx) error {
 		if err := tx.WriteFile(dest, []byte(promoteFrontmatter(a.Body))); err != nil {
 			return err
 		}
@@ -101,13 +105,15 @@ func promoteCandidate(a Artifact) (string, store.Commit, error) {
 		// Once the destination exists the promote has landed, and the store still
 		// records it: reporting "promote failed" would leave the candidate listed
 		// and the next attempt refused for a destination that is now there. Only a
-		// failure before the write leaves nothing behind.
+		// failure before the write leaves nothing behind. The commit's own outcome
+		// is left as the store reports it — the removal's reason is not a commit
+		// failure, and standing in for one would hide a commit that did fail.
 		if !written {
-			return "", nil, err
+			return "", nil, "", err
 		}
-		return dest, withReason(commit, store.ShortReason(err)), nil
+		return dest, commit, store.ShortReason(err), nil
 	}
-	return dest, commit, nil
+	return dest, commit, "", nil
 }
 
 // universalGesture names the promotion to universal in its commit subject,

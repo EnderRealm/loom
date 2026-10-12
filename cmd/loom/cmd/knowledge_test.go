@@ -138,6 +138,8 @@ func TestKnowledgeWriteAppliesAPlan(t *testing.T) {
 
 // TestKnowledgeWriteRejectsBadPlans: nothing is written for a plan the store
 // could not act on, so a writer's mistake cannot leave the store half changed.
+// ROOT in a plan is replaced by the case's store root, for the cases whose
+// change would leave a trace in the store if it were applied.
 func TestKnowledgeWriteRejectsBadPlans(t *testing.T) {
 	for _, tc := range []struct{ name, plan, want string }{
 		{"unparseable", "not json", "parse plan"},
@@ -147,15 +149,34 @@ func TestKnowledgeWriteRejectsBadPlans(t *testing.T) {
 		{"missing path", `{"message":"m","changes":[{"op":"write","body":"x"}]}`, "write requires path"},
 		{"missing rename field", `{"message":"m","changes":[{"op":"rename","from":"x"}]}`, "rename requires from and to"},
 		{"droppable on a write", `{"message":"m","changes":[{"op":"write","path":"x","body":"y","droppable":true}]}`, "droppable applies to rename only"},
+		// A field the op does not consume, one case per op: applied, each would
+		// silently do something other than what the writer meant.
+		{"text on a write", `{"message":"m","changes":[{"op":"write","path":"ROOT/log.md","text":"y"}]}`, "changes[0]: write does not take text"},
+		{"body on an append", `{"message":"m","changes":[{"op":"append","path":"ROOT/log.md","body":"y"}]}`, "changes[0]: append does not take body"},
+		{"body on a remove", `{"message":"m","changes":[{"op":"remove","path":"x","body":"y"}]}`, "changes[0]: remove does not take body"},
+		{"text on a touch", `{"message":"m","changes":[{"op":"touch","path":"x","text":"y"}]}`, "changes[0]: touch does not take text"},
+		{"to on a touch", `{"message":"m","changes":[{"op":"touch","path":"x","to":"y"}]}`, "changes[0]: touch does not take to"},
+		{"path on a rename", `{"message":"m","changes":[{"op":"rename","from":"x","to":"y","path":"z"}]}`, "changes[0]: rename does not take path"},
+		{"body on a rename", `{"message":"m","changes":[{"op":"rename","from":"x","to":"y","body":"z"}]}`, "changes[0]: rename does not take body"},
+		{"text on a rename", `{"message":"m","changes":[{"op":"rename","from":"x","to":"y","text":"z"}]}`, "changes[0]: rename does not take text"},
+		// Refused before the first change is applied, not when the loop reaches it:
+		// the write would leave an untracked file behind.
+		{"foreign field after a valid change", `{"message":"m","changes":[{"op":"write","path":"ROOT/truths/loom/one.md","body":"one\n"},{"op":"remove","path":"ROOT/log.md","from":"y"}]}`, "changes[1]: remove does not take from"},
+		// A key no op takes is dropped by a plain decode, which would leave this
+		// write truncating log.md and committing that as deliberate.
+		{"unknown field on a write", `{"message":"m","changes":[{"op":"write","path":"ROOT/log.md","content":"y"}]}`, `unknown field "content"`},
+		{"unknown top-level field", `{"message":"m","changes":[{"op":"touch","path":"ROOT/log.md"}],"dry_run":true}`, `unknown field "dry_run"`},
+		{"data after the plan", `{"message":"m","changes":[{"op":"touch","path":"ROOT/log.md"}]} {}`, "unexpected data after the plan"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := seedStore(t)
 			head := storeGit(t, root, "rev-parse", "HEAD")
+			plan := strings.ReplaceAll(tc.plan, "ROOT", root)
 
-			out, err := runWrite(t, tc.plan)
+			out, err := runWrite(t, plan)
 
 			if err == nil {
-				t.Fatalf("plan accepted: %s", tc.plan)
+				t.Fatalf("plan accepted: %s", plan)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %v does not name %q", err, tc.want)
