@@ -294,6 +294,17 @@ def build_prompt(template: str, refs: list[dict], input_text: str, today: str, i
     )
 
 
+def machinery_dir() -> Path:
+    """The cwd every claude -p call runs in: $LOOM_HOME/machinery, else
+    ~/.loom/machinery, resolved per call and unexpanded as knowledge_root is.
+    Claude Code files a transcript under its cwd's project slug, so launchd's
+    `/` put these runs under project `-`; a dedicated directory files them as
+    loom's machinery, separate from any project's sessions. Empty, so no
+    repo's CLAUDE.md reaches the prompt. See docs/attribution-stamps.md."""
+    home = os.environ.get("LOOM_HOME")
+    return (Path(home) if home else Path.home() / ".loom") / "machinery"
+
+
 def call_claude(prompt: str, model: str) -> str:
     """Call the claude CLI non-interactively, with no tools. Returns its stdout.
 
@@ -307,6 +318,8 @@ def call_claude(prompt: str, model: str) -> str:
     docs/transcript-trust-and-redaction.md), which is what makes handing it to
     a tool-enabled agent worth refusing.
     """
+    cwd = machinery_dir()
+    cwd.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
         [
             CLAUDE_BIN, "-p", "--model", model,
@@ -319,6 +332,7 @@ def call_claude(prompt: str, model: str) -> str:
         capture_output=True,
         text=True,
         check=False,
+        cwd=cwd,
     )
     if proc.returncode != 0:
         sys.stderr.write(f"claude CLI failed (exit {proc.returncode}):\n{proc.stderr}\n")

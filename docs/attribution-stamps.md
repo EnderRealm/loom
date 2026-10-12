@@ -106,3 +106,25 @@ fold wrote for them; the received files are left in place. Both sides use
 `codexparse.ExternalImport`. A genuine Codex session at cwd `/` is still
 captured and still files under `_default`; its turn id is what tells it
 apart, not its cwd.
+
+## loom's own claude -p runs file under machinery
+
+The originals of those imported runs are loom's own `claude -p` calls:
+extraction, `--summarize` and the llm judge, all through `call_claude` in
+`extractors/extract.py`. Under launchd their cwd was `/`, so Claude Code
+filed them under `~/.claude/projects/-/` and the fold counted them as
+claude-code sessions of project `-`.
+
+They are kept, and given a cwd of their own. Unlike the Codex copies they
+are originals, the only record of what extraction and summarization cost,
+so excluding them would hide that. Filing them under loom would swamp its
+dev-session counts, friction and runs with automated sessions. A machinery
+tag would be precise, but every summaries.db reader would have to learn a
+new filter. Instead `call_claude` runs the CLI in `$LOOM_HOME/machinery`
+(default `~/.loom/machinery`), created if absent, and Claude Code files the
+transcripts under that directory's own project: labeled, separate, still
+counted. The directory is empty, which also keeps any repo's `CLAUDE.md`
+out of the extraction prompt.
+
+The claude-code rows already filed under `-` stay as they are, a frozen
+historical bucket; they are not reattributed.
