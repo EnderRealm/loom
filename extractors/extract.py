@@ -320,20 +320,27 @@ def call_claude(prompt: str, model: str) -> str:
     """
     cwd = machinery_dir()
     cwd.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        [
-            CLAUDE_BIN, "-p", "--model", model,
-            "--tools", "",
-            # The empty server set --strict-mcp-config then confines the
-            # session to; without a config there is nothing to be strict about.
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-        ],
-        input=prompt,
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=cwd,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                CLAUDE_BIN, "-p", "--model", model,
+                "--tools", "",
+                # The empty server set --strict-mcp-config then confines the
+                # session to; without a config there is nothing to be strict about.
+                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            ],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=cwd,
+            # The Go trigger bounds nothing per extraction, so a wedged CLI
+            # would otherwise hold the unattended sweep until a restart.
+            timeout=900,
+        )
+    except subprocess.TimeoutExpired as e:
+        sys.stderr.write(f"claude CLI timed out after {e.timeout:g}s\n")
+        sys.exit(2)
     if proc.returncode != 0:
         sys.stderr.write(f"claude CLI failed (exit {proc.returncode}):\n{proc.stderr}\n")
         sys.exit(2)

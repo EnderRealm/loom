@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the cwd every claude -p call runs in.
+"""Tests for the cwd every claude -p call runs in, and the bound on its runtime.
 
 Run with: python3 -m unittest
 
@@ -8,6 +8,7 @@ claude call would file a transcript under ~/.claude/projects/. The directory is
 real: that call_claude creates it is half of what is asserted. HOME and
 LOOM_HOME point into a temp dir, so the real ~/.loom is never touched.
 """
+import io
 import os
 import subprocess
 import tempfile
@@ -57,6 +58,32 @@ class CallClaudeCwdTest(unittest.TestCase):
             kwargs = self.call()
 
         self.assertEqual(kwargs["cwd"], home / "machinery")
+
+
+class CallClaudeTimeoutTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"LOOM_HOME": tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_call_is_bounded_like_codex(self):
+        done = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+        with mock.patch.object(extract.subprocess, "run", return_value=done) as run:
+            extract.call_claude("prompt", "haiku")
+
+        self.assertEqual(run.call_args.kwargs["timeout"], 900)
+
+    def test_a_timeout_exits_non_zero_naming_it(self):
+        hung = subprocess.TimeoutExpired(cmd=["claude"], timeout=900)
+        with mock.patch.object(extract.subprocess, "run", side_effect=hung), \
+                mock.patch.object(extract.sys, "stderr", new_callable=io.StringIO) as err:
+            with self.assertRaises(SystemExit) as cm:
+                extract.call_claude("prompt", "haiku")
+
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertIn("claude CLI timed out after 900s", err.getvalue())
 
 
 if __name__ == "__main__":
