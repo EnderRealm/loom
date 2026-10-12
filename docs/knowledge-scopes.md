@@ -202,7 +202,11 @@ under the same filename, with frontmatter rewritten:
 - `scope:` becomes `universal`, followed by `promoted_from: <scope>`, the
   project it came from;
 - `<scope>/<name>.md` — the schema's cross-scope reference form — is appended
-  to `related:`, or a `related:` list is added when the truth has none.
+  to `related:`, or a `related:` list is added when the truth has none;
+- each bare `related:` entry — a sibling filename, which resolves within the
+  file's own directory — becomes `<scope>/<entry>` so it still names the
+  project truth's sibling from `truths/universal/`; entries already carrying a
+  scope pass through.
 
 Once that commit has landed, `$VISUAL`/`$EDITOR` opens on the universal file,
 and what it writes is committed through the store as `e`'s edit is. A copy whose

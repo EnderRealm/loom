@@ -189,8 +189,11 @@ func universalID(name string) string {
 // file carries one of each; a file missing id: or scope: gets them appended.
 // <from>/<name>, the project truth it cites, is appended to related: — to a
 // block list after its last entry, to a flow list inside its brackets, beside a
-// single scalar entry as a block list — or added as a new related: list. The
-// body passes through untouched. A file with no complete frontmatter block is
+// single scalar entry as a block list — or added as a new related: list. A bare
+// related: entry is a sibling filename that resolves within the file's own
+// directory, so each one becomes <from>/<entry> to keep pointing at the project
+// truth's sibling; entries already carrying a scope pass through. The body
+// passes through untouched. A file with no complete frontmatter block is
 // an error rather than a pass-through: there is nowhere to record the source.
 func universalFrontmatter(body, from, name string) (string, error) {
 	lines := strings.Split(body, "\n")
@@ -219,6 +222,7 @@ func universalFrontmatter(body, from, name string) (string, error) {
 			if inRelated {
 				if item := relatedItem.FindStringSubmatch(line); item != nil {
 					indent = item[1]
+					line = item[0] + scopeRelated(line[len(item[0]):], from)
 				}
 			}
 			fm = append(fm, line)
@@ -254,12 +258,16 @@ func universalFrontmatter(body, from, name string) (string, error) {
 				inRelated = true
 			case strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]"):
 				if inner := strings.TrimSpace(v[1 : len(v)-1]); inner != "" {
-					fm = append(fm, "related: ["+inner+", "+source+"]")
+					entries := strings.Split(inner, ",")
+					for i, e := range entries {
+						entries[i] = scopeRelated(strings.TrimSpace(e), from)
+					}
+					fm = append(fm, "related: ["+strings.Join(entries, ", ")+", "+source+"]")
 				} else {
 					fm = append(fm, "related: ["+source+"]")
 				}
 			default:
-				fm = append(fm, "related:", indent+"- "+v, indent+"- "+source)
+				fm = append(fm, "related:", indent+"- "+scopeRelated(v, from), indent+"- "+source)
 			}
 		default:
 			fm = append(fm, line)
@@ -282,6 +290,32 @@ func universalFrontmatter(body, from, name string) (string, error) {
 	out = append(out, "---")
 	out = append(out, lines[end+1:]...)
 	return strings.Join(out, "\n"), nil
+}
+
+// scopeRelated prefixes a bare related: entry with <from>/, after any leading
+// space and inside its opening quote, so a trailing comment rides along. An
+// entry whose value already holds a / is scoped, and an empty or comment-only
+// one is not an entry; both are returned unchanged.
+func scopeRelated(entry, from string) string {
+	rest := strings.TrimLeft(entry, " \t")
+	lead := entry[:len(entry)-len(rest)]
+	if strings.HasPrefix(rest, `"`) || strings.HasPrefix(rest, "'") {
+		lead += rest[:1]
+		rest = rest[1:]
+	}
+	// A YAML comment starts at a # preceded by a space or a tab.
+	value := rest
+	for i := 1; i < len(rest); i++ {
+		if rest[i] == '#' && (rest[i-1] == ' ' || rest[i-1] == '\t') {
+			value = rest[:i]
+			break
+		}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "#") || strings.Contains(value, "/") {
+		return entry
+	}
+	return lead + from + "/" + rest
 }
 
 // rejectCandidate moves a candidate into the _rejected/ archive, preserving its

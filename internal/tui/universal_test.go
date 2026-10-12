@@ -426,23 +426,33 @@ func TestUniversalFrontmatterKeepsOneOfEach(t *testing.T) {
 
 // TestUniversalFrontmatterLinksSource: the project truth is appended to
 // whatever related: the source already carries, in the form it carries it, and
-// sub-fields of other keys pass through.
+// sub-fields of other keys pass through. A bare entry names a sibling of the
+// project truth, so it is scoped to the project once the file sits in
+// universal/; an entry that already carries a scope is left alone.
 func TestUniversalFrontmatterLinksSource(t *testing.T) {
 	const head = "---\nid: loom-x\nscope: loom\n"
 	const out = "---\nid: universal-x\nscope: universal\npromoted_from: loom\n"
 	const tail = "verified_at: 2026-01-01\n---\nbody\n"
 	cases := map[string]struct{ in, want string }{
 		"block list": {
-			head + "related:\n  - a.md\n  - b.md\n" + tail,
-			out + "related:\n  - a.md\n  - b.md\n  - loom/x.md\n" + tail,
+			head + "related:\n  - a.md\n  - forge/b.md\n" + tail,
+			out + "related:\n  - loom/a.md\n  - forge/b.md\n  - loom/x.md\n" + tail,
 		},
 		"block list at column zero": {
 			head + "related:\n- a.md\n" + tail,
-			out + "related:\n- a.md\n- loom/x.md\n" + tail,
+			out + "related:\n- loom/a.md\n- loom/x.md\n" + tail,
 		},
 		"block list closing the frontmatter": {
 			head + "related:\n  - a.md\n---\nbody\n",
-			out + "related:\n  - a.md\n  - loom/x.md\n---\nbody\n",
+			out + "related:\n  - loom/a.md\n  - loom/x.md\n---\nbody\n",
+		},
+		"block list quoted and commented": {
+			head + "related:\n  -  \"a.md\" # sibling\n  - 'forge/b.md'\n  # aside\n" + tail,
+			out + "related:\n  -  \"loom/a.md\" # sibling\n  - 'forge/b.md'\n  # aside\n  - loom/x.md\n" + tail,
+		},
+		"block list tab-separated comment holding a slash": {
+			head + "related:\n  - a.md\t# see docs/schema.md\n" + tail,
+			out + "related:\n  - loom/a.md\t# see docs/schema.md\n  - loom/x.md\n" + tail,
 		},
 		"empty key": {
 			head + "related:\n" + tail,
@@ -457,12 +467,16 @@ func TestUniversalFrontmatterLinksSource(t *testing.T) {
 			out + "related: [loom/x.md]\n" + tail,
 		},
 		"flow list": {
-			head + "related: [a.md, b.md]\n" + tail,
-			out + "related: [a.md, b.md, loom/x.md]\n" + tail,
+			head + "related: [a.md,forge/b.md]\n" + tail,
+			out + "related: [loom/a.md, forge/b.md, loom/x.md]\n" + tail,
 		},
 		"scalar": {
 			head + "related: a.md\n" + tail,
-			out + "related:\n  - a.md\n  - loom/x.md\n" + tail,
+			out + "related:\n  - loom/a.md\n  - loom/x.md\n" + tail,
+		},
+		"scoped scalar": {
+			head + "related: forge/b.md\n" + tail,
+			out + "related:\n  - forge/b.md\n  - loom/x.md\n" + tail,
 		},
 		"none": {
 			head + "evidence:\n  - path: internal/x.go\nverified_at: 2026-01-01\n---\nbody\n",
