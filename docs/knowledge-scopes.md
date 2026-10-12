@@ -177,6 +177,46 @@ the repo's declaration stays inert, which is the split the marker was declared
 to prevent. So when a repo carries a `.loom-project`, onboard the name **in the
 marker**, not the one `loom status` names.
 
+## Promotion to universal
+
+`universal` is the one scope that is not a project: `truths/universal/` holds
+truths that apply to all, or most, projects. `loom relevant` counts it as a
+scope match for a ticket in any project (`scopeMatch` in
+`internal/knowledge/relevant.go`), so a universal truth surfaces outside the
+project it was learned in and wins the tie-break against an equal-scoring truth
+from an unrelated one.
+
+A truth gets there from the knowledge TUI: select a validated truth and press
+`u`, in the list or the detail view. One store unit of work
+(`docs/knowledge-store-writes.md`), committed as
+`promote-universal truth <scope>/<id>`:
+
+- writes `truths/universal/<name>.md`, keeping the filename and the id;
+- rewrites the frontmatter's `scope:` to `universal` and adds
+  `promoted_from: <scope>`, the project it came from — the only record of it
+  once the file has left that directory;
+- removes `truths/<scope>/<name>.md`.
+
+Once that commit has landed, `$VISUAL`/`$EDITOR` opens on the universal file,
+and what it writes is committed through the store as `e`'s edit is. A move whose
+commit did not land says so on the status line and opens no editor: the edit's
+commit records the universal file alone, and would leave the project copy's
+removal unrecorded. The rewrite is expected, not optional: a universal truth is
+abstracted from the project one (`docs/overview.md`), and a project claim copied
+verbatim — its paths, its names, its id's project prefix — reads as universal
+while still describing one repo. Saving nothing leaves the moved file as the
+only record.
+
+The gesture refuses, on the status line and with nothing written, a candidate
+(those keep `p`), a decision, a truth already in `universal`, a destination
+that already exists, a truth with no complete frontmatter block — there is
+nowhere to write `promoted_from:`, and without it the source project is lost —
+and a session with neither `$VISUAL` nor `$EDITOR` set,
+since the move without the rewrite is half the gesture. The source is read
+through the store's checks, so a truth file that is a symlink is refused before
+anything is written rather than copying what it points at into
+`truths/universal/`.
+
 ## Why a scope skip is not recorded
 
 The extraction ledger (`~/.loom/extract.state`) is permanent — it is what makes

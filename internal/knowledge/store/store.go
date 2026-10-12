@@ -169,6 +169,19 @@ func (t *Tx) WriteFile(path string, body []byte) error {
 	return f.Close()
 }
 
+// ReadFile reads one file through the same checks the writes take, for a unit
+// of work that publishes what it read: contents loaded outside the Tx may have
+// come through a symlink out of the store, and writing them back in would
+// commit a file the store never held. Reading changes nothing, so the path is
+// not recorded.
+func (t *Tx) ReadFile(path string) ([]byte, error) {
+	rel, err := t.relative(path)
+	if err != nil {
+		return nil, err
+	}
+	return t.dir.ReadFile(rel)
+}
+
 // Remove deletes one file.
 func (t *Tx) Remove(path string) error {
 	rel, err := t.relative(path)

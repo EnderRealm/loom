@@ -78,6 +78,11 @@ func (a Artifact) AgeBasis() time.Time {
 	return a.Modified
 }
 
+// UniversalScope is the cross-project scope: truths/universal/ holds claims
+// abstracted from project truths that apply to every project, so the ranker
+// counts it as a scope match for any ticket.
+const UniversalScope = "universal"
+
 // Root returns the durable knowledge store path, honoring
 // LOOM_KNOWLEDGE_ROOT for parity with the extractors. Defaults to
 // $LOOM_HOME/knowledge.

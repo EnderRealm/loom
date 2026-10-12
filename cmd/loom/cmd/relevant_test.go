@@ -137,3 +137,75 @@ func TestRelevantEmptyCorpus(t *testing.T) {
 		t.Errorf("expected no-matches message, got:\n%s", out)
 	}
 }
+
+// TestRelevantListsUniversalTruthAcrossProjects: a truth promoted to universal
+// from loom surfaces for a ticket in another project, and outranks an
+// equal-scoring truth from a third project on the scope tie-break. The third
+// project's id sorts first, so only the scope tie-break can put the universal
+// truth ahead.
+func TestRelevantListsUniversalTruthAcrossProjects(t *testing.T) {
+	setupRelevant(t)
+	home := os.Getenv("HOME")
+	mustWrite := func(p, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(filepath.Join(home, "tickets-store", "tickets", "ticket", "retry-webhook-1a2b.md"),
+		`---
+id: retry-webhook-1a2b
+status: open
+deps: []
+links: []
+created: 2026-10-11T09:00:00Z
+type: feature
+priority: 2
+---
+# Retry webhook delivery with exponential backoff
+
+Deliveries that fail are dropped today.
+`)
+
+	knowledgeRoot := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", knowledgeRoot)
+	truth := func(scope, id, extra string) string {
+		return "---\nid: " + id + "\ntitle: Webhook delivery needs exponential backoff\nscope: " + scope +
+			"\n" + extra + "type: truth\nstatus: validated\n---\n\n## Claim\n\nRetry webhook delivery with exponential backoff.\n"
+	}
+	mustWrite(filepath.Join(knowledgeRoot, "truths", "universal", "webhook-backoff.md"),
+		truth("universal", "loom-webhook-backoff", "promoted_from: loom\n"))
+	mustWrite(filepath.Join(knowledgeRoot, "truths", "api", "webhook-backoff.md"),
+		truth("api", "api-webhook-backoff", ""))
+
+	out, err := runRelevant(t, "ticket/retry-webhook-1a2b")
+	if err != nil {
+		t.Fatalf("RunE: %v", err)
+	}
+	univ := strings.Index(out, "**loom-webhook-backoff**")
+	third := strings.Index(out, "**api-webhook-backoff**")
+	if univ < 0 || third < 0 {
+		t.Fatalf("output does not list both truths:\n%s", out)
+	}
+	if !strings.Contains(out, "truths/universal/webhook-backoff.md") {
+		t.Errorf("universal truth not listed from truths/universal/:\n%s", out)
+	}
+	if univ > third {
+		t.Errorf("universal truth ranks behind the third project's equal-scoring truth:\n%s", out)
+	}
+	scoreOf := func(id string) string {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "**"+id+"**") {
+				_, s, _ := strings.Cut(line, "score ")
+				return s
+			}
+		}
+		return ""
+	}
+	if a, b := scoreOf("loom-webhook-backoff"), scoreOf("api-webhook-backoff"); a == "" || a != b {
+		t.Errorf("scores differ (%q vs %q), so the order is not the scope tie-break's:\n%s", a, b, out)
+	}
+}

@@ -128,6 +128,8 @@ func (m knowledgeModel) update(msg tea.Msg) (knowledgeModel, tea.Cmd) {
 			return m.reject()
 		case "e":
 			return m.edit()
+		case "u":
+			return m.promoteToUniversal()
 		case "up", "k":
 			if m.detailScroll > 0 {
 				m.detailScroll--
@@ -158,6 +160,8 @@ func (m knowledgeModel) update(msg tea.Msg) (knowledgeModel, tea.Cmd) {
 		return m.reject()
 	case "e":
 		return m.edit()
+	case "u":
+		return m.promoteToUniversal()
 	case "s":
 		// Skip: leave the candidate in place, advance to the next row.
 		if m.cursor < len(m.artifacts)-1 {
@@ -270,20 +274,67 @@ func commitCmd(commit store.Commit, status, notCommitted string) tea.Cmd {
 	}
 }
 
+// promoteToUniversal moves the selected validated truth to truths/universal/
+// and, once the move is recorded, opens $EDITOR on the moved file for the
+// project-agnostic rewrite. The editor waits on the move's commit rather than
+// running beside it: the edit commits from the editor's callback, and two units
+// of work running git against one store at once would race for its index lock.
+func (m knowledgeModel) promoteToUniversal() (knowledgeModel, tea.Cmd) {
+	a := m.selected()
+	if a == nil {
+		return m, nil
+	}
+	// The artifact's own refusal is the one that applies when there is one, so it
+	// is checked before the editor, and both before anything is written.
+	if _, err := universalDest(KnowledgeRoot(), *a); err != nil {
+		return m, statusCmd("promote to universal failed: " + err.Error())
+	}
+	// The rewrite is half the gesture, and moving a truth with no editor to
+	// rewrite it would leave a project claim filed as universal.
+	if editorFromEnv() == "" {
+		return m, statusCmd("$VISUAL/$EDITOR not set")
+	}
+	dest, commit, err := promoteUniversal(*a)
+	if err != nil {
+		return m, statusCmd("promote to universal failed: " + err.Error())
+	}
+	moved := *a
+	moved.Path = dest
+	moved.Scope = knowledge.UniversalScope
+	m.showDetail = false
+	m.pendingCommits++
+	status := "promoted → " + shortenPath(dest)
+	return m, tea.Batch(loadKnowledgeCmd(), tea.Sequence(statusCmd(status), func() tea.Msg {
+		return knowledgeCommittedMsg{status: status, notCommitted: " — not committed, rewrite not opened: ",
+			warn: commit(), edit: &moved}
+	}))
+}
+
+// editorFromEnv is the editor the edit gestures run: $VISUAL, else $EDITOR, or
+// "" when neither is set.
+func editorFromEnv() string {
+	if editor := os.Getenv("VISUAL"); editor != "" {
+		return editor
+	}
+	return os.Getenv("EDITOR")
+}
+
 func (m knowledgeModel) edit() (knowledgeModel, tea.Cmd) {
 	a := m.selected()
 	if a == nil {
 		return m, nil
 	}
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
-	}
+	return m.editArtifact(*a)
+}
+
+// editArtifact runs $EDITOR on a and commits what it wrote.
+func (m knowledgeModel) editArtifact(a Artifact) (knowledgeModel, tea.Cmd) {
+	editor := editorFromEnv()
 	if editor == "" {
 		return m, statusCmd("$VISUAL/$EDITOR not set")
 	}
 	cmd := exec.Command(editor, a.Path)
-	edited := *a
+	edited := a
 	// The commit runs inside ExecProcess's callback, which bubbletea dispatches
 	// off the update loop, so it is counted like a gesture's: a quit that did not
 	// wait for it would kill the commit and leave what $EDITOR wrote as

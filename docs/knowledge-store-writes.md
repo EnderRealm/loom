@@ -86,6 +86,7 @@ reject and nothing else. A writer that can block uses `Apply` or `ApplyIn`.
 | `Rename(from, to)` | Moves a file, creating the destination's directories; records both sides |
 | `Append(path, text)` | Appends to an **existing** file — never creates one, so a wrong root cannot scatter a `log.md` |
 | `Touch(path)` | Declares a path mutated outside the Tx (`$EDITOR`), so it is committed; writes nothing itself |
+| `ReadFile(path)` | Reads a file under the same checks, for a unit of work that writes back what it read; records nothing |
 | `Droppable(path)` | Marks a recorded path whose record lives elsewhere: an ignored one leaves the pathspec instead of sinking the commit |
 
 Every op is performed through an open handle on the store directory

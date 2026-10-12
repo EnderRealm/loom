@@ -94,10 +94,13 @@ type knowledgeEditedMsg struct {
 // the gesture. status is the line the gesture already set and notCommitted the
 // wording it uses for a record that did not land — a reject's can fail before
 // any commit — so the reason composes onto that line instead of replacing it.
+// edit, when set, is the artifact $EDITOR opens on once the record has landed:
+// a promotion to universal's rewrite.
 type knowledgeCommittedMsg struct {
 	status       string
 	notCommitted string
 	warn         store.Warn
+	edit         *Artifact
 }
 type activityLoadedMsg struct {
 	view    *summaries.ActivityView
@@ -248,10 +251,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// rest of the wait without being re-armed here.
 			return a, nil
 		}
+		// The rewrite opens only over a recorded move: its commit records the
+		// universal file alone, so an edit after a move that did not commit would
+		// leave the project copy's removal unrecorded with nothing on screen. An
+		// unpushed move is recorded, and the edit's own push carries it.
+		var edit tea.Cmd
+		if msg.edit != nil && msg.warn.NotCommitted == "" {
+			a.knowledge, edit = a.knowledge.editArtifact(*msg.edit)
+		}
 		// A clean record leaves the gesture's own status alone: re-arming it would
 		// hold a line the user has already read past for another three seconds.
 		if msg.warn == (store.Warn{}) {
-			return a, nil
+			return a, edit
 		}
 		status := msg.status
 		if msg.warn.NotCommitted != "" {
@@ -264,7 +275,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			status += " — not pushed: " + msg.warn.NotPushed
 		}
 		cmd := a.setStatus(status, 3*time.Second)
-		return a, cmd
+		return a, tea.Batch(cmd, edit)
 
 	case ticketFiledMsg:
 		delete(a.knowledge.inFlight, msg.path)
@@ -628,9 +639,9 @@ func (a App) helpLine() string {
 			p = "p file"
 		}
 		if a.knowledge.showDetail {
-			return "↑↓ scroll  │  " + p + "  │  x reject  │  e edit  │  esc/q back"
+			return "↑↓ scroll  │  " + p + "  │  x reject  │  e edit  │  u universal  │  esc/q back"
 		}
-		return "↑↓ select  │  enter view  │  " + p + "  │  x reject  │  e edit  │  s skip  │  esc/q close"
+		return "↑↓ select  │  enter view  │  " + p + "  │  x reject  │  e edit  │  u universal  │  s skip  │  esc/q close"
 	}
 	if a.overlay == overlayActivity {
 		return "↑↓ scroll  │  r refresh  │  esc/q close"

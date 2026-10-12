@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"loom/internal/knowledge"
 	"loom/internal/knowledge/store"
 )
 
@@ -104,6 +105,125 @@ func promoteCandidate(a Artifact) (string, store.Commit, error) {
 		return dest, withReason(commit, store.ShortReason(err)), nil
 	}
 	return dest, commit, nil
+}
+
+// universalGesture names the promotion to universal in its commit subject,
+// distinct from a candidate's promote.
+const universalGesture = "promote-universal"
+
+// universalDest is where promoteUniversal would file a in the store at root,
+// or the reason it refuses: anything but a validated truth in a project scope, or a universal
+// file already at the destination. Separate so the gesture can refuse on these
+// grounds before its own preconditions, with nothing written either way.
+func universalDest(root string, a Artifact) (string, error) {
+	if a.Type != "truth" {
+		return "", fmt.Errorf("only truths can be promoted to universal")
+	}
+	if a.Scope == knowledge.UniversalScope {
+		return "", fmt.Errorf("already universal")
+	}
+	// The status alone is frontmatter, which a file under _candidates/ can also
+	// claim; the directory is what makes the source a validated truth.
+	if a.Status != "validated" || filepath.Dir(a.Path) != filepath.Join(root, "truths", a.Scope) {
+		return "", fmt.Errorf("not a validated truth")
+	}
+	dest := filepath.Join(root, "truths", knowledge.UniversalScope, filepath.Base(a.Path))
+	if _, err := os.Stat(dest); err == nil {
+		return "", fmt.Errorf("%s already exists", shortenPath(dest))
+	}
+	return dest, nil
+}
+
+// promoteUniversal moves a validated truth from truths/<scope>/ to
+// truths/universal/ under the same filename, rewriting scope: to universal and
+// recording promoted_from: <scope>, and removes the project copy — one store
+// unit of work, its commit deferred as promoteCandidate's is. The claim is not
+// rewritten here: a universal truth is abstracted from the project one, which
+// is the human's rewrite in $EDITOR after this returns. Returns the destination
+// path and the Commit, nil only alongside an error. It refuses what
+// universalDest refuses, and never overwrites an existing universal file.
+func promoteUniversal(a Artifact) (string, store.Commit, error) {
+	// Resolved once, for promoteCandidate's reason.
+	root := KnowledgeRoot()
+	dest, err := universalDest(root, a)
+	if err != nil {
+		return "", nil, err
+	}
+	// Write-then-remove for promoteCandidate's reasons: once the universal file
+	// exists the promotion has landed and is reported as such, and a leftover
+	// project copy would list the truth twice.
+	written := false
+	commit, err := store.ApplyDeferred(root, gestureMessage(universalGesture, a), func(tx *store.Tx) error {
+		// Read again through the store rather than publishing a.Body: the load
+		// follows symlinks, so a source linked out of the store would otherwise
+		// copy whatever it points at into truths/universal/ and commit it.
+		body, err := tx.ReadFile(a.Path)
+		if err != nil {
+			return err
+		}
+		promoted, err := universalFrontmatter(string(body), a.Scope)
+		if err != nil {
+			return err
+		}
+		if err := tx.WriteFile(dest, []byte(promoted)); err != nil {
+			return err
+		}
+		written = true
+		return tx.Remove(a.Path)
+	})
+	if err != nil {
+		if !written {
+			return "", nil, err
+		}
+		return dest, withReason(commit, store.ShortReason(err)), nil
+	}
+	return dest, commit, nil
+}
+
+// universalFrontmatter rewrites a project truth's frontmatter for
+// truths/universal/: the first top-level scope: becomes universal followed by
+// promoted_from: <from>, and any further scope: or prior promoted_from: lines
+// are dropped so the file carries one of each. A file with no scope: gets both
+// appended. The body passes through untouched. A file with no complete
+// frontmatter block is an error rather than a pass-through: promoted_from: is
+// the only record of the source project once the file has moved.
+func universalFrontmatter(body, from string) (string, error) {
+	lines := strings.Split(body, "\n")
+	end := frontmatterEnd(lines)
+	if end < 0 {
+		return "", fmt.Errorf("no frontmatter block to rewrite")
+	}
+
+	var fm []string
+	scopeDone := false
+	for _, line := range lines[1:end] {
+		m := frontmatterKey.FindStringSubmatch(line)
+		if m == nil {
+			fm = append(fm, line)
+			continue
+		}
+		switch m[1] {
+		case "scope":
+			if !scopeDone {
+				fm = append(fm, "scope: "+knowledge.UniversalScope, "promoted_from: "+from)
+				scopeDone = true
+			}
+		case "promoted_from":
+			// replaced by this promotion's own
+		default:
+			fm = append(fm, line)
+		}
+	}
+	if !scopeDone {
+		fm = append(fm, "scope: "+knowledge.UniversalScope, "promoted_from: "+from)
+	}
+
+	out := make([]string, 0, len(lines)+2)
+	out = append(out, "---")
+	out = append(out, fm...)
+	out = append(out, "---")
+	out = append(out, lines[end+1:]...)
+	return strings.Join(out, "\n"), nil
 }
 
 // rejectCandidate moves a candidate into the _rejected/ archive, preserving its

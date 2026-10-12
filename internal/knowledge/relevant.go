@@ -259,5 +259,5 @@ func keywordOverlap(wantWords map[string]bool, a Artifact) []string {
 // scopeMatch reports whether an artifact's scope ranks as a tie-break match:
 // the ticket's project scope, or the cross-project "universal" scope.
 func scopeMatch(scope, project string) bool {
-	return scope == "universal" || (project != "" && scope == project)
+	return scope == UniversalScope || (project != "" && scope == project)
 }
