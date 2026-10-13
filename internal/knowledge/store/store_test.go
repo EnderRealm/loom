@@ -951,6 +951,88 @@ func TestApplyCommitsThroughASymlinkedRoot(t *testing.T) {
 	}
 }
 
+// seedRelativeStore is seedRemoteStore reached the way a relative
+// LOOM_KNOWLEDGE_ROOT reaches it: the process sits in the store's parent and the
+// root is the store's bare name, so every path a caller builds from it is
+// relative too. It carries one tracked candidate, so the gesture's commit has a
+// deletion to record. Returns the store's absolute path, for inspecting it, and
+// the relative root a caller sees.
+func seedRelativeStore(t *testing.T) (root, rel string) {
+	t.Helper()
+	root, _ = seedRemoteStore(t)
+	candidate := filepath.Join(root, "_candidates", "truths", "loom", "one.md")
+	if err := os.MkdirAll(filepath.Dir(candidate), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(candidate, []byte("candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, root, "add", "-A")
+	testGit(t, root, "commit", "-m", "seed candidate")
+	testGit(t, root, "push")
+	t.Chdir(filepath.Dir(root))
+	rel = filepath.Base(root)
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", rel)
+	return root, rel
+}
+
+// TestApplyPromotesThroughARelativeRoot: git runs with -C root and resolves a
+// pathspec against that directory, so a path built from a relative root and
+// handed over as-is would be resolved twice — knowledge/truths/... inside
+// knowledge/ — match nothing, and leave every promote uncommitted. The shape is
+// the TUI's promote: write the validated file, remove the candidate.
+func TestApplyPromotesThroughARelativeRoot(t *testing.T) {
+	root, rel := seedRelativeStore(t)
+
+	warn, err := Apply("promote truth loom/one", func(tx *Tx) error {
+		if err := tx.WriteFile(filepath.Join(rel, "truths", "loom", "one.md"), []byte("one\n")); err != nil {
+			return err
+		}
+		return tx.Remove(filepath.Join(rel, "_candidates", "truths", "loom", "one.md"))
+	})
+
+	if err != nil || warn != (Warn{}) {
+		t.Fatalf("Apply: err=%v warn=%+v", err, warn)
+	}
+	names := committed(t, root)
+	for _, want := range []string{"A\ttruths/loom/one.md", "D\t_candidates/truths/loom/one.md"} {
+		if !strings.Contains(names, want) {
+			t.Errorf("commit missing %q:\n%s", want, names)
+		}
+	}
+}
+
+// TestApplyRejectsThroughARelativeRoot is the relative root under the TUI's
+// reject: the candidate moves into the archive, which is droppable, and the
+// decision is appended to log.md. Every side of the move and the log entry has
+// to reach git resolved against the store, or the record sinks with the rest.
+func TestApplyRejectsThroughARelativeRoot(t *testing.T) {
+	root, rel := seedRelativeStore(t)
+
+	warn, err := Apply("reject truth loom/one", func(tx *Tx) error {
+		archive := filepath.Join(rel, "_candidates", "_rejected", "truths", "loom", "one.md")
+		if err := tx.Rename(filepath.Join(rel, "_candidates", "truths", "loom", "one.md"), archive); err != nil {
+			return err
+		}
+		tx.Droppable(archive)
+		return tx.Append(filepath.Join(rel, "log.md"), "\n## [2026-10-13] reject truth loom/one\n")
+	})
+
+	if err != nil || warn != (Warn{}) {
+		t.Fatalf("Apply: err=%v warn=%+v", err, warn)
+	}
+	names := committed(t, root)
+	for _, want := range []string{
+		"A\t_candidates/_rejected/truths/loom/one.md",
+		"D\t_candidates/truths/loom/one.md",
+		"M\tlog.md",
+	} {
+		if !strings.Contains(names, want) {
+			t.Errorf("commit missing %q:\n%s", want, names)
+		}
+	}
+}
+
 // TestApplyNoChangeLeavesNoCommit: a recorded path is not by itself a change.
 // $EDITOR quit without saving is the common case — the pathspec holds one
 // unmodified tracked file — and committing it would report a phantom failure
