@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -271,6 +272,65 @@ func TestPromoteCandidateNoOverwrite(t *testing.T) {
 	if _, err := os.Stat(art.Path); err != nil {
 		t.Errorf("candidate should remain after a refused promote: %v", err)
 	}
+}
+
+// TestPromoteRefusesUnsafeIDStem: the validated filename is built from the
+// extractor-written id, so an id whose stem is not one inert path segment is
+// refused with nothing written. The tree walked is the test's whole temp
+// directory — the knowledge root's parent — so a traversal that escaped the
+// root would still be seen.
+func TestPromoteRefusesUnsafeIDStem(t *testing.T) {
+	cases := []struct{ name, id string }{
+		{"newline", "loom-notify\nstate"},
+		{"forged record", forgedID},
+		{"control character", "loom-notify\x07state"},
+		{"leading dash after prefix", "loom--notify"},
+		{"leading dash", "-notify"},
+		{"dot-dot after prefix", "loom-.."},
+		{"dot-dot", ".."},
+		{"slash", "loom-notify/state"},
+		{"traversal", "loom-../../../escape"},
+		{"backslash", `loom-notify\state`},
+		{"empty stem", "loom-"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, art := seedCandidate(t)
+			art.ID = tc.id
+			before := treeFiles(t, filepath.Dir(root))
+
+			dest, _, err := promoteNow(art)
+			if err == nil {
+				t.Fatalf("promote of id %q was not refused (dest %q)", tc.id, dest)
+			}
+			if strings.ContainsAny(err.Error(), "\n\x07/\\") {
+				t.Errorf("refusal carries the forged bytes: %q", err)
+			}
+			if after := treeFiles(t, filepath.Dir(root)); !slices.Equal(before, after) {
+				t.Errorf("refused promote changed the tree:\nbefore %q\nafter  %q", before, after)
+			}
+			if _, err := os.Stat(art.Path); err != nil {
+				t.Errorf("candidate should remain after a refused promote: %v", err)
+			}
+		})
+	}
+}
+
+// treeFiles lists every path under dir, in WalkDir's lexical order.
+func treeFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		out = append(out, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestRejectCandidate(t *testing.T) {

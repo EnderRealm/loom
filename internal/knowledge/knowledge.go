@@ -245,9 +245,12 @@ var sourceSession = regexp.MustCompile(`^\s*-?\s*session:\s*(.*)$`)
 // listItem matches a "- <value>" entry of a block list.
 var listItem = regexp.MustCompile(`^\s*-\s*(.*)$`)
 
-// artifactID is the shape of an artifact id (`<scope>-<kebab-slug>`), used to
-// tell a contradicts entry naming an artifact from any other value.
-var artifactID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+// ArtifactID is the shape of an artifact id (`<scope>-<kebab-slug>`), used to
+// tell a contradicts entry naming an artifact from any other value, and by the
+// TUI to hold a promoted file's name to one inert path segment: the leading
+// alphanumeric rules out "-", "." and "..", and the class admits no separator,
+// line break or control character.
+var ArtifactID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // sourceDateLayout is the date layout for `sources[].date`.
 const sourceDateLayout = "2006-01-02"
@@ -282,7 +285,7 @@ func parseSourceDate(v string) (time.Time, bool) {
 func (a *Artifact) addContradicts(v string) bool {
 	v = strings.TrimSpace(v)
 	id := strings.Trim(v, `"'`)
-	if artifactID.MatchString(id) {
+	if ArtifactID.MatchString(id) {
 		a.Contradicts = append(a.Contradicts, id)
 		return true
 	}

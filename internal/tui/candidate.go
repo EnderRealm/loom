@@ -58,7 +58,7 @@ func candidateKebab(id, scope string) string {
 // promotion landed and the Commit records it, but the candidate is still there
 // and resurfaces as a duplicate, which is no part of the commit's outcome. It
 // never overwrites an existing validated file, and it refuses a candidate whose
-// scope mismatch is unresolved.
+// scope mismatch is unresolved or whose id does not yield a safe filename.
 func promoteCandidate(a Artifact) (dest string, commit store.Commit, leftover string, err error) {
 	plural := pluralType(a.Type)
 	if plural == "" {
@@ -78,10 +78,22 @@ func promoteCandidate(a Artifact) (dest string, commit store.Commit, leftover st
 		return "", nil, "", fmt.Errorf("scope %q disagrees with directory %s — onboard it and move the file, or correct scope: (e)",
 			logField(declared, logFieldScopeMax), a.Scope)
 	}
+	// The id is extractor-written frontmatter, so the stem it yields is refused
+	// rather than sanitized unless it is already one inert path segment.
+	// Sanitizing would name the file for something other than the id it
+	// carries, and could fold two distinct forged ids onto one stem; refusing
+	// writes nothing and leaves the candidate for the human to correct id: and
+	// promote again. The stem is checked after the prefix strip, so "loom-.."
+	// or "loom--x" is refused as ".." or "-x" would be.
+	stem := candidateKebab(a.ID, a.Scope)
+	if !knowledge.ArtifactID.MatchString(stem) {
+		return "", nil, "", fmt.Errorf("id %q does not name a safe filename — correct id: (e)",
+			logField(a.ID, logFieldIDMax))
+	}
 	// Resolved once and handed to the store: KnowledgeRoot() twice — once to
 	// build the paths, once inside Apply — is two answers waiting to differ.
 	root := KnowledgeRoot()
-	dest = filepath.Join(root, plural, a.Scope, candidateKebab(a.ID, a.Scope)+".md")
+	dest = filepath.Join(root, plural, a.Scope, stem+".md")
 	if _, err := os.Stat(dest); err == nil {
 		return "", nil, "", fmt.Errorf("%s already exists", shortenPath(dest))
 	}
