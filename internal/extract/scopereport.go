@@ -60,10 +60,14 @@ type ScopeReport struct {
 // Reading the DB names it before the directory exists, which is the cheap
 // moment to notice.
 //
-// A host with no summaries.db reports an empty tally rather than an error, per
-// LoadSessionSources' degrade-silently contract, and so does one with no
-// knowledge store.
+// A host with no summaries.db is an error rather than an empty tally: the DB
+// lives only on the host, and a client reporting zero sessions per scope would
+// be stating a number with nothing behind it. A host with the DB and no
+// knowledge store reports an empty tally.
 func ScopeStatus() (ScopeReport, error) {
+	if err := summaries.RequireStore(); err != nil {
+		return ScopeReport{}, err
+	}
 	rep := ScopeReport{TruthsDir: TruthsDir(), MinTurns: DefaultMinTurns()}
 
 	counts := map[string]int{}

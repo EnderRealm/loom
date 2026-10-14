@@ -1,10 +1,13 @@
 package extract
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"loom/internal/config"
 	"loom/internal/parse/summary"
+	"loom/internal/summaries"
 )
 
 // The report is what makes onboarding measurable: a scope with no directory has
@@ -76,10 +79,29 @@ func TestScopeStatusNamesScopesFiledUnderMoreThanOneRemote(t *testing.T) {
 	}
 }
 
-// A host with no summaries.db and no store is an empty report rather than an
-// error: `loom status` runs on machines that ship sessions and extract nothing.
-func TestScopeStatusDegradesWithoutASummaryDB(t *testing.T) {
+// A host with no summaries.db is refused rather than reported as an empty
+// tally: the DB lives only on the host, so on a client zero sessions per scope
+// would be a number with nothing behind it. `loom status` prints the error
+// under the section's header through its existing path.
+func TestScopeStatusRequiresSummaryStore(t *testing.T) {
+	newEnv(t, "loom")
+
+	_, err := ScopeStatus()
+	want := "summaries.db not found at " + filepath.Join(config.Home(), "summaries.db") + " — run `loom summarize`"
+	if err == nil || err.Error() != want {
+		t.Fatalf("scope status err = %v, want %q", err, want)
+	}
+}
+
+// A host with a summaries.db and no store is an empty report rather than an
+// error: `loom status` runs on hosts that summarize and extract nothing.
+func TestScopeStatusDegradesWithoutAKnowledgeStore(t *testing.T) {
 	newEnv(t)
+	st, err := summaries.Open(filepath.Join(config.Home(), "summaries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
 
 	rep, err := ScopeStatus()
 	if err != nil {

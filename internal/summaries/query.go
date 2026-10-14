@@ -62,9 +62,10 @@ type View struct {
 	ByProject            map[string]*ProjectMetrics
 	ToolStats            map[string][]ToolStat
 	CompactionsByProject map[string]int
-	// Available is false when summaries.db doesn't exist yet (e.g.
-	// summarizer not installed); every other field is nil/empty in
-	// that case so callers can degrade silently.
+	// Available is false when summaries.db doesn't exist; every other
+	// field is nil/empty in that case. It serves internal consumers:
+	// human-facing readers gate on RequireStore first, so the TUI sees
+	// it only if the DB vanishes after startup.
 	Available bool
 }
 
@@ -73,9 +74,21 @@ func SessionKey(agent, sessionID string) string {
 	return agent + "\x00" + sessionID
 }
 
+// RequireStore fails when summaries.db is absent from config.Home(). The
+// human-facing readers call it first: the DB lives only on the host, and on a
+// client its absence would otherwise read as a legitimate empty result.
+func RequireStore() error {
+	dbPath := filepath.Join(config.Home(), "summaries.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("summaries.db not found at %s — run `loom summarize`", dbPath)
+	}
+	return nil
+}
+
 // Load opens the summary DB read-only and materializes a View. Returns
-// View{Available: false} when the DB doesn't exist yet so the caller
-// (typically the TUI) can render its pre-summary fields.
+// View{Available: false} when the DB doesn't exist; the TUI gates on
+// RequireStore before startup, so it reads that only if the DB vanishes
+// after.
 func Load() (*View, error) {
 	dbPath := filepath.Join(config.Home(), "summaries.db")
 	if _, err := os.Stat(dbPath); err != nil {
