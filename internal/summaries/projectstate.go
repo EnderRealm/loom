@@ -71,7 +71,7 @@ func LoadProjectState(dbPath string) ([]ProjectState, error) {
 		return nil, fmt.Errorf("summaries.db: %w — run `loom summarize`", err)
 	}
 	// mode=ro keeps us out of the summarizer's way; it holds the only writer.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := readOnlyDSN(dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open summaries.db: %w", err)

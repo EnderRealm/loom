@@ -84,7 +84,7 @@ func Load() (*View, error) {
 
 	// mode=ro keeps us out of the writer's way; the launchd summarizer
 	// holds the only write connection.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := readOnlyDSN(dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open summaries.db: %w", err)
@@ -277,7 +277,7 @@ func LoadSessionSources(since time.Time) ([]SessionSource, error) {
 		return nil, nil
 	}
 
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := readOnlyDSN(dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open summaries.db: %w", err)
@@ -342,7 +342,7 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 		return nil, nil
 	}
 
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := readOnlyDSN(dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open summaries.db: %w", err)
@@ -502,7 +502,7 @@ func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
 		return nil, nil, fmt.Errorf("summaries.db: %w — run `loom summarize`", err)
 	}
 
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := readOnlyDSN(dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open summaries.db: %w", err)
@@ -654,7 +654,7 @@ func LoadActivity(window time.Duration) (*ActivityView, error) {
 		return &ActivityView{Available: false}, nil
 	}
 
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := readOnlyDSN(dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open summaries.db: %w", err)

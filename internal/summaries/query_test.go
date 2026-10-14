@@ -2,6 +2,8 @@ package summaries
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -363,4 +365,110 @@ func TestClaudeSubagentCommitsAreReadAsTheParents(t *testing.T) {
 	if want := []string{"parent:aaa1111", "parent:bbb2222"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("commits = %v, want %v (the parent's and its subagent's in time order, the orphan's dropped)", got, want)
 	}
+}
+
+// escapedHome points $LOOM_HOME at a directory whose name carries '#' and '?'
+// and writes one recent session there that landed one marked commit. It
+// returns the prefix a file: URI would cut that directory down to.
+func escapedHome(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "a#b?c")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOM_HOME", dir)
+
+	st, err := Open(filepath.Join(dir, "summaries.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	start := time.Now().Add(-time.Hour)
+	sum := &summary.SessionSummary{
+		SessionID: "escaped", Agent: summary.AgentClaude, StartTime: start, EndTime: start.Add(time.Minute),
+		Turns: []summary.Turn{{Idx: 0}},
+		ToolCalls: []summary.ToolCall{{Kind: summary.KindBash, StartedAt: start,
+			ResultSummary: "[main ccc3333] [loom/escaped-0001] Do the thing"}},
+	}
+	src := SourceInfo{Path: "/tmp/loom/escaped.jsonl", GitRemote: "https://github.com/EnderRealm/loom.git"}
+	if err := st.WriteSummary(context.Background(), sum, src); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+	st.Close()
+	return filepath.Join(root, "a")
+}
+
+// assertNoDatabaseAt fails when a database, or a SQLite sidecar of one, exists
+// at path.
+func assertNoDatabaseAt(t *testing.T, path string) {
+	t.Helper()
+	for _, p := range []string{path, path + "-journal", path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat %s = %v, want not exist", p, err)
+		}
+	}
+}
+
+// The tests below pin that each reader opens a $LOOM_HOME carrying '#' or '?'
+// as the directory it names: no query is lost and no database appears at the
+// prefix a file: URI would otherwise cut the path down to.
+
+func TestLoadEscapesURIDelimiters(t *testing.T) {
+	truncated := escapedHome(t)
+	v, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !v.Available || v.BySession[SessionKey(string(summary.AgentClaude), "escaped")] == nil {
+		t.Fatalf("Load = available %v with %d sessions, want the escaped session", v.Available, len(v.BySession))
+	}
+	assertNoDatabaseAt(t, truncated)
+}
+
+func TestLoadSessionSourcesEscapesURIDelimiters(t *testing.T) {
+	truncated := escapedHome(t)
+	got, err := LoadSessionSources(time.Time{})
+	if err != nil {
+		t.Fatalf("LoadSessionSources: %v", err)
+	}
+	if len(got) != 1 || got[0].SessionID != "escaped" {
+		t.Fatalf("LoadSessionSources = %+v, want the escaped session", got)
+	}
+	assertNoDatabaseAt(t, truncated)
+}
+
+func TestLoadSessionsForTicketsEscapesURIDelimiters(t *testing.T) {
+	truncated := escapedHome(t)
+	got, err := LoadSessionsForTickets([]string{"loom/escaped-0001"})
+	if err != nil {
+		t.Fatalf("LoadSessionsForTickets: %v", err)
+	}
+	if len(got) != 1 || got[0].SessionID != "escaped" {
+		t.Fatalf("LoadSessionsForTickets = %+v, want the escaped session", got)
+	}
+	assertNoDatabaseAt(t, truncated)
+}
+
+func TestLoadSessionsAndCommitsEscapesURIDelimiters(t *testing.T) {
+	truncated := escapedHome(t)
+	spans, commits, err := LoadSessionsAndCommits()
+	if err != nil {
+		t.Fatalf("LoadSessionsAndCommits: %v", err)
+	}
+	if len(spans) != 1 || spans[0].SessionID != "escaped" || len(commits) != 1 || commits[0].Hash != "ccc3333" {
+		t.Fatalf("LoadSessionsAndCommits = %+v / %+v, want the escaped session and ccc3333", spans, commits)
+	}
+	assertNoDatabaseAt(t, truncated)
+}
+
+func TestLoadActivityEscapesURIDelimiters(t *testing.T) {
+	truncated := escapedHome(t)
+	av, err := LoadActivity(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("LoadActivity: %v", err)
+	}
+	if !av.Available || len(av.Sessions) != 1 || len(av.Commits) != 1 {
+		t.Fatalf("LoadActivity = available %v with %d sessions and %d commits, want 1 and 1", av.Available, len(av.Sessions), len(av.Commits))
+	}
+	assertNoDatabaseAt(t, truncated)
 }

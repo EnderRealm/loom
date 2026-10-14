@@ -58,6 +58,13 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// readOnlyDSN is the DSN the package's readers open path with. The path is
+// escaped as Open's is; unescaped, a '#' or '?' would also drop mode=ro and
+// open a writable database at the truncated prefix.
+func readOnlyDSN(path string) string {
+	return "file:" + (&url.URL{Path: path}).EscapedPath() + "?mode=ro&_pragma=busy_timeout(2000)"
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 
 // DB exposes the underlying *sql.DB so tools can run ad-hoc queries without
