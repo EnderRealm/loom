@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -53,7 +54,11 @@ func at(hhmmss string) time.Time {
 
 func openStore(t *testing.T) (*summaries.Store, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "summaries.db")
+	return openStoreAt(t, filepath.Join(t.TempDir(), "summaries.db"))
+}
+
+func openStoreAt(t *testing.T, path string) (*summaries.Store, string) {
+	t.Helper()
 	st, err := summaries.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +217,12 @@ func rootSessionSummary() *summary.SessionSummary {
 // which stays missing so partial coverage has something to name.
 func fixture(t *testing.T) (*summaries.Store, string) {
 	t.Helper()
-	st, path := openStore(t)
+	return fixtureAt(t, filepath.Join(t.TempDir(), "summaries.db"))
+}
+
+func fixtureAt(t *testing.T, path string) (*summaries.Store, string) {
+	t.Helper()
+	st, path := openStoreAt(t, path)
 	importFile(t, st, filepath.Join("..", "runs", "testdata", "executions.jsonl"))
 	writeSession(t, st, rootSessionSummary())
 	writeSession(t, st, oneTurn(summary.AgentClaude, agentSession, claudeModel, at("17:05:40"), at("17:08:00"), 1000, 0, 200, summary.KindBash, 3000))
@@ -569,6 +579,26 @@ func TestReportCoversTheMixedRuntimeFixture(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"children":null`) || strings.Contains(string(raw), `"unresolved":null`) || strings.Contains(string(raw), `"diagnostics":null`) || strings.Contains(string(raw), `:null,"models"`) {
 		t.Errorf("report renders a null list:\n%s", raw)
+	}
+}
+
+// TestLoadEscapesURIDelimiters pins that a path carrying '#' or '?' is read
+// as the file it names: no query is lost and no database appears at the
+// prefix a file: URI would otherwise cut the path down to.
+func TestLoadEscapesURIDelimiters(t *testing.T) {
+	dir := t.TempDir()
+	st, path := fixtureAt(t, filepath.Join(dir, "summaries#a?b.db"))
+	st.Close()
+	rep, err := Load(path, fixtureRun)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rep.Run.RunID != fixtureRun || len(rep.Executions) != 8 {
+		t.Fatalf("Load = run %q with %d executions, want %s with 8", rep.Run.RunID, len(rep.Executions), fixtureRun)
+	}
+	truncated := filepath.Join(dir, "summaries")
+	if _, err := os.Stat(truncated); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat %s = %v, want not exist", truncated, err)
 	}
 }
 

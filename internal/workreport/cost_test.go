@@ -3,6 +3,9 @@ package workreport
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -96,6 +99,24 @@ func TestCostRunCarriesItsIdentity(t *testing.T) {
 	}
 	if run.InvokedAt != base.Format(time.RFC3339) {
 		t.Fatalf("invoked_at = %q, want %q", run.InvokedAt, base.Format(time.RFC3339))
+	}
+}
+
+// TestLoadCostEscapesURIDelimiters pins that a path carrying '#' or '?' is
+// read as the file it names: no query is lost and no database appears at the
+// prefix a file: URI would otherwise cut the path down to.
+func TestLoadCostEscapesURIDelimiters(t *testing.T) {
+	dir := t.TempDir()
+	f := &fixture{t: t, path: filepath.Join(dir, "summaries#a?b.db")}
+	f.add(costSession())
+
+	run := onlyCost(t, f.loadCost(time.Time{}, time.Time{}))
+	if run.Ticket != "loom/cost-1111" || run.SessionID != "cost" {
+		t.Fatalf("run = %s/%s, want loom/cost-1111/cost", run.Ticket, run.SessionID)
+	}
+	truncated := filepath.Join(dir, "summaries")
+	if _, err := os.Stat(truncated); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat %s = %v, want not exist", truncated, err)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -479,7 +480,7 @@ func open(dbPath string) (*sql.DB, *pricing.Table, error) {
 		return nil, nil, fmt.Errorf("summaries.db not found at %s — run `loom summarize`", dbPath)
 	}
 	// mode=ro keeps us out of the summarizer's way; it holds the only writer.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?mode=ro&_pragma=busy_timeout(2000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open summaries.db: %w", err)

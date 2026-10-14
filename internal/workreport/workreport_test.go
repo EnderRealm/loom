@@ -2,7 +2,9 @@ package workreport
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -825,6 +827,24 @@ func TestDateRangeFiltersRuns(t *testing.T) {
 	}
 	if got := len(f.load(base.AddDate(0, 0, 1), time.Time{}).Runs); got != 0 {
 		t.Fatalf("runs after both = %d, want 0", got)
+	}
+}
+
+// TestLoadEscapesURIDelimiters pins that a path carrying '#' or '?' is read
+// as the file it names: no query is lost and no database appears at the
+// prefix a file: URI would otherwise cut the path down to.
+func TestLoadEscapesURIDelimiters(t *testing.T) {
+	dir := t.TempDir()
+	f := &fixture{t: t, path: filepath.Join(dir, "summaries#a?b.db")}
+	f.add(compliantSession())
+
+	run := only(t, f.load(time.Time{}, time.Time{}))
+	if run.Ticket != "loom/compliant-1111" || run.Classification != ClassCompliant {
+		t.Fatalf("run = %s %q, want loom/compliant-1111 compliant", run.Ticket, run.Classification)
+	}
+	truncated := filepath.Join(dir, "summaries")
+	if _, err := os.Stat(truncated); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat %s = %v, want not exist", truncated, err)
 	}
 }
 

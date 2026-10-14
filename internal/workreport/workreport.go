@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -152,7 +153,7 @@ func Load(dbPath string, since, until time.Time) (*Report, error) {
 	}
 
 	// mode=ro keeps us out of the summarizer's way; it holds the only writer.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", dbPath)
+	dsn := "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?mode=ro&_pragma=busy_timeout(2000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open summaries.db: %w", err)
