@@ -279,14 +279,32 @@ func scanRun(sc scanner) (runRow, error) {
 	return row, nil
 }
 
+// runColumns is the select list scanRun reads. runs.root_transcript is added
+// in place by a writable summaries.Open, so a read-only reader can meet a v12
+// database no such writer has opened yet; every row there predates the
+// column, so NULL is its exact value.
+func runColumns(db *sql.DB) (string, error) {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'root_transcript'`).Scan(&n); err != nil {
+		return "", fmt.Errorf("inspect runs: %w", err)
+	}
+	rootTranscript := "root_transcript"
+	if n == 0 {
+		rootTranscript = "NULL"
+	}
+	return `run_id, ticket, runtime, agent, session_id, producer, started_at,
+		ended_at, outcome, reporting_cutoff, ` + rootTranscript + `, source_path, source_line`, nil
+}
+
 // loadRunRows reads every declared run in range. Fully drained before the
 // per-run queries run: the summaries store allows one connection, so a
 // query issued while this cursor is open would wait on itself.
 func loadRunRows(db *sql.DB, since, until time.Time) ([]runRow, error) {
-	rows, err := db.Query(`
-		SELECT run_id, ticket, runtime, agent, session_id, producer, started_at,
-		       ended_at, outcome, reporting_cutoff, root_transcript, source_path, source_line
-		FROM runs ORDER BY started_at, run_id`)
+	cols, err := runColumns(db)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT ` + cols + ` FROM runs ORDER BY started_at, run_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query runs: %w", err)
 	}
@@ -305,10 +323,11 @@ func loadRunRows(db *sql.DB, since, until time.Time) ([]runRow, error) {
 }
 
 func loadRunRow(db *sql.DB, runID string) (*runRow, error) {
-	row, err := scanRun(db.QueryRow(`
-		SELECT run_id, ticket, runtime, agent, session_id, producer, started_at,
-		       ended_at, outcome, reporting_cutoff, root_transcript, source_path, source_line
-		FROM runs WHERE run_id = ?`, runID))
+	cols, err := runColumns(db)
+	if err != nil {
+		return nil, err
+	}
+	row, err := scanRun(db.QueryRow(`SELECT `+cols+` FROM runs WHERE run_id = ?`, runID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

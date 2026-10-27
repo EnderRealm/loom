@@ -1251,3 +1251,45 @@ func TestRecordedCodexRunAttachesCodexChildren(t *testing.T) {
 	}
 	wantTranscript(t, guardian, "codex-cli", "sess-guardian")
 }
+
+// A v12 database a pre-root_transcript writer last opened has no such column
+// until a writable Open adds it; the readers must not wait on that, and read
+// every run there as undeclared.
+func TestReadersTolerateMissingRootTranscript(t *testing.T) {
+	st := openStore(t, filepath.Join(t.TempDir(), "summaries.db"))
+	defer st.Close()
+	path := filepath.Join(t.TempDir(), "executions.jsonl")
+	records := strings.Join([]string{
+		`{"v":1,"kind":"run","run_id":"run-none","runtime":"weft","started_at":"2026-09-10T12:00:00Z","root_transcript":"none"}`,
+		`{"v":1,"kind":"execution","run_id":"run-none","execution_id":"root-none","execution_kind":"root","started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:30:00Z","outcome":"completed"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(records), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importFile(t, st, path)
+	before, err := Load(st.DB(), "run-none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.TranscriptBasis != BasisNone {
+		t.Fatalf("transcript_basis before drop = %q, want %q", before.TranscriptBasis, BasisNone)
+	}
+	if _, err := st.DB().Exec(`ALTER TABLE runs DROP COLUMN root_transcript`); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(st.DB(), "run-none")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.TranscriptBasis == BasisNone {
+		t.Errorf("transcript_basis = %q without the column, want undeclared", got.TranscriptBasis)
+	}
+	listed, err := List(st.DB(), time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if r := runByID(t, listed, "run-none"); r.TranscriptBasis == BasisNone {
+		t.Errorf("listed transcript_basis = %q without the column, want undeclared", r.TranscriptBasis)
+	}
+}
