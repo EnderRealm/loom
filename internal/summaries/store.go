@@ -105,11 +105,31 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	if err := addRunsRootTranscript(db); err != nil {
+		return err
+	}
 	_, err := db.Exec(
 		`INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)`,
 		"schema_version", strconv.Itoa(schemaVersion),
 	)
 	return err
+}
+
+// addRunsRootTranscript adds runs.root_transcript to a v12 database created
+// before the column existed; CREATE TABLE IF NOT EXISTS leaves such a table
+// as it was. See schemaSQL for why this is not a version bump.
+func addRunsRootTranscript(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'root_transcript'`).Scan(&n); err != nil {
+		return fmt.Errorf("inspect runs: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN root_transcript TEXT`); err != nil {
+		return fmt.Errorf("add runs.root_transcript: %w", err)
+	}
+	return nil
 }
 
 // lastSweepKey is the schema_meta row holding when the summarizer last

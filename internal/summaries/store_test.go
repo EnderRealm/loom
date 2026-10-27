@@ -112,6 +112,46 @@ func TestOpenTooNewDB(t *testing.T) {
 	}
 }
 
+// TestOpenAddsRunsRootTranscript: a v12 database whose runs table predates
+// root_transcript gains the column on open, without a version bump, and a
+// run record declaring it lands there.
+func TestOpenAddsRunsRootTranscript(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "summaries.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO schema_meta(key, value) VALUES ('schema_version', '12')`,
+		`CREATE TABLE runs (run_id TEXT PRIMARY KEY, ticket TEXT, runtime TEXT, agent TEXT, session_id TEXT,
+		    producer TEXT, started_at TEXT, ended_at TEXT, outcome TEXT, reporting_cutoff TEXT, recorded_at TEXT,
+		    source_path TEXT NOT NULL, source_line INTEGER NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	db.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	rec := `{"v":1,"kind":"run","run_id":"run-w","runtime":"weft","root_transcript":"none"}` + "\n"
+	if _, err := st.ImportExecutions(context.Background(), "executions.jsonl", strings.NewReader(rec), int64(len(rec)), time.Now()); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	var got sql.NullString
+	if err := st.DB().QueryRow(`SELECT root_transcript FROM runs WHERE run_id = 'run-w'`).Scan(&got); err != nil {
+		t.Fatalf("read root_transcript: %v", err)
+	}
+	if got.String != "none" {
+		t.Errorf("root_transcript = %q, want none", got.String)
+	}
+}
+
 // TestWriteSummaryRoundTrip verifies the (agent, session_id) composite key:
 // two sessions sharing the same session_id but different agents coexist
 // without overwriting each other.

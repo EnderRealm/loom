@@ -57,7 +57,15 @@ const (
 	// BasisTranscript: a transcript-recognized run, whose transcript is its
 	// identity.
 	BasisTranscript = "transcript"
+	// BasisNone: the record declared `root_transcript: "none"` — the root
+	// has no transcript by construction, as a Weft run's synthetic root, so
+	// it is metered as zero rather than reported missing. No join is tried.
+	BasisNone = "none"
 )
+
+// rootTranscriptNone is the run record's root_transcript value BasisNone
+// reads.
+const rootTranscriptNone = "none"
 
 // Diagnostic codes the loader writes; the importer's are in summaries.
 const (
@@ -242,6 +250,7 @@ func List(db *sql.DB, since, until time.Time) ([]Run, error) {
 type runRow struct {
 	runID, ticket, runtime, agent, sessionID, producer string
 	startedAt, endedAt, outcome, reportingCutoff       string
+	rootTranscript                                     string
 	sourcePath                                         string
 	sourceLine                                         int
 }
@@ -255,12 +264,14 @@ func scanRun(sc scanner) (runRow, error) {
 		row                                                  runRow
 		ticket, runtime, agent, sessionID, producer          sql.NullString
 		startedAt, endedAt, outcome, reportingCutoff, source sql.NullString
+		rootTranscript                                       sql.NullString
 		line                                                 sql.NullInt64
 	)
 	if err := sc.Scan(&row.runID, &ticket, &runtime, &agent, &sessionID, &producer,
-		&startedAt, &endedAt, &outcome, &reportingCutoff, &source, &line); err != nil {
+		&startedAt, &endedAt, &outcome, &reportingCutoff, &rootTranscript, &source, &line); err != nil {
 		return row, err
 	}
+	row.rootTranscript = rootTranscript.String
 	row.ticket, row.runtime, row.agent, row.sessionID = ticket.String, runtime.String, agent.String, sessionID.String
 	row.producer, row.startedAt, row.endedAt = producer.String, startedAt.String, endedAt.String
 	row.outcome, row.reportingCutoff = outcome.String, reportingCutoff.String
@@ -274,7 +285,7 @@ func scanRun(sc scanner) (runRow, error) {
 func loadRunRows(db *sql.DB, since, until time.Time) ([]runRow, error) {
 	rows, err := db.Query(`
 		SELECT run_id, ticket, runtime, agent, session_id, producer, started_at,
-		       ended_at, outcome, reporting_cutoff, source_path, source_line
+		       ended_at, outcome, reporting_cutoff, root_transcript, source_path, source_line
 		FROM runs ORDER BY started_at, run_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query runs: %w", err)
@@ -296,7 +307,7 @@ func loadRunRows(db *sql.DB, since, until time.Time) ([]runRow, error) {
 func loadRunRow(db *sql.DB, runID string) (*runRow, error) {
 	row, err := scanRun(db.QueryRow(`
 		SELECT run_id, ticket, runtime, agent, session_id, producer, started_at,
-		       ended_at, outcome, reporting_cutoff, source_path, source_line
+		       ended_at, outcome, reporting_cutoff, root_transcript, source_path, source_line
 		FROM runs WHERE run_id = ?`, runID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -311,7 +322,9 @@ func loadRunRow(db *sql.DB, runID string) (*runRow, error) {
 // /work invocation recognized in its transcript: the only one in the session,
 // or with several, the one whose span holds the run's start. A record naming
 // no transcript takes the one invocation inferJoin finds, and its root — a
-// record that named none either — takes the same reference.
+// record that named none either — takes the same reference, unless the record
+// declared root_transcript "none". A named transcript outranks that
+// declaration: it is evidence, and the declaration only says none exists.
 func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) (*Run, error) {
 	run := &Run{
 		RunID:            row.runID,
@@ -349,6 +362,10 @@ func buildRecorded(db *sql.DB, row runRow, invocations []workreport.Invocation) 
 	var ok bool
 	if run.Transcript != nil {
 		inv, ok = SpanningInvocation(invocations, run.Transcript.Agent, run.Transcript.SessionID, parseTime(row.startedAt))
+	} else if row.rootTranscript == rootTranscriptNone {
+		// Declared transcript-less: there is no session to join, and a join
+		// found by ticket and time would claim someone else's.
+		run.TranscriptBasis = BasisNone
 	} else {
 		var n int
 		inv, n = inferJoin(invocations, row)

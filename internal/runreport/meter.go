@@ -287,7 +287,7 @@ func (m *meter) add(u *unit, transcript bool) {
 		m.priced = false
 		m.m.TokenUsageUnavailable = true
 		m.m.ToolTimeUnavailable = true
-	case u.data == nil && u.node.Kind != runs.KindCommand:
+	case u.data == nil && u.node.Kind != runs.KindCommand && !u.transcriptless:
 		m.p.Warn(u.node.ExecutionID + ": no transcript")
 		m.priced = false
 		m.m.TokenUsageUnavailable = true

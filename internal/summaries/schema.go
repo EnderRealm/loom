@@ -13,6 +13,12 @@ package summaries
 // does not change. A binary predating it leaves the rows unwritten, which
 // their computed_at shows.
 //
+// runs.root_transcript carries no version either, for the same reason: it is
+// folded from execution records, not transcripts, and no record predating it
+// carries the field, so a v12 database gains the column on open
+// (addRunsRootTranscript) and the next import of a changed registry fills it.
+// A binary predating it names its columns on upsert and leaves it alone.
+//
 // schemaVersion 12: subagents gains tool_use_id, started_at and ended_at —
 // the dispatching tool_use and the span of the dispatch's own transcript, so
 // a run report can place a Claude subagent under its run's root and against
@@ -382,6 +388,7 @@ CREATE TABLE IF NOT EXISTS runs (
     ended_at         TEXT,
     outcome          TEXT,
     reporting_cutoff TEXT,
+    root_transcript  TEXT,
     recorded_at      TEXT,
     source_path      TEXT NOT NULL,
     source_line      INTEGER NOT NULL,

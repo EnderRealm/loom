@@ -1210,6 +1210,133 @@ func TestRecordWithoutSessionIsAGapUntilJoined(t *testing.T) {
 	}
 }
 
+// weftRun is a Weft run's records: a synthetic root with no transcript and
+// two stage attempts, each its own Claude session. The run record carries
+// root_transcript when declared is set, on its start and end records as weft
+// writes them.
+func weftRun(runID string, declared bool, extra ...string) []string {
+	decl := ""
+	if declared {
+		decl = `,"root_transcript":"none"`
+	}
+	root := "root-" + runID
+	return append([]string{
+		`{"v":1,"kind":"run","run_id":"` + runID + `","ticket":"weft-e2e/add-div-op-49c3","runtime":"weft","producer":"weft@0.9.0","started_at":"2026-09-10T12:00:00Z"` + decl + `}`,
+		`{"v":1,"kind":"execution","run_id":"` + runID + `","execution_id":"` + root + `","execution_kind":"root","started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:30:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","run_id":"` + runID + `","execution_id":"stage-work-` + runID + `","parent_execution_id":"` + root + `","execution_kind":"stage","stage":"work","stage_occurrence":1,"attempt":1,"agent":"claude-code","session_id":"sess-work-` + runID + `","started_at":"2026-09-10T12:01:00Z","ended_at":"2026-09-10T12:10:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","run_id":"` + runID + `","execution_id":"stage-review-` + runID + `","parent_execution_id":"` + root + `","execution_kind":"stage","stage":"review","stage_occurrence":1,"attempt":1,"agent":"claude-code","session_id":"sess-review-` + runID + `","started_at":"2026-09-10T12:11:00Z","ended_at":"2026-09-10T12:20:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"run","run_id":"` + runID + `","ended_at":"2026-09-10T12:30:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T12:30:00Z"` + decl + `}`,
+	}, extra...)
+}
+
+func writeWeftStages(t *testing.T, st *summaries.Store, runID string) {
+	t.Helper()
+	begin := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	writeSession(t, st, oneTurn(summary.AgentClaude, "sess-work-"+runID, claudeModel, begin.Add(time.Minute), begin.Add(10*time.Minute), 1000, 4000, 200, summary.KindEdit, 500))
+	writeSession(t, st, oneTurn(summary.AgentClaude, "sess-review-"+runID, claudeModel, begin.Add(11*time.Minute), begin.Add(20*time.Minute), 600, 2000, 100, summary.KindBash, 700))
+}
+
+// A run declaring root_transcript "none" meters its synthetic root as zero:
+// the total is the descendants' tokens and cost, and with nothing else
+// missing the telemetry is complete.
+func TestDeclaredTranscriptlessRootTotals(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st, weftRun("run-weft", true)...)
+	writeWeftStages(t, st, "run-weft")
+
+	rep := build(t, st, "run-weft")
+	if rep.Run.TranscriptBasis != runs.BasisNone || rep.Run.Transcript != nil {
+		t.Errorf("run transcript %+v basis %q, want none declared", rep.Run.Transcript, rep.Run.TranscriptBasis)
+	}
+	if rep.Telemetry.State != StateComplete || len(rep.Telemetry.Gaps) != 0 {
+		t.Errorf("telemetry = %+v, want complete with no gaps", rep.Telemetry)
+	}
+	p, d, tot := rep.Metrics.Parent, rep.Metrics.Descendants, rep.Metrics.Total
+	if p.TokenUsageUnavailable || d.TokenUsageUnavailable || tot.TokenUsageUnavailable {
+		t.Fatalf("token availability: parent %v descendants %v total %v, want all measured", p.TokenUsageUnavailable, d.TokenUsageUnavailable, tot.TokenUsageUnavailable)
+	}
+	if p.TotalTokens != 0 || d.TotalTokens == 0 || tot.TotalTokens != d.TotalTokens {
+		t.Errorf("total_tokens = parent %d descendants %d total %d, want 0, measured, and the descendants'", p.TotalTokens, d.TotalTokens, tot.TotalTokens)
+	}
+	if p.CostUSD == nil || *p.CostUSD != 0 || d.CostUSD == nil || *d.CostUSD == 0 || tot.CostUSD == nil || *tot.CostUSD != *d.CostUSD {
+		t.Errorf("cost = parent %v descendants %v total %v, want 0, priced, and the descendants'", deref(p.CostUSD), deref(d.CostUSD), deref(tot.CostUSD))
+	}
+	if !tot.Pricing.Available || len(tot.PricingWarnings) != 0 {
+		t.Errorf("total pricing = %+v warnings %v, want available and none", tot.Pricing, tot.PricingWarnings)
+	}
+	body, err := json.Marshal(tot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		TotalTokens *int64 `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.TotalTokens == nil || *wire.TotalTokens != d.TotalTokens {
+		t.Errorf("wire total_tokens = %v, want %d", wire.TotalTokens, d.TotalTokens)
+	}
+}
+
+// Without the declaration a root with no transcript and no joinable session
+// is still the gap it always was: the parent is unmetered and the total null.
+func TestUndeclaredTranscriptlessRootStillGap(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st, weftRun("run-undeclared", false)...)
+	writeWeftStages(t, st, "run-undeclared")
+
+	rep := build(t, st, "run-undeclared")
+	if rep.Run.TranscriptBasis != "" || rep.Run.Transcript != nil {
+		t.Errorf("run transcript %+v basis %q, want none", rep.Run.Transcript, rep.Run.TranscriptBasis)
+	}
+	if rep.Telemetry.State != StatePartial {
+		t.Errorf("telemetry = %+v, want partial", rep.Telemetry)
+	}
+	if want := []string{"root execution root-run-undeclared has no transcript; parent not metered"}; !reflect.DeepEqual(rep.Telemetry.Gaps, want) {
+		t.Errorf("gaps = %v, want %v", rep.Telemetry.Gaps, want)
+	}
+	tot := rep.Metrics.Total
+	if !rep.Metrics.Parent.TokenUsageUnavailable || !tot.TokenUsageUnavailable || tot.CostUSD != nil {
+		t.Errorf("total: unavailable %v cost %v, want unavailable and unpriced", tot.TokenUsageUnavailable, deref(tot.CostUSD))
+	}
+	body, err := json.Marshal(tot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte(`"total_tokens":null`)) {
+		t.Errorf("wire total = %s, want total_tokens null", body)
+	}
+}
+
+// The declaration removes the root's gap and nothing else: a pending
+// execution and an unfolded session still leave the run partial.
+func TestDeclaredRootOtherGapStaysPartial(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st, weftRun("run-weft-gap", true,
+		`{"v":1,"kind":"execution","run_id":"run-weft-gap","execution_id":"stage-work-2","parent_execution_id":"root-run-weft-gap","execution_kind":"stage","stage":"work","stage_occurrence":2,"attempt":1,"agent":"claude-code","session_id":"sess-unfolded","started_at":"2026-09-10T12:21:00Z"}`,
+	)...)
+	writeWeftStages(t, st, "run-weft-gap")
+
+	rep := build(t, st, "run-weft-gap")
+	if rep.Run.TranscriptBasis != runs.BasisNone {
+		t.Errorf("basis = %q, want none", rep.Run.TranscriptBasis)
+	}
+	if rep.Telemetry.State != StatePartial {
+		t.Errorf("telemetry = %+v, want partial", rep.Telemetry)
+	}
+	gaps := strings.Join(rep.Telemetry.Gaps, "\n")
+	if !strings.Contains(gaps, "execution stage-work-2 still pending") || !strings.Contains(gaps, "session claude-code/sess-unfolded not in summaries.db") {
+		t.Errorf("gaps = %v, want the pending execution and the unfolded session named", rep.Telemetry.Gaps)
+	}
+	if strings.Contains(gaps, "root execution") {
+		t.Errorf("gaps = %v, want no root gap under the declaration", rep.Telemetry.Gaps)
+	}
+	if !rep.Metrics.Total.TokenUsageUnavailable || rep.Metrics.Parent.TokenUsageUnavailable {
+		t.Errorf("availability: parent %v total %v, want the parent measured as zero and the total unavailable for the unfolded session", rep.Metrics.Parent.TokenUsageUnavailable, rep.Metrics.Total.TokenUsageUnavailable)
+	}
+}
+
 // A Claude root with a Codex child: each scope is priced under its own
 // runtime's cache accounting and at its own model's rate, and the total is
 // the sum of the two.

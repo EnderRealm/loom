@@ -51,6 +51,9 @@ var (
 	runtimes       = map[string]bool{"claude-code": true, "codex-cli": true, "cursor-cli": true, "weft": true}
 	outcomes       = map[string]bool{"completed": true, "failed": true, "stopped": true}
 	executionKinds = map[string]bool{"root": true, "subagent": true, "lens": true, "stage": true, "command": true}
+	// rootTranscripts: a run's declaration that its root has no transcript
+	// by construction, as opposed to having lost one.
+	rootTranscripts = map[string]bool{"none": true}
 )
 
 // executionRecord is the union of both record kinds on the wire. Integers are
@@ -70,6 +73,7 @@ type executionRecord struct {
 	EndedAt         string `json:"ended_at"`
 	Outcome         string `json:"outcome"`
 	ReportingCutoff string `json:"reporting_cutoff"`
+	RootTranscript  string `json:"root_transcript"`
 	RecordedAt      string `json:"recorded_at"`
 
 	ExecutionID       string `json:"execution_id"`
@@ -247,6 +251,9 @@ func (imp *importer) run(line int, rec executionRecord) error {
 	if rec.Outcome != "" && !outcomes[rec.Outcome] {
 		return invalid("outcome")
 	}
+	if rec.RootTranscript != "" && !rootTranscripts[rec.RootTranscript] {
+		return invalid("root_transcript")
+	}
 	if !normalizeTime(&rec.StartedAt) {
 		return invalid("started_at")
 	}
@@ -262,9 +269,9 @@ func (imp *importer) run(line int, rec executionRecord) error {
 	_, err := imp.tx.ExecContext(imp.ctx, `
 		INSERT INTO runs (
 		    run_id, ticket, runtime, agent, session_id, producer, started_at,
-		    ended_at, outcome, reporting_cutoff, recorded_at,
+		    ended_at, outcome, reporting_cutoff, root_transcript, recorded_at,
 		    source_path, source_line, first_seen, last_seen
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(run_id) DO UPDATE SET
 		    ticket           = COALESCE(excluded.ticket, runs.ticket),
 		    runtime          = COALESCE(excluded.runtime, runs.runtime),
@@ -275,6 +282,7 @@ func (imp *importer) run(line int, rec executionRecord) error {
 		    ended_at         = COALESCE(excluded.ended_at, runs.ended_at),
 		    outcome          = COALESCE(excluded.outcome, runs.outcome),
 		    reporting_cutoff = COALESCE(excluded.reporting_cutoff, runs.reporting_cutoff),
+		    root_transcript  = COALESCE(excluded.root_transcript, runs.root_transcript),
 		    recorded_at      = COALESCE(excluded.recorded_at, runs.recorded_at),
 		    source_path      = excluded.source_path,
 		    source_line      = excluded.source_line,
@@ -282,7 +290,7 @@ func (imp *importer) run(line int, rec executionRecord) error {
 		rec.RunID, strOrNull(rec.Ticket), strOrNull(rec.Runtime), strOrNull(rec.Agent),
 		strOrNull(rec.SessionID), strOrNull(rec.Producer), strOrNull(rec.StartedAt),
 		strOrNull(rec.EndedAt), strOrNull(rec.Outcome), strOrNull(rec.ReportingCutoff),
-		strOrNull(rec.RecordedAt), imp.sourcePath, line, imp.now, imp.now)
+		strOrNull(rec.RootTranscript), strOrNull(rec.RecordedAt), imp.sourcePath, line, imp.now, imp.now)
 	if err != nil {
 		return fmt.Errorf("upsert run: %w", err)
 	}

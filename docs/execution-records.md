@@ -35,7 +35,16 @@ again when it ends.
 | `started_at`, `ended_at` | RFC 3339. `ended_at` is absent while the run is in progress. |
 | `outcome` | `completed`, `failed` or `stopped`. Absent while the run is in progress. |
 | `reporting_cutoff` | RFC 3339, optional. The moment after which nothing more is attributed to the run. |
+| `root_transcript` | Optional; the one value is `none`. The run's root execution has no transcript by construction, as opposed to having lost one — see below. |
 | `recorded_at` | RFC 3339. When the producer wrote the record. |
+
+`root_transcript: "none"` is for a producer whose root is not an agent
+session: Weft's root is a synthetic execution standing for the run itself,
+driven by a harness process with no transcript. Only the producer that owns
+the run's root may set it, and only when no transcript for that root exists
+or ever will; weft writes it on its start and end `run` records. A `/work`
+render never sets it — its root is the orchestrating session, and a missing
+one is lost evidence. Any other value is rejected with `invalid_value`.
 
 ### `execution`
 
@@ -113,6 +122,15 @@ claimed like a declared one. More than one candidate invocation is an
 `ambiguous_join` diagnostic and no join. With no join, the run-report names
 the root's missing transcript as a telemetry gap rather than reporting
 `complete`.
+
+A `run` record declaring `root_transcript: "none"` is not joined: loom
+reports `transcript_basis: none`, meters the root as zero parent usage rather
+than as unknown, and totals parent plus descendants, so the total's tokens
+and cost are the descendants'. The declaration removes only the root's gap;
+a pending execution, an unfolded session or any other missing evidence still
+leaves the run `partial`. A transcript the run or root record names outranks
+the declaration and is metered as `declared`. Without the field, a root with
+no transcript is a gap as above.
 
 `loom run-report --run <id>` is the read surface over that tree: one JSON
 document with the run's tree, unresolved executions and diagnostics as

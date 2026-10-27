@@ -525,6 +525,9 @@ type unit struct {
 	// is the runtime its usage is recorded under.
 	subagent *subagentRow
 	agent    string
+	// transcriptless marks a root the run declared has no transcript by
+	// construction (runs.BasisNone): it meters as zero, not as unknown.
+	transcriptless bool
 }
 
 // Build measures a loaded run against table. The run's tree is normalized in
@@ -635,6 +638,7 @@ func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 		}
 	}
 	if n.Transcript == nil {
+		u.transcriptless = n == b.run.Root && b.run.TranscriptBasis == runs.BasisNone
 		if u.counted && n != b.run.Root && n.Kind != runs.KindCommand {
 			b.gap(fmt.Sprintf("execution %s has no transcript", n.ExecutionID))
 		}
@@ -862,7 +866,7 @@ func (b *builder) report() *Report {
 			withTranscript++
 		} else {
 			noTranscript = append(noTranscript, n.ExecutionID)
-			if n == run.Root {
+			if n == run.Root && !u.transcriptless {
 				b.gap(fmt.Sprintf("root execution %s has no transcript; parent not metered", n.ExecutionID))
 			}
 		}
