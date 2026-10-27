@@ -30,6 +30,11 @@ type Session struct {
 	// Subagent is nil for an ordinary top-level session, and set for a
 	// transcript the agent wrote for a subagent it dispatched.
 	Subagent *Subagent
+
+	// Version is an opaque token that changes whenever the session's source
+	// may have changed, taken before anything is read. Empty means unknown:
+	// the capture pass reads the session every tick.
+	Version string
 }
 
 // Subagent describes a subagent transcript: the session that dispatched it

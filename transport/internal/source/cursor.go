@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -83,6 +84,10 @@ func (cursorAdapter) List() ([]Session, error) {
 			failures = append(failures, fmt.Errorf("cursor %s: unsupported session id", path))
 			return nil
 		}
+		// Taken before any read, so a write landing mid-tick moves the next
+		// tick's version and is re-read rather than missed.
+		dir := filepath.Dir(path)
+		version := cursorVersion(path, path+"-wal", filepath.Join(dir, "meta.json"), filepath.Join(dir, "prompt_history.json"))
 		meta, err := readCursorMetadata(path)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("cursor %s: %w", path, err))
@@ -93,7 +98,7 @@ func (cursorAdapter) List() ([]Session, error) {
 			failures = append(failures, fmt.Errorf("cursor %s: %w", path, err))
 			return nil
 		}
-		s := Session{Project: encodeProjectPath(cwd), SessionID: sid, Path: path, Cwd: cwd}
+		s := Session{Project: encodeProjectPath(cwd), SessionID: sid, Path: path, Cwd: cwd, Version: version}
 		if meta.Subagent != nil {
 			s.Subagent = &Subagent{ParentSessionID: meta.Subagent.Parent, AgentType: meta.Subagent.Type, ToolUseID: meta.Subagent.ToolID}
 		}
@@ -131,7 +136,63 @@ func decodeCursorMetadata(raw string, sid string) (cursorMetadata, error) {
 	return meta, nil
 }
 
+// cursorVersion fingerprints files by stat alone: opening a WAL store, even
+// read-only, writes its -shm, which is why -shm is never part of a version.
+// A zero-length file counts as absent since it holds nothing to read; that
+// keeps the empty -wal a read-only open creates, once the writer has
+// checkpointed and removed it, from moving the version. Empty when a stat
+// fails, meaning unknown.
+func cursorVersion(paths ...string) string {
+	var b strings.Builder
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			b.WriteString("-|")
+		case err != nil:
+			return ""
+		case info.Size() == 0:
+			b.WriteString("-|")
+		default:
+			fmt.Fprintf(&b, "%d:%d|", info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	return b.String()
+}
+
+type cachedCursorMetadata struct {
+	version string
+	meta    cursorMetadata
+}
+
+// cursorMetadataCache keeps each store's metadata under its db+wal version
+// so List does not reopen an unchanged store every tick, including a parent
+// read only to resolve a subagent's cwd. The daemon is one long-lived
+// process; a restart reads every store once.
+var cursorMetadataCache = struct {
+	sync.Mutex
+	entries map[string]cachedCursorMetadata
+}{entries: map[string]cachedCursorMetadata{}}
+
 func readCursorMetadata(path string) (cursorMetadata, error) {
+	version := cursorVersion(path, path+"-wal")
+	cursorMetadataCache.Lock()
+	cached, ok := cursorMetadataCache.entries[path]
+	cursorMetadataCache.Unlock()
+	if ok && version != "" && cached.version == version {
+		return cached.meta, nil
+	}
+	meta, err := queryCursorMetadata(path)
+	if err != nil || version == "" {
+		return meta, err
+	}
+	cursorMetadataCache.Lock()
+	cursorMetadataCache.entries[path] = cachedCursorMetadata{version: version, meta: meta}
+	cursorMetadataCache.Unlock()
+	return meta, nil
+}
+
+func queryCursorMetadata(path string) (cursorMetadata, error) {
 	db, err := openCursorStore(path)
 	if err != nil {
 		return cursorMetadata{}, err
