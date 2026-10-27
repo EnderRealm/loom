@@ -6,6 +6,72 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-27 — Project liveness, ticket-bound candidates and universal truths
+
+### Upgrade
+
+- No schema version change; `summaries.db` stays at schema 12. The
+  `project_state` table and `runs.root_transcript` column are added in
+  place the first time the summarizer opens the database, so no rebuild is
+  needed. Readers tolerate a database the new summarizer has not opened
+  yet.
+- The summarizer plist now sets PATH so the `project_state` rebuild can
+  find `tk`. Re-run `loom install summarizer` to pick it up.
+- The extraction sweep skips while `extractors/` has uncommitted or
+  untracked changes, or cannot be placed at a commit.
+
+### Added
+
+- `loom project-state [--project P] [--json]` reads a per-project liveness
+  table — last commit, session and close times, in-window counts, open
+  tickets and a dormant flag — rebuilt by the summarize fold over
+  `--state-window` (default 30d).
+- Truth-extractor candidates declare `destination: truth` or
+  `destination: ticket`. Ticket candidates land in
+  `_candidates/tickets/<scope>/` and are filed from the TUI after a
+  duplicate check against the project's tickets.
+- The knowledge view's `u` gesture promotes a validated truth to universal
+  scope by copy-and-link: the scoped truth stays as the verified instance,
+  and `truths/universal/<name>.md` is written beside it with
+  `promoted_from:` and scoped `related:` entries, then opened in the editor.
+- A run record may declare `root_transcript: "none"`; such a run reports
+  `transcript_basis: none` and totals parent plus descendants instead of
+  reporting a gap.
+- Codex guardian sessions attach to their parent `/work` runs.
+- The extraction sweep, backfill and retrospect log the extractors
+  revision they ran from.
+
+### Changed
+
+- Codex extraction defaults to `gpt-5.6-sol`.
+- The decision extractor caps itself at two decisions per session instead
+  of expecting two to five (`docs/decision-corpus-measurement.md`).
+- `claude -p` extraction runs from `$LOOM_HOME/machinery`, so its
+  transcripts get their own project slug instead of `-`.
+- Codex Desktop external-import rollouts, duplicates of Claude sessions
+  loom already captures, are skipped at capture and removed from the fold.
+- `loom ui`, `loom retrospect` and the knowledge-scopes section of
+  `loom status` refuse a missing `summaries.db` instead of showing it as
+  empty.
+
+### Fixed
+
+- The commits table captures commits from Codex code-mode exec calls, and
+  reads Claude subagent commits as their parent session's.
+- Read-only DSNs escape the database path, so a `#` or `?` in it no longer
+  truncates the path and opens a writable database at the prefix.
+- Promotion refuses a candidate with an unresolved `scope_mismatch` or an
+  id stem that is not a safe filename. The knowledge store refuses
+  mis-keyed plan fields and writes through hard-linked files.
+- Injected frontmatter keys replace model-emitted duplicates rather than
+  appending a second copy.
+- Synthesis section parsing follows CommonMark fences (tilde fences and
+  fence length).
+- `call_claude` is bounded at 900s, so a wedged CLI no longer holds the
+  sweep.
+- The shipper skips sqlite opens of unchanged Cursor stores and unchanged
+  identity sidecar writes, cutting per-tick churn.
+
 ## [1.11.0] — 2026-09-27 — Claude subagents as executions, per-message usage and bug attribution
 
 ### Upgrade
