@@ -594,6 +594,10 @@ The flag was chosen over a `./scripts/verify-sweep.sh` wrapper: the wrapper woul
 
 A full forced sweep is ~36s on this host today (3204 sessions), inside tk's default 120s `verify_timeout`; raise loom's per-project `verify_timeout` in `~/.ticket/config.yaml` when the corpus outgrows it.
 
+### Verifying the extractor tests from a ticket
+
+A criterion checked by the extractor suite is written `verify: make test-extractors` (offline); one that needs the strict-YAML test is written `verify: make test-extractors-yaml`, which fetches PyYAML through `uv run --with`. `make` is in `verify_allow`, so `python3` and `uv` stay unlisted.
+
 ---
 
 ## Troubleshooting
