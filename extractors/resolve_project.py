@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -42,6 +43,10 @@ VALUE_ECHO_LIMIT = 40
 # `\Z`, not `$`: `$` would also match before a trailing newline, which RE2's
 # does not — and a repo basename may legally end in one.
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*\Z")
+
+# tk's override of its store root (project.StoreRootEnv in the ticket module),
+# honored here as tkStoreRootEnv is in internal/config/ticket.go.
+TK_STORE_ROOT_ENV = "TK_STORE_ROOT"
 
 SOURCE_MARKER = "marker"
 SOURCE_BASENAME = "repo-basename"
@@ -136,8 +141,20 @@ def describe(result: Resolution) -> str:
 
 def project_path(name: str) -> tuple[str, str]:
     """The checkout registered for `name` on this machine, or "" and the reason
-    there is none: `projects.<name>.path` in tk's local ~/.ticket/config.yaml."""
-    ticket_config = Path.home() / ".ticket" / "config.yaml"
+    there is none: `projects.<name>.path` in tk's local config, which is
+    $TK_STORE_ROOT/.ticket/config.yaml when the override is set and
+    ~/.ticket/config.yaml otherwise — ProjectRepoPath's rule in
+    internal/config/ticket.go. The value becomes the cwd of executed commands,
+    so a set-but-unusable override (empty, or not absolute) is reported and
+    never falls through to the real config, and the root is taken verbatim as
+    the Go side takes it."""
+    root = os.environ.get(TK_STORE_ROOT_ENV)
+    if root is not None:
+        if not os.path.isabs(root):
+            return "", f"{TK_STORE_ROOT_ENV} must be an absolute path, got {root!r}"
+        ticket_config = Path(root) / ".ticket" / "config.yaml"
+    else:
+        ticket_config = Path.home() / ".ticket" / "config.yaml"
     try:
         path = _project_paths(ticket_config.read_text(encoding="utf-8")).get(name)
     except (OSError, UnicodeDecodeError) as e:

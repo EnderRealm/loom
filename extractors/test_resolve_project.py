@@ -17,7 +17,9 @@ from resolve_project import (
     MARKER_NAME,
     SOURCE_BASENAME,
     SOURCE_MARKER,
+    TK_STORE_ROOT_ENV,
     VALUE_ECHO_LIMIT,
+    project_path,
     resolve_project,
 )
 
@@ -304,6 +306,58 @@ class ResolveProjectTest(unittest.TestCase):
             resolve_project(path)
 
         self.assertEqual(snapshot(self.root), before)
+
+
+class ProjectPathTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.home = self.root / "home"
+        self.store = self.root / "store"
+        self.write_config(self.home, "/checkouts/real")
+        self.write_config(self.store, "/checkouts/override")
+        env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(TK_STORE_ROOT_ENV, None)
+
+    def write_config(self, root, path):
+        ticket_dir = root / ".ticket"
+        ticket_dir.mkdir(parents=True)
+        (ticket_dir / "config.yaml").write_text(f"projects:\n    loom:\n        path: {path}\n")
+
+    def test_unset_override_reads_the_home_config(self):
+        self.assertEqual(project_path("loom"), ("/checkouts/real", ""))
+
+    def test_absolute_override_reads_its_own_config(self):
+        os.environ[TK_STORE_ROOT_ENV] = str(self.store)
+
+        self.assertEqual(project_path("loom"), ("/checkouts/override", ""))
+
+    def test_override_without_a_config_does_not_fall_back(self):
+        os.environ[TK_STORE_ROOT_ENV] = str(self.root / "empty")
+
+        path, reason = project_path("loom")
+
+        self.assertEqual(path, "")
+        self.assertIn(str(self.root / "empty" / ".ticket" / "config.yaml"), reason)
+
+    def test_relative_override_is_reported_without_falling_back(self):
+        os.environ[TK_STORE_ROOT_ENV] = "store"
+
+        path, reason = project_path("loom")
+
+        self.assertEqual(path, "")
+        self.assertIn(f"{TK_STORE_ROOT_ENV} must be an absolute path, got 'store'", reason)
+
+    def test_empty_override_is_reported_without_falling_back(self):
+        os.environ[TK_STORE_ROOT_ENV] = ""
+
+        path, reason = project_path("loom")
+
+        self.assertEqual(path, "")
+        self.assertIn(f"{TK_STORE_ROOT_ENV} must be an absolute path, got ''", reason)
 
 
 if __name__ == "__main__":
