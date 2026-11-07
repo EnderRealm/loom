@@ -618,11 +618,13 @@ func TestListClaudeSessionsSkipsUnsafeSpoolNames(t *testing.T) {
 	for _, rel := range []string{
 		filepath.Join("a..b", spoolSession+".jsonl"),
 		filepath.Join("a\nb", spoolSession+".jsonl"),
+		filepath.Join("x..jsonl", spoolSession+".jsonl"),
 		filepath.Join(spoolProject, `a\b.jsonl`),
 		filepath.Join(spoolProject, "a\nforged line.jsonl"),
 		filepath.Join(spoolProject, ".jsonl"),
 		filepath.Join(spoolProject, "a..b", "subagents", "agent-a0e0.jsonl"),
 		filepath.Join(spoolProject, "a\nb", "subagents", "agent-a0e0.jsonl"),
+		filepath.Join(spoolProject, "x..jsonl", "subagents", "agent-a0e0.jsonl"),
 		filepath.Join(spoolProject, spoolSession, "subagents", ".jsonl"),
 		filepath.Join(spoolProject, spoolSession, "subagents", "agent\nforged.jsonl"),
 		filepath.Join(spoolProject, spoolSession, "subagents", "workflows", "wf\n1", "agent-a0e0.jsonl"),
@@ -646,6 +648,33 @@ func TestListClaudeSessionsSkipsUnsafeSpoolNames(t *testing.T) {
 				t.Errorf("a name forged a log line: %q", buf)
 			}
 		})
+	}
+}
+
+// A sidecar's name goes nowhere near the receiver, and the id a..jsonl ships
+// under is a., so neither name is a reason to refuse or to say so in the log.
+func TestListClaudeSessionsReadsSidecarWithDottedSpoolName(t *testing.T) {
+	_, spool := useSpool(t)
+	transcript := filepath.Join(spool, spoolProject, spoolSession, "subagents", "a..jsonl")
+	writeTranscript(t, transcript, spoolCwd)
+	sidecar := strings.TrimSuffix(transcript, ".jsonl") + ".meta.json"
+	if err := os.WriteFile(sidecar, []byte(`{"agentType":"reviewer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buf := captureListLog(t)
+
+	sessions, err := ListClaudeSessions()
+	if err != nil {
+		t.Fatalf("ListClaudeSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != "a." || sessions[0].Subagent == nil {
+		t.Fatalf("got %+v, want the transcript listed as a.", sessions)
+	}
+	if got, want := *sessions[0].Subagent, (Subagent{AgentType: "reviewer", ParentSessionID: spoolSession}); got != want {
+		t.Errorf("Subagent = %+v, want %+v", got, want)
+	}
+	if strings.Contains(buf.String(), "skip stage=list") {
+		t.Errorf("logged a skip for an entry that was read: %q", buf)
 	}
 }
 

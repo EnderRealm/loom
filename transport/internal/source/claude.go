@@ -190,12 +190,22 @@ func listClaudeRoot(base string, spool bool) ([]Session, error) {
 // in it would forge lines in the shipper's own log. Checking at listing holds
 // only because nothing but the operator's worker writes the spool, so an entry
 // cannot change between this check and the read.
+//
+// The name checked is the one the receiver would see: a directory's whole, as
+// Project or ParentSessionID, and a transcript's less its suffix, as the session
+// id. Any other file, a sidecar included, sends no name at all.
 func spoolAdmits(d fs.DirEntry, project, parent string) bool {
+	name := d.Name()
+	if !d.IsDir() {
+		name = strings.TrimSuffix(name, ".jsonl")
+	}
 	reason := ""
 	switch {
 	case !d.IsDir() && !d.Type().IsRegular():
 		reason = "not a regular file or directory: " + d.Type().String()
-	case !wire.SafeComponent(strings.TrimSuffix(d.Name(), ".jsonl")):
+	case !d.IsDir() && name == d.Name():
+		return true
+	case !wire.SafeComponent(name):
 		reason = "name the receiver rejects"
 	default:
 		return true
