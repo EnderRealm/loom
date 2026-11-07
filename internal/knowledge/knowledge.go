@@ -94,7 +94,8 @@ func Root() string {
 }
 
 // Load walks the store and returns every artifact: candidates first
-// (status=candidate), then validated (status=validated). Within each
+// (status=candidate), then validated (status=validated), then any other
+// status (e.g. a deprecated truth demoted in place under truths/). Within each
 // status group, results are sorted oldest-first by AgeBasis (first-noticed
 // date, falling back to file mtime) so the stalest claims — the ones most
 // likely to need re-verifying — surface at the top of the review list.
@@ -123,14 +124,28 @@ func Load() ([]Artifact, error) {
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		// candidates first (most actionable), then validated
-		if out[i].Status != out[j].Status {
-			return out[i].Status == "candidate"
+		if ri, rj := statusRank(out[i].Status), statusRank(out[j].Status); ri != rj {
+			return ri < rj
 		}
 		return out[i].AgeBasis().Before(out[j].AgeBasis())
 	})
 	linkContradictions(out)
 	return out, nil
+}
+
+// statusRank is Load's primary sort key: candidates (most actionable), then
+// validated, then every other status. Ranking all statuses keeps the
+// comparator a strict weak ordering; ranking only candidate leaves validated
+// and deprecated incomparable, and the sort then cannot order validated rows
+// separated by a deprecated one.
+func statusRank(status string) int {
+	switch status {
+	case "candidate":
+		return 0
+	case "validated":
+		return 1
+	}
+	return 2
 }
 
 // linkContradictions resolves each candidate's contradicts entries against the

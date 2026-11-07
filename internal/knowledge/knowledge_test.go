@@ -211,6 +211,51 @@ func TestLoadOrdersByFirstNoticed(t *testing.T) {
 	}
 }
 
+// TestLoadOrdersByStatusRank pins candidate, validated, then any other status,
+// oldest-first within each. The walk order puts a deprecated truth between two
+// validated ones of inverted age: a comparator that leaves validated and
+// deprecated incomparable cannot move the older truth past the deprecated row.
+func TestLoadOrdersByStatusRank(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+
+	write := func(rel, frontmatter string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		id := strings.TrimSuffix(filepath.Base(rel), ".md")
+		body := "---\nid: " + id + "\ntitle: " + id + "\n" + frontmatter + "---\n\n## Claim\n\nyes\n"
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src := func(date string) string {
+		return "sources:\n  - session: aaa\n    date: " + date + "\n"
+	}
+
+	// truths/loom/ walks in file-name order: a-new, b-dep, c-old.
+	write("truths/loom/a-new.md", src("2026-06-01"))
+	write("truths/loom/b-dep.md", "status: deprecated\n"+src("2020-01-01"))
+	write("truths/loom/c-old.md", src("2026-01-01"))
+	write("_candidates/truths/loom/cand.md", src("2026-09-01"))
+
+	arts, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var got []string
+	for _, a := range arts {
+		got = append(got, a.ID)
+	}
+	want := []string{"cand", "c-old", "a-new", "b-dep"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("order = %v, want %v", got, want)
+	}
+}
+
 // TestLoadSkipsArtifactsWithoutFrontmatter confirms Load() drops files that
 // parse to an empty ID (existing walkArtifacts behavior).
 func TestLoadSkipsArtifactsWithoutFrontmatter(t *testing.T) {
