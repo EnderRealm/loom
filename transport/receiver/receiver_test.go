@@ -36,8 +36,8 @@ func TestSafeComponent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := safeComponent(tc.in); got != tc.want {
-				t.Fatalf("safeComponent(%q) = %v, want %v", tc.in, got, tc.want)
+			if got := wire.SafeComponent(tc.in); got != tc.want {
+				t.Fatalf("SafeComponent(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}

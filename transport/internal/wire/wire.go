@@ -2,7 +2,11 @@
 // Both sides import this package so the contract is defined in exactly one place.
 package wire
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"unicode"
+)
 
 // IngestRequest is the payload the shipper POSTs to the receiver for each
 // session delta. FromOffset/ToOffset are byte offsets into the source JSONL
@@ -75,4 +79,27 @@ type ResyncError struct {
 
 func (e *ResyncError) Error() string {
 	return fmt.Sprintf("resync needed: server expects offset %d (%s)", e.ExpectedFrom, e.Detail)
+}
+
+// SafeComponent reports whether s may name one path component: the receiver
+// refuses a request carrying anything else, and a shipper reading names it
+// does not control asks the same question before it stages them.
+func SafeComponent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	if strings.ContainsAny(s, "/\\") {
+		return false
+	}
+	if strings.Contains(s, "..") {
+		return false
+	}
+	// A control character in a component becomes a control character in the
+	// on-disk name (<session_id>.jsonl) and lets a shipper forge extra lines
+	// in the logs that record the component verbatim. Real session ids are
+	// UUIDs on both agents, so nothing legitimate is refused.
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return false
+	}
+	return true
 }

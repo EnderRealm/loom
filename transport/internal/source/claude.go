@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"loom/internal/config"
+	"loom/transport/internal/wire"
 )
 
 // ClaudeAgent is the Adapter.Agent() value for Claude Code.
@@ -82,14 +85,50 @@ func readClaudeCwd(path string) (string, error) {
 
 // ListClaudeSessions enumerates every .jsonl session file under ~/.claude/projects/*/,
 // plus every subagent transcript under ~/.claude/projects/*/<session>/subagents/
-// (at any depth — workflow dispatches nest under workflows/<wf_id>/).
+// (at any depth — workflow dispatches nest under workflows/<wf_id>/), then does
+// the same for the spool of transcripts copied out of hosted agents' homes.
 // Kept as a package-level function so tests (and any direct callers) can invoke
 // it without going through the Adapter slice.
+//
+// Cursors key on agent and Session.Key alone, so two files sharing a key would
+// advance one offset through both and interleave their bytes in staging. The
+// first listed keeps the key, which is why the operator's own tree goes first:
+// a spooled file is named by an agent and must not be able to take over a
+// session the operator's agent is writing. For the same reason a failure to
+// list the operator's tree stops here, with nothing to compare the spool
+// against, while a failure to list the spool still returns the operator's
+// sessions alongside the error.
 func ListClaudeSessions() ([]Session, error) {
 	base, err := claudeProjectsDir()
 	if err != nil {
 		return nil, err
 	}
+	out, err := listClaudeRoot(base, false)
+	if err != nil {
+		return nil, err
+	}
+	spooled, err := listClaudeRoot(config.ClaudeSpoolDir(), true)
+	seen := make(map[string]bool, len(out))
+	for _, s := range out {
+		seen[s.Key()] = true
+	}
+	for _, s := range spooled {
+		if seen[s.Key()] {
+			logSpoolSkip(s.Project, s.ParentID(), s.SessionID, "key already listed, and a cursor holds one offset per key")
+			continue
+		}
+		seen[s.Key()] = true
+		out = append(out, s)
+	}
+	return out, err
+}
+
+// listClaudeRoot enumerates one tree laid out like ~/.claude/projects. A
+// missing tree yields no sessions and no error. spool marks a tree holding
+// what a hosted agent wrote, whose every name and entry type that agent chose;
+// capture follows symlinks and runs as the operator, so spoolAdmits gates each
+// entry on the way down. The operator's own tree is read as it stands.
+func listClaudeRoot(base string, spool bool) ([]Session, error) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -99,6 +138,9 @@ func ListClaudeSessions() ([]Session, error) {
 	}
 	var out []Session
 	for _, e := range entries {
+		if spool && !spoolAdmits(e, "", "") {
+			continue
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -108,11 +150,14 @@ func ListClaudeSessions() ([]Session, error) {
 			continue
 		}
 		for _, f := range files {
+			if spool && !spoolAdmits(f, project, "") {
+				continue
+			}
 			if f.IsDir() {
 				// Claude Code parks each session's subagent transcripts in
 				// <session>/subagents/; the directory name is the parent
 				// session's uuid.
-				out = append(out, listClaudeSubagents(base, project, f.Name())...)
+				out = append(out, listClaudeSubagents(base, project, f.Name(), spool)...)
 				continue
 			}
 			if !strings.HasSuffix(f.Name(), ".jsonl") {
@@ -136,6 +181,36 @@ func ListClaudeSessions() ([]Session, error) {
 	return out, nil
 }
 
+// spoolAdmits reports whether a listing may touch a spool entry, logging the
+// reason when it may not. d carries the lstat type, so a symlink reads as
+// neither a directory nor a regular file whatever it points at: reaching one
+// would ship any file the operator can read, and opening a FIFO would hang the
+// tick. An unsafe name is refused here because it would 400 at the receiver on
+// every tick without ever advancing its ship cursor, and a control character
+// in it would forge lines in the shipper's own log. Checking at listing holds
+// only because nothing but the operator's worker writes the spool, so an entry
+// cannot change between this check and the read.
+func spoolAdmits(d fs.DirEntry, project, parent string) bool {
+	reason := ""
+	switch {
+	case !d.IsDir() && !d.Type().IsRegular():
+		reason = "not a regular file or directory: " + d.Type().String()
+	case !wire.SafeComponent(strings.TrimSuffix(d.Name(), ".jsonl")):
+		reason = "name the receiver rejects"
+	default:
+		return true
+	}
+	logSpoolSkip(project, parent, d.Name(), reason)
+	return false
+}
+
+// logSpoolSkip records a spool entry left out of the listing. Names are quoted
+// because an agent chose them.
+func logSpoolSkip(project, parent, entry, reason string) {
+	log.Printf("skip stage=list agent=%s project=%q parent=%q entry=%q reason=%q",
+		ClaudeAgent, project, parent, entry, reason)
+}
+
 // claudeWorkflowJournal is the per-workflow bookkeeping file Claude Code
 // writes alongside the subagent transcripts in subagents/workflows/<wf_id>/.
 const claudeWorkflowJournal = "journal.jsonl"
@@ -154,13 +229,22 @@ const claudeWorkflowJournal = "journal.jsonl"
 // directory or transcript name that begins or ends with a dot produces; an
 // id like that is skipped rather than enumerated, since it would 400 on
 // every tick without ever advancing its ship cursor.
-func listClaudeSubagents(base, project, parentSessionID string) []Session {
+//
+// WalkDir hands the callback lstat-typed entries and does not descend a
+// symlink, including one at subagents/ itself, so spoolAdmits sees each level.
+func listClaudeSubagents(base, project, parentSessionID string, spool bool) []Session {
 	dir := filepath.Join(base, project, parentSessionID, "subagents")
 	var out []Session
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Missing subagents/ dir or an unreadable subtree: nothing to
 			// enumerate this tick.
+			return nil
+		}
+		if spool && !spoolAdmits(d, project, parentSessionID) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		// The .meta.json sidecars live here too; they are metadata, not
@@ -187,7 +271,11 @@ func listClaudeSubagents(base, project, parentSessionID string) []Session {
 		if err != nil {
 			return nil
 		}
-		sub := readClaudeSubagentMeta(strings.TrimSuffix(path, ".jsonl") + ".meta.json")
+		sidecar := strings.TrimSuffix(path, ".jsonl") + ".meta.json"
+		var sub Subagent
+		if !spool || spoolSidecarRegular(sidecar) {
+			sub = readClaudeSubagentMeta(sidecar)
+		}
 		sub.ParentSessionID = parentSessionID
 		out = append(out, Session{
 			Project:   project,
@@ -199,6 +287,15 @@ func listClaudeSubagents(base, project, parentSessionID string) []Session {
 		return nil
 	})
 	return out
+}
+
+// spoolSidecarRegular reports whether a spool sidecar may be read. The walk
+// visits sidecars as entries and logs a refusal there, so this only keeps the
+// read off one; refusing costs the metadata, and the transcript ships as it
+// would with no sidecar at all.
+func spoolSidecarRegular(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // readClaudeSubagentMeta reads the agent-<id>.meta.json sidecar written

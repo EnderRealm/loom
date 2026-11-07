@@ -71,6 +71,44 @@ above. They are the same content class as the session transcript beside them
 because a dispatch's prompt and its result already appear in the parent
 session's own transcript. Nothing about the trust model changes for them.
 
+Hosted agents' transcripts travel on this leg too, and they do change something.
+An agent run under `weft-worker --agent-user` writes as `weftagentN`, the worker
+copies those files into `$LOOM_HOME/spool/claude/projects/`, and the shipper reads
+them from there as the operator. The content class is the one above and it ships
+on the same terms, but this is the one capture source whose author sits below the
+process reading it, on the far side of a uid boundary built to keep that author
+out of the operator's account. The file names, the directory shape and the entry
+types are the agent's choice as much as the bytes are, so `ListClaudeSessions`
+treats them as input:
+
+- An entry that is not a regular file or a directory is skipped at every level,
+  sidecars included. Capture follows symlinks, so a link would otherwise ship
+  whatever it named that the operator can read, `~/.ssh` for one, to the
+  receiver, and a FIFO would hang the tick. The check runs at listing and the read
+  comes after it, which is sound only because the spool is operator-only and
+  nothing the agent runs can swap an entry in between. A spool an agent can write
+  to would need the check moved to the open.
+- A name the receiver refuses is skipped at listing, through the same
+  `wire.SafeComponent`, so an agent cannot fail a ship on every tick or forge
+  lines in `shipper.log`.
+- The operator's own tree is listed first and keeps any key it holds. Cursors key
+  on agent and session alone, so a spooled file naming a live session would
+  otherwise interleave its bytes into that session's staging. The agent would
+  have to know the id, and it cannot read the operator's home; a session the
+  operator's agent has since cleaned up no longer lists, so a spooled file taking
+  its id resumes from the old cursor.
+
+None of that makes the contents true. A spooled transcript's `cwd` chooses the
+project the session files under, and `git -C <cwd> remote get-url origin` runs as
+the operator against that path, so `git_remote` is as much the agent's claim as
+`cwd` is. Neither passes through `wire.SafeComponent`, so the receiver quotes
+both in its `ingest` log line and keeps them verbatim in the sidecar. Usage, tool
+calls and commits reach `summaries.db` and `loom run-report` as the transcript
+states them, so a run report over spooled sessions is the agent's account of its
+own run. The stance below already covers this for what a
+reader does with the text; what it adds here is that loom's numbers and project
+grouping for a hosted run carry no more authority than the transcript does.
+
 **Leg (a) — the Go summarizer.** `internal/parse/claudeparse` and
 `internal/parse/codexparse` and `internal/parse/cursorparse` fold `~/.loom/received/` into `~/.loom/summaries.db`
 on the receiver host, whose turns hold verbatim user and assistant text and

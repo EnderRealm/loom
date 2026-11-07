@@ -38,3 +38,9 @@ func Path() string {
 func TransportDir() string {
 	return filepath.Join(Home(), "transport")
 }
+
+// ClaudeSpoolDir returns the operator-only tree that mirrors a hosted agent
+// user's ~/.claude/projects. The worker fills it; the shipper reads it.
+func ClaudeSpoolDir() string {
+	return filepath.Join(Home(), "spool", "claude", "projects")
+}

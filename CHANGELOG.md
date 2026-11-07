@@ -6,6 +6,21 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The shipper reads hosted agents' Claude transcripts from
+  `$LOOM_HOME/spool/claude/projects/`, which the worker fills from
+  `weftagentN`'s home, and ships them under `claude-code`. The listing skips
+  anything in the spool that is not a regular file or a directory, and any
+  name the receiver would refuse; a session id the operator's own tree holds
+  stays the operator's.
+
+### Changed
+
+- The receiver's `ingest` log line quotes the value of its identity tag,
+  `identity=cwd="…"` and `identity=remote="…"`, because a hosted agent chooses
+  both and a newline in either would forge a log record.
+
 ## [1.12.0] — 2026-10-27 — Project liveness, ticket-bound candidates and universal truths
 
 ### Upgrade

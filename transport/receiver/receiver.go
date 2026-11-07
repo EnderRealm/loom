@@ -23,7 +23,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"loom/internal/config"
 	"loom/transport/internal/wire"
@@ -131,14 +130,14 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing required fields", http.StatusBadRequest)
 		return
 	}
-	if !safeComponent(req.Agent) || !safeComponent(req.Project) || !safeComponent(req.SessionID) {
+	if !wire.SafeComponent(req.Agent) || !wire.SafeComponent(req.Project) || !wire.SafeComponent(req.SessionID) {
 		log.Printf("reject 400 from=%s reason=invalid-identifier", r.RemoteAddr)
 		http.Error(w, "invalid identifier", http.StatusBadRequest)
 		return
 	}
 	// A subagent's parent id is a path component like any other, so it goes
 	// through the same guard before it can name a directory.
-	if req.Subagent != nil && !safeComponent(req.Subagent.ParentSessionID) {
+	if req.Subagent != nil && !wire.SafeComponent(req.Subagent.ParentSessionID) {
 		log.Printf("reject 400 from=%s reason=invalid-identifier", r.RemoteAddr)
 		http.Error(w, "invalid identifier", http.StatusBadRequest)
 		return
@@ -259,11 +258,13 @@ func (s *server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		if err := writeSidecar(metaPath, req.ProjectIdentity); err != nil {
 			log.Printf("warn from=%s session=%q err=%q (write meta)", r.RemoteAddr, req.SessionID, err)
 		}
+		// Quoted because SafeComponent guards neither value: a transcript's cwd
+		// is whatever its agent wrote, and the remote is read from that path.
 		switch {
 		case req.ProjectIdentity.GitRemote != "":
-			identity = "remote=" + req.ProjectIdentity.GitRemote
+			identity = "remote=" + strconv.Quote(req.ProjectIdentity.GitRemote)
 		case req.ProjectIdentity.Cwd != "":
-			identity = "cwd=" + req.ProjectIdentity.Cwd
+			identity = "cwd=" + strconv.Quote(req.ProjectIdentity.Cwd)
 		default:
 			identity = "slug-only"
 		}
@@ -331,26 +332,6 @@ func writeOffsetFile(path string, offset int64) error {
 		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-func safeComponent(s string) bool {
-	if s == "" || s == "." || s == ".." {
-		return false
-	}
-	if strings.ContainsAny(s, "/\\") {
-		return false
-	}
-	if strings.Contains(s, "..") {
-		return false
-	}
-	// A control character in a component becomes a control character in the
-	// on-disk name (<session_id>.jsonl) and lets a shipper forge extra lines
-	// in the logs that record the component verbatim. Real session ids are
-	// UUIDs on both agents, so nothing legitimate is refused.
-	if strings.ContainsFunc(s, unicode.IsControl) {
-		return false
-	}
-	return true
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

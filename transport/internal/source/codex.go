@@ -210,7 +210,7 @@ func parseCodexTime(s string) time.Time {
 
 // encodeProjectPath turns a filesystem path into a Project segment the
 // receiver will accept. Matches Claude's visual convention (slashes become
-// hyphens) and additionally neutralizes characters safeComponent rejects:
+// hyphens) and additionally neutralizes characters wire.SafeComponent rejects:
 // any '.' becomes '_' so we can never produce a ".." substring, and empty /
 // "." / ".." inputs fall back to "_default".
 func encodeProjectPath(p string) string {

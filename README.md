@@ -252,6 +252,14 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
 
 A session run from a throwaway working directory — a review lens started in an empty `mktemp -d` so the reviewed repo cannot instruct its reviewer — reports that directory as its cwd, which would make every run its own project and leave it with no knowledge scope. Its launcher stamps the checkout it is about in `~/.loom/attribution.jsonl` and the Codex adapter resolves identity through it; the producer contract is [`docs/attribution-stamps.md`](./docs/attribution-stamps.md).
 
+A hosted Claude session reaches the shipper through a spool. Under `weft-worker --agent-user` claude runs as `weftagentN`, whose 0700 home the operator's shipper cannot read, so the worker copies that user's transcripts into `$LOOM_HOME/spool/claude/projects/`, a mirror of `~/.claude/projects`: `<project>/<session>.jsonl` and `<project>/<session>/subagents/**`. They ship under `claude-code` through the same listing as the operator's own tree, and a machine with no hosted runs has no spool and no error. The copier's side of the contract:
+
+- The spool is operator-only.
+- Each file lands by write-to-temp then rename, never truncated in place, because capture reads it by byte offset. The temp name must not end in `.jsonl`, or it lists as a session.
+- Only regular files land in it.
+
+Capture runs as the operator and follows symlinks, so the listing holds that last rule itself. It skips a spool entry that is not a regular file or a directory, at every level and for `.meta.json` sidecars too, and a name the receiver would refuse; each skip logs a `skip stage=list` line, and a refused sidecar costs only its metadata. Cursors key on agent and session alone, so a key that is already listed is skipped the same way: the operator's own tree is listed first and keeps it. A hosted worktree may be gone by capture time, in which case `git_remote` resolves empty and the session groups by `cwd`. [`docs/transcript-trust-and-redaction.md`](./docs/transcript-trust-and-redaction.md) covers what an agent can claim through these files.
+
 ## State locations
 
 ```
@@ -268,6 +276,7 @@ A session run from a throwaway working directory — a review lens started in an
   attribution.jsonl                            # producers: throwaway work root → checkout
     shipper.lock                               # client: flock, one shipper at a time
     shipper.log                                # client: launchd stdout/stderr capture
+  spool/claude/projects/                       # worker: hosted agents' transcripts, mirroring ~/.claude/projects
   received/                                    # server: default storage root
     <agent>/
       <sanitized-project>/
