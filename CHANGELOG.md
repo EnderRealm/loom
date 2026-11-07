@@ -20,6 +20,16 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   block, and refuses candidates and anything else that is not a validated file
   directly at `truths/<scope>/`. Output and exit codes are dumped for reading,
   with no pass or fail.
+- `extractors/sweep.py` sweeps every validated artifact in the knowledge store.
+  It is started by hand on a terminal, offers each truth's verify blocks one
+  confirmation at a time, then shows the output and the section's prose and asks
+  whether the truth holds; exit codes are shown and decide nothing. An answer of
+  `fails` demotes the truth to `deprecated` in place, with what ran recorded on
+  it, redacted and bounded, and committed through `loom knowledge write`. The
+  report gives one outcome per artifact (`pass`, `failed`, `evidence-missing`,
+  `unverifiable`, `undecided`, `skipped`), counts that sum to the store's
+  validated total, and scope liveness beside them, flagging a scope with no
+  commits in 60 days without demoting on that alone.
 
 ### Changed
 

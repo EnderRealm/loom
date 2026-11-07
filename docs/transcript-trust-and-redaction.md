@@ -257,15 +257,37 @@ full with control characters spelled out as escapes, and it runs a block only on
 a `y` to that block. The `y` is the authorization: promotion reviewed the claim,
 so the words become a command only when a person reads them as one, one at a time.
 It therefore has no flag to skip the prompt, refuses to start without a terminal,
-and nothing in the extraction path, the sweep or a hook calls it. A confirmed block
-runs with the operator's full environment in the checkout tk registers for the
-scope. Its output goes to that terminal and nowhere else, unredacted and unscored:
-the exit code is printed as a fact, and whether the truth still holds stays the
-reader's call.
+and only a command a human started may reach this code: the extraction path, the
+unattended extraction sweep, a daemon or a hook never does. A confirmed block runs
+with the operator's full environment in the checkout tk registers for the scope.
+Its output goes to that terminal, unredacted and unscored: the exit code is printed
+as a fact, and whether the truth still holds stays the reader's call.
+
+`extractors/sweep.py` is the other such command, and it is not the extraction sweep
+of `internal/extract`, which never reaches this code. A human starts it, it refuses
+to start without a terminal, and it walks every validated artifact, offering each
+truth's blocks through the same code on the same terms: one `y` per block, nothing
+for a candidate or a decision, no flag that skips a confirmation or answers for the
+person at the terminal. It then shows the output and the section's prose and asks
+whether the truth holds. Only that answer decides, and only an explicit `fails`
+changes anything: the truth is demoted to `deprecated` in place, with every command
+that ran and its output recorded above the original record. Exit codes are shown
+and pick nothing, since a check that exits 0 can still show a truth is false.
+
+That record is the one thing a verification command writes anywhere but the
+terminal, and it goes into a store that is committed and pushed, so it passes
+through `redact()` first. Output on the terminal stays unredacted, as above; what a
+human reads there and what the store keeps are different audiences. The redaction
+is the shape-keyed minimum described above, so a secret of an unknown shape in a
+failing command's output reaches the store, and a human about to answer `fails` has
+just read that output and is the only other check on it. Control characters are
+spelled out, each command and stream is bounded, and every recorded line carries a
+`| ` gutter inside its fence, so command output cannot become a heading, a fence or
+a `---` to the readers of the file: apart from `status`, the record parses as it did.
 
 ## Enforcement points
 
-Five, and they are the whole of the redaction:
+Six, and they are the whole of the redaction:
 
 | Where | What it covers |
 | --- | --- |
@@ -274,6 +296,7 @@ Five, and they are the whole of the redaction:
 | `extractors/extract.py` — the summary-input branch | Markdown summaries, which bypass `preprocess()` |
 | `extractors/extract.py` — `load_reference_truths_from()` | The few-shot examples read back out of the store, which is transcript-derived, predates this rule and is hand-editable |
 | `extractors/extract.py` — `emit_candidates()` | The output-side backstop: a secret that reached the model some other way still never lands in the store |
+| `extractors/sweep.py` — `recorded()` | A demoted truth's record: the commands that ran and their output, which never passed through the extraction path. Before the record is bounded, because a key cut in half can fall below its pattern's minimum length |
 
 The store's Go readers — the TUI's review screen and `loom relevant` — sit
 downstream of `emit_candidates()`, so what they read was redacted when it was

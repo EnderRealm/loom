@@ -5,8 +5,9 @@ Takes one file directly under truths/<scope>/ in the knowledge store, shows each
 fenced block of its `## How to verify` section, and runs a block only when the
 person at the terminal answers y to it. Promotion reviewed the truth's claim, not
 its text as a command (docs/transcript-trust-and-redaction.md), so that answer is
-the only thing that authorizes a run: there is no flag to skip it, and nothing in
-loom may call this.
+the only thing that authorizes a run: there is no flag to skip it, and only a
+command a human started may reach this code. That is this one or
+extractors/sweep.py; the unattended extraction sweep, a daemon or a hook never does.
 
 Output is dumped for a human to read. Nothing here decides whether a truth still
 holds, and the exit status says only whether the file was refused.
@@ -116,25 +117,37 @@ def load_truth(arg: str) -> tuple[Path, str, list[str]]:
     return path, scope, lines[body_start:]
 
 
-def project_root(scope: str) -> Path:
-    """The scope's registered checkout, or a refusal. Absolute as well as
-    existing: a relative value would resolve against wherever this was started."""
+def checkout(scope: str) -> tuple[Path | None, str]:
+    """The scope's registered checkout, or None and the reason there is none.
+    Absolute as well as existing: a relative value would resolve against wherever
+    this was started."""
     path, reason = project_path(scope)
     if not path:
-        refuse(visible(reason))
+        return None, reason
     root = Path(path)
     if not root.is_absolute() or not root.is_dir():
-        refuse(f"{visible(path)}, registered for {scope}, is not an existing directory")
+        return None, f"{path}, registered for {scope}, is not an existing directory"
+    return root, ""
+
+
+def project_root(scope: str) -> Path:
+    """The scope's registered checkout, or a refusal."""
+    root, reason = checkout(scope)
+    if root is None:
+        refuse(visible(reason))
     return root
 
 
-def verify_blocks(body: list[str]) -> tuple[list[str], bool]:
-    """The fenced blocks of the verify section, and whether one in it never
-    closes. Fences are tracked from the top of the body because a `## ` line
-    inside one is text: a shell comment must not end the section, nor a quoted
-    heading start it. An unclosed block is left out, since it has swallowed
-    everything to the end of the file, the following sections included."""
+def verify_blocks(body: list[str]) -> tuple[list[str], list[str], bool]:
+    """The fenced blocks of the verify section, the prose around them, and whether
+    a block in it never closes. Fences are tracked from the top of the body
+    because a `## ` line inside one is text: a shell comment must not end the
+    section, nor a quoted heading start it. An unclosed block is left out, since
+    it has swallowed everything to the end of the file, the following sections
+    included. The prose holds a `[command N]` line where block N stood, because
+    what a truth expects is usually written after the command it is about."""
     blocks: list[str] = []
+    prose: list[str] = []
     in_section = False
     close = None
     current: list[str] = []
@@ -143,6 +156,7 @@ def verify_blocks(body: list[str]) -> tuple[list[str], bool]:
             if close.fullmatch(line):
                 if in_section and "\n".join(current).strip():
                     blocks.append("\n".join(current))
+                    prose.append(f"[command {len(blocks)}]")
                 close, current = None, []
             else:
                 current.append(line)
@@ -155,7 +169,9 @@ def verify_blocks(body: list[str]) -> tuple[list[str], bool]:
             break
         elif line.strip() == VERIFY_HEADING:
             in_section = True
-    return blocks, in_section and close is not None
+        elif in_section:
+            prose.append(line)
+    return blocks, prose, in_section and close is not None
 
 
 def show(block: str, cwd: Path, number: int, total: int):
@@ -225,6 +241,26 @@ def dump(label: str, data: bytes):
         print(text, end="" if text.endswith("\n") else "\n")
 
 
+def offer(block: str, cwd: Path, number: int, total: int) -> tuple[bytes, bytes, str] | None:
+    """Show one block and, on confirmation, run it and dump what came back: its
+    stdout, stderr and how it ended, or None when it was declined."""
+    show(block, cwd, number, total)
+    if not confirmed():
+        print("[verify] skipped")
+        return None
+    stdout, stderr, ending = run(block, cwd)
+    dump("stdout", stdout)
+    dump("stderr", stderr)
+    print(f"[verify] {visible(ending)}")
+    return stdout, stderr, ending
+
+
+def require_terminal():
+    # stdout as well as stdin: a command shown into a pipe was not shown.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        refuse("each command needs a human's confirmation, and stdin and stdout are not both a terminal")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("truth", help="truth file under truths/<scope>/ in the knowledge store")
@@ -235,27 +271,18 @@ def main():
 
     path, scope, body = load_truth(args.truth)
     cwd = project_root(scope)
-    blocks, unclosed = verify_blocks(body)
+    blocks, _, unclosed = verify_blocks(body)
     if unclosed:
         print(f"[verify] a code fence under {VERIFY_HEADING} never closes; that block is not offered")
     if not blocks:
         print(f"[verify] no code blocks under {VERIFY_HEADING} in {visible(str(path))}; nothing to run")
         return
-    # stdout as well as stdin: a command shown into a pipe was not shown.
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        refuse("each command needs a human's confirmation, and stdin and stdout are not both a terminal")
+    require_terminal()
 
     print(f"[verify] {visible(str(path))}")
     try:
         for number, block in enumerate(blocks, 1):
-            show(block, cwd, number, len(blocks))
-            if not confirmed():
-                print("[verify] skipped")
-                continue
-            stdout, stderr, ending = run(block, cwd)
-            dump("stdout", stdout)
-            dump("stderr", stderr)
-            print(f"[verify] {visible(ending)}")
+            offer(block, cwd, number, len(blocks))
     except KeyboardInterrupt:
         sys.exit("\n[verify] interrupted")
 

@@ -2,9 +2,10 @@
 
 ## Verification automation
 
-The `How to verify` section in each truth file contains runnable shell commands. `extractors/verify.py` runs them for a validated truth, one human confirmation per command; nothing executes them unattended.
+The `How to verify` section in each truth file contains runnable shell commands. `extractors/verify.py` runs them for a validated truth, and `extractors/sweep.py` for every one in the store, one human confirmation per command; nothing executes them unattended.
 
 - [x] `extractors/verify.py` — takes a truth file path, extracts code blocks from `## How to verify`, resolves the project root from the scope directory name, runs each command a human confirms, dumps output for human review. Not auto-pass/fail — just surfaces results.
+- [x] `extractors/sweep.py` — sweeps every validated artifact through the same confirmations, takes a human's verdict on each truth, demotes a failed one to `deprecated` with what ran recorded on it, and reports scope liveness alongside.
 - [ ] Standardize "Expected:" prose in truth files into a machine-checkable form (regex, exit code, line count). Defer until verify.py reveals which patterns are common.
 - [ ] Add `--verify` flag to `extract.py` that runs verification on each candidate before emitting it. Candidates that fail verification get demoted or flagged.
 

@@ -37,6 +37,8 @@ def verify_section(*blocks: str) -> str:
 
 
 class VerifyTestCase(unittest.TestCase):
+    PROMPTS = (PROMPT,)
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -108,7 +110,7 @@ class VerifyTestCase(unittest.TestCase):
             output += chunk
             if on_output:
                 on_output(master, output)
-            if output.count(PROMPT) > answered:
+            if sum(output.count(p) for p in self.PROMPTS) > answered:
                 self.assertTrue(answers, f"prompted past the answers given:\n{output!r}")
                 answered += 1
                 os.write(master, answers.pop(0))
@@ -773,12 +775,18 @@ class RunningTest(VerifyTestCase):
 class WiringTest(unittest.TestCase):
     def test_nothing_in_the_repo_invokes_the_runner(self):
         repo = HERE.parent
-        listed = subprocess.run(["git", "-C", str(repo), "grep", "-lE", r"\bverify\.py\b|import verify\b",
+        # POSIX classes: git's ERE on macOS has no \\b and matches nothing with it.
+        word = "[^[:alnum:]_]"
+        listed = subprocess.run(["git", "-C", str(repo), "grep", "--untracked", "-lE",
+                                 rf"(^|{word})verify\.py({word}|$)|(import|from) verify({word}|$)",
                                  "--", "*.go", "*.py", "*.sh", "Makefile", "*.plist", "*.yml"],
                                 capture_output=True, text=True, timeout=DRIVE_LIMIT)
 
-        allowed = {"extractors/verify.py", "extractors/test_verify.py"}
-        self.assertEqual(set(listed.stdout.split()) - allowed, set())
+        # Exact, so a pattern that stops matching fails here. The sweep is the one
+        # other human-started command, and has its own check.
+        self.assertEqual(set(listed.stdout.split()),
+                         {"extractors/verify.py", "extractors/test_verify.py",
+                          "extractors/sweep.py", "extractors/test_sweep.py"})
 
 
 if __name__ == "__main__":
