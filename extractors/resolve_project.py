@@ -196,21 +196,32 @@ def _validated(result: Resolution) -> Resolution:
 
 def _registry_projects() -> tuple[set[str], str]:
     """Project names from tk's registry, or an empty set and the reason it
-    couldn't be read. loom carries no YAML dependency (see the Go precedent in
-    internal/config/ticket.go), so both files are scanned for the keys that
-    matter rather than parsed as documents."""
-    ticket_config = Path.home() / ".ticket" / "config.yaml"
-    try:
-        central_root = _central_root(ticket_config.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError) as e:
-        # Same reason the marker read catches it: a registry that can't be read
-        # is a warning, never a failure, and non-UTF-8 bytes are a way for it to
-        # be unreadable — an uncaught UnicodeDecodeError would crash the caller.
-        return set(), f"cannot read {ticket_config} ({e})"
-    if not central_root:
-        return set(), f"no central_root in {ticket_config}"
+    couldn't be read. The central root is $TK_STORE_ROOT when set, taken
+    verbatim, and central_root from ~/.ticket/config.yaml otherwise —
+    CentralStoreRoot's rule in internal/config/ticket.go; a set-but-unusable
+    override is the skip reason and never falls through to the real config.
+    loom carries no YAML dependency (see the Go precedent in the same file), so
+    both files are scanned for the keys that matter rather than parsed as
+    documents."""
+    root = os.environ.get(TK_STORE_ROOT_ENV)
+    if root is not None:
+        if not os.path.isabs(root):
+            return set(), f"{TK_STORE_ROOT_ENV} must be an absolute path, got {root!r}"
+        registry = Path(root) / "config.yaml"
+    else:
+        ticket_config = Path.home() / ".ticket" / "config.yaml"
+        try:
+            central_root = _central_root(ticket_config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as e:
+            # Same reason the marker read catches it: a registry that can't be
+            # read is a warning, never a failure, and non-UTF-8 bytes are a way
+            # for it to be unreadable — an uncaught UnicodeDecodeError would
+            # crash the caller.
+            return set(), f"cannot read {ticket_config} ({e})"
+        if not central_root:
+            return set(), f"no central_root in {ticket_config}"
+        registry = Path(central_root).expanduser() / "config.yaml"
 
-    registry = Path(central_root).expanduser() / "config.yaml"
     try:
         names = _project_keys(registry.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as e:

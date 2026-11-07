@@ -48,6 +48,7 @@ class ResolveProjectTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         env.start()
         self.addCleanup(env.stop)
+        os.environ.pop(TK_STORE_ROOT_ENV, None)
 
     def make_repo(self, name="repo", git_as_file=False):
         repo = self.root / name
@@ -68,6 +69,15 @@ class ResolveProjectTest(unittest.TestCase):
         ticket_dir = self.home / ".ticket"
         ticket_dir.mkdir()
         (ticket_dir / "config.yaml").write_text(f"default_project: {names[0]}\ncentral_root: {store}\n")
+
+    def write_override_store(self, *names):
+        store = self.root / "override"
+        store.mkdir()
+        body = "projects:\n"
+        for name in names:
+            body += f"    {name}:\n        store: central\n"
+        (store / "config.yaml").write_text(body)
+        os.environ[TK_STORE_ROOT_ENV] = str(store)
 
     def assertWarns_containing(self, result, needle):
         self.assertTrue(any(needle in w for w in result.warnings),
@@ -290,6 +300,64 @@ class ResolveProjectTest(unittest.TestCase):
 
         self.assertEqual(result.name, "loom")
         self.assertWarns_containing(result, "tk registry check skipped")
+
+    def test_absolute_override_registry_is_consulted(self):
+        self.write_registry("ticket")
+        self.write_override_store("loom")
+        repo = self.make_repo()
+        (repo / MARKER_NAME).write_text("loom\n")
+
+        result = resolve_project(repo)
+
+        self.assertEqual(result.name, "loom")
+        self.assertEqual(result.warnings, [])
+
+    def test_absolute_override_registry_replaces_the_home_one(self):
+        self.write_registry("loom")
+        self.write_override_store("ticket")
+        repo = self.make_repo()
+        (repo / MARKER_NAME).write_text("loom\n")
+
+        result = resolve_project(repo)
+
+        self.assertEqual(result.name, "loom")
+        self.assertWarns_containing(result, "not a registered tk project")
+
+    def test_override_without_a_registry_does_not_fall_back(self):
+        self.write_registry("loom")
+        os.environ[TK_STORE_ROOT_ENV] = str(self.root / "empty")
+        repo = self.make_repo()
+        (repo / MARKER_NAME).write_text("loom\n")
+
+        result = resolve_project(repo)
+
+        self.assertEqual(result.name, "loom")
+        self.assertWarns_containing(
+            result, f"tk registry check skipped: cannot read {self.root / 'empty' / 'config.yaml'}")
+
+    def test_relative_override_skips_validation_without_falling_back(self):
+        self.write_registry("loom")
+        os.environ[TK_STORE_ROOT_ENV] = "store"
+        repo = self.make_repo()
+        (repo / MARKER_NAME).write_text("loom\n")
+
+        result = resolve_project(repo)
+
+        self.assertEqual(result.name, "loom")
+        self.assertWarns_containing(
+            result, f"tk registry check skipped: {TK_STORE_ROOT_ENV} must be an absolute path, got 'store'")
+
+    def test_empty_override_skips_validation_without_falling_back(self):
+        self.write_registry("loom")
+        os.environ[TK_STORE_ROOT_ENV] = ""
+        repo = self.make_repo()
+        (repo / MARKER_NAME).write_text("loom\n")
+
+        result = resolve_project(repo)
+
+        self.assertEqual(result.name, "loom")
+        self.assertWarns_containing(
+            result, f"tk registry check skipped: {TK_STORE_ROOT_ENV} must be an absolute path, got ''")
 
     def test_resolution_writes_nothing(self):
         self.write_registry("loom")
