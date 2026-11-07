@@ -14,6 +14,12 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   anything in the spool that is not a regular file or a directory, and any
   name the receiver would refuse; a session id the operator's own tree holds
   stays the operator's.
+- `extractors/verify.py <truth-file>` runs a validated truth's `## How to
+  verify` blocks from the checkout tk registers for its scope. It is started by
+  hand on a terminal, shows each block in full and runs it only on a `y` to that
+  block, and refuses candidates and anything else that is not a validated file
+  directly at `truths/<scope>/`. Output and exit codes are dumped for reading,
+  with no pass or fail.
 
 ### Changed
 

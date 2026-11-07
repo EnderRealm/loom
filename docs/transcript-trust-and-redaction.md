@@ -249,6 +249,20 @@ The gate is deliberately narrow: promotion says *a human read this claim and
 found it true enough to keep*. It says nothing about the text's right to direct
 a reader, and a promoted truth is still data.
 
+That covers a truth's `## How to verify` commands too, which is the one place this
+text gets executed. `extractors/verify.py` runs them for a validated truth only,
+meaning a `status: validated` file directly at `truths/<scope>/`, so never for
+anything under `_candidates/`. A human starts it, it shows each fenced block in
+full with control characters spelled out as escapes, and it runs a block only on
+a `y` to that block. The `y` is the authorization: promotion reviewed the claim,
+so the words become a command only when a person reads them as one, one at a time.
+It therefore has no flag to skip the prompt, refuses to start without a terminal,
+and nothing in the extraction path, the sweep or a hook calls it. A confirmed block
+runs with the operator's full environment in the checkout tk registers for the
+scope. Its output goes to that terminal and nowhere else, unredacted and unscored:
+the exit code is printed as a fact, and whether the truth still holds stays the
+reader's call.
+
 ## Enforcement points
 
 Five, and they are the whole of the redaction:

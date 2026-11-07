@@ -134,6 +134,19 @@ def describe(result: Resolution) -> str:
     return "unresolved"
 
 
+def project_path(name: str) -> tuple[str, str]:
+    """The checkout registered for `name` on this machine, or "" and the reason
+    there is none: `projects.<name>.path` in tk's local ~/.ticket/config.yaml."""
+    ticket_config = Path.home() / ".ticket" / "config.yaml"
+    try:
+        path = _project_paths(ticket_config.read_text(encoding="utf-8")).get(name)
+    except (OSError, UnicodeDecodeError) as e:
+        return "", f"cannot read {ticket_config} ({e})"
+    if not path:
+        return "", f"no projects.{name}.path in {ticket_config}"
+    return path, ""
+
+
 def _find_repo_root(start: Path) -> Path | None:
     """First ancestor of `start` (inclusive) holding a `.git` entry. Worktrees
     and submodules carry a `.git` file rather than a directory, so both count."""
@@ -208,9 +221,18 @@ def _project_keys(text: str) -> set[str]:
     that stops it matching and so skips the whole block, is deliberately not
     recognized: the cost of missing either is a spurious "not a registered tk
     project" warning, and the resolved name is never changed by validation."""
-    names: set[str] = set()
+    return set(_project_paths(text))
+
+
+def _project_paths(text: str) -> dict[str, str]:
+    """Each key nested under the `projects:` block and the first non-empty
+    `path:` below it, "" when it has none. The path half reads as
+    ProjectRepoPath in internal/config/ticket.go does; both take the value
+    verbatim, so quoting, a trailing comment or a ~ stay in it."""
+    paths: dict[str, str] = {}
     in_projects = False
     key_indent = None
+    current = None
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -218,14 +240,20 @@ def _project_keys(text: str) -> set[str]:
         indent = len(line) - len(line.lstrip())
         if indent == 0:
             in_projects = stripped == "projects:"
+            current = None
             continue
         if not in_projects:
             continue
         if key_indent is None:
             key_indent = indent
-        if indent == key_indent and stripped.endswith(":"):
-            names.add(stripped[:-1].strip())
-    return names
+        if indent <= key_indent:
+            current = None
+            if indent == key_indent and stripped.endswith(":"):
+                current = stripped[:-1].strip()
+                paths.setdefault(current, "")
+        elif current is not None and stripped.startswith("path:") and not paths[current]:
+            paths[current] = stripped[len("path:"):].strip()
+    return paths
 
 
 def main():
