@@ -76,7 +76,9 @@ type Adapter interface {
 	Agent() string
 
 	// List returns every session file currently visible for this adapter, or an
-	// empty slice if the agent's source dir is missing.
+	// empty slice if the agent's source dir is missing. Sessions may accompany a
+	// non-nil error when only part of the source could be read; callers report
+	// the error and still use the sessions.
 	List() ([]Session, error)
 }
 

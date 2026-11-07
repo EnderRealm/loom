@@ -782,7 +782,7 @@ func countUncapturedSessions() []uncapturedBucket {
 		agent := ad.Agent()
 		sessions, err := ad.List()
 		if err != nil {
-			continue
+			log.Printf("fail stage=status agent=%s class=io err=%q", agent, err)
 		}
 		for _, s := range sessions {
 			var size, off int64
