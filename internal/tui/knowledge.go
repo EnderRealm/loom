@@ -446,10 +446,11 @@ func (m knowledgeModel) listView() string {
 
 	cValid, cCand := 0, 0
 	for _, a := range m.artifacts {
-		if a.Status == "candidate" {
-			cCand++
-		} else {
+		switch a.Status {
+		case "validated":
 			cValid++
+		case "candidate":
+			cCand++
 		}
 	}
 	footer := StyleDim.Render("  ") + StyleSuccess.Render(itoa(cValid)) +
@@ -483,10 +484,15 @@ func (m knowledgeModel) renderRow(a Artifact, selected bool) string {
 	}
 
 	var statusCell string
-	if a.Status == "candidate" {
+	switch a.Status {
+	case "candidate":
 		statusCell = padRightBg(selBg.Foreground(colorWarning).Render("candidate"), colKnowStatus, bg)
-	} else {
+	case "validated":
 		statusCell = padRightBg(selBg.Foreground(colorSuccess).Render("validated"), colKnowStatus, bg)
+	default:
+		// The frontmatter's status wins over the directory, so this is whatever the
+		// file says: deprecated once sweep.py demotes a truth, or any other text.
+		statusCell = padRightBg(selBg.Foreground(colorMuted).Render(truncate(sanitize(a.Status), colKnowStatus-1)), colKnowStatus, bg)
 	}
 
 	typeCell := padRightBg(selBg.Foreground(colorAccent).Render(a.Type), colKnowType, bg)

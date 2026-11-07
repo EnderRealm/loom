@@ -27,7 +27,7 @@ type Artifact struct {
 	Title    string
 	Scope    string
 	Type     string // "truth" | "decision" | "ticket"
-	Status   string // "validated" | "candidate"
+	Status   string // "validated" | "candidate" | "deprecated"
 	Path     string
 	Body     string // full file contents (eager-loaded; corpus is small)
 	Modified time.Time

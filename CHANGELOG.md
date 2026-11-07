@@ -42,6 +42,9 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 - `extract.py` takes as reference examples and scoring refs only a truth or
   decision whose status is `validated`, so a truth `sweep.py` demoted no longer
   reaches the extractor's prompt with its record.
+- The TUI Knowledge list shows a truth `sweep.py` demoted as `deprecated`, muted
+  rather than green, and its footer counts as validated only artifacts whose
+  status is `validated`.
 
 ## [1.12.0] — 2026-10-27 — Project liveness, ticket-bound candidates and universal truths
 
