@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"loom/internal/config"
 )
 
 type dashboardModel struct {
@@ -148,8 +150,11 @@ func (m *dashboardModel) reselect(slug string) {
 }
 
 // cycleSort advances to the next sort column and re-sorts, preserving the
-// current selection across the reorder.
-func (m *dashboardModel) cycleSort() {
+// current selection across the reorder, then saves the column so the next
+// launch opens on it. The header is saved rather than the index so a
+// reordered sortColumns cannot reopen on a different column. A failed save
+// leaves the new order in place; the error is only reported.
+func (m *dashboardModel) cycleSort() error {
 	var selectedSlug string
 	if s := m.selected(); s != nil {
 		selectedSlug = s.Slug
@@ -157,6 +162,7 @@ func (m *dashboardModel) cycleSort() {
 	m.sortCol = (m.sortCol + 1) % len(sortColumns)
 	m.applySort()
 	m.reselect(selectedSlug)
+	return config.WriteDashboardSort(sortColumns[m.sortCol].header)
 }
 
 func (m dashboardModel) selected() *Project {
@@ -220,7 +226,9 @@ func (m dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			m.cursor = max(0, len(m.projects)-1)
 			m.clampOffset()
 		case "s":
-			m.cycleSort()
+			if err := m.cycleSort(); err != nil {
+				return m, statusCmd(sanitize("sort not saved: " + err.Error()))
+			}
 		}
 	case tea.MouseMsg:
 		switch msg.Button {

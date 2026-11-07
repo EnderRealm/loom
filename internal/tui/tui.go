@@ -51,7 +51,7 @@ type Options struct {
 }
 
 func New(opts ...Options) App {
-	a := App{loading: true, dashboard: dashboardModel{sortCol: defaultSortCol()}}
+	a := App{loading: true, dashboard: dashboardModel{sortCol: savedSortCol()}}
 	for _, o := range opts {
 		if o.RunID != "" {
 			a.runDetail = newRunDetailModel(o.RunID, 0, 0, 0)
@@ -59,6 +59,19 @@ func New(opts ...Options) App {
 		}
 	}
 	return a
+}
+
+// savedSortCol returns the index of the column the dashboard was last sorted
+// by. Nothing saved, or a header no current column carries, falls back to
+// defaultSortCol.
+func savedSortCol() int {
+	saved := config.ReadDashboardSort()
+	for i, c := range sortColumns {
+		if c.header == saved {
+			return i
+		}
+	}
+	return defaultSortCol()
 }
 
 // defaultSortCol returns the index of the SESSIONS column so the dashboard's
