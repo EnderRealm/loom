@@ -79,7 +79,7 @@ func TestKnowledgeOverlaySurfacesContradictions(t *testing.T) {
 }
 
 // TestKnowledgeListShowsDeprecatedStatus renders the list over a store holding a
-// truth demoted in place, as extractors/sweep.py leaves one: still under truths/,
+// truth demoted in place, as the extractors' sweep leaves one: still under truths/,
 // with status: deprecated. It reads as deprecated, in a style of its own, and
 // stays out of the footer's validated count.
 func TestKnowledgeListShowsDeprecatedStatus(t *testing.T) {

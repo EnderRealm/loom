@@ -491,7 +491,7 @@ func (m knowledgeModel) renderRow(a Artifact, selected bool) string {
 		statusCell = padRightBg(selBg.Foreground(colorSuccess).Render("validated"), colKnowStatus, bg)
 	default:
 		// The frontmatter's status wins over the directory, so this is whatever the
-		// file says: deprecated once sweep.py demotes a truth, or any other text.
+		// file says: deprecated once the sweep extractor demotes a truth, or any other text.
 		statusCell = padRightBg(selBg.Foreground(colorMuted).Render(truncate(sanitize(a.Status), colKnowStatus-1)), colKnowStatus, bg)
 	}
 
