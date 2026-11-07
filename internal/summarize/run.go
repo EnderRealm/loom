@@ -327,6 +327,10 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 			GitRemote: gitRemote,
 		}
 		if !force {
+			if st.FoldedUnchanged(path, source.Size, source.Mtime) {
+				r.skipped++
+				return nil
+			}
 			current, err := st.SessionAlreadyCurrent(string(agent), sessionID,
 				source.Size, source.Mtime)
 			if err != nil {
@@ -341,6 +345,9 @@ func walkAgent(ctx context.Context, st *summaries.Store, agent summary.Agent,
 			r.errored++
 			return nil
 		}
+		// The size and mtime read before the fold: a file that grew during it
+		// differs from them on the next sweep and folds again.
+		st.RecordFold(path, source.Size, source.Mtime)
 		r.parsed++
 		return nil
 	})
@@ -380,11 +387,11 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 		if err != nil {
 			return err
 		}
-		if err := st.WriteSummary(ctx, sa.Session, child); err != nil {
+		if err := writeSession(ctx, st, sa.Session, child); err != nil {
 			return err
 		}
 	}
-	if err := st.WriteSummary(ctx, sum, source); err != nil {
+	if err := writeSession(ctx, st, sum, source); err != nil {
 		return err
 	}
 	if verbose {
@@ -393,6 +400,21 @@ func summarizeOne(ctx context.Context, st *summaries.Store, agent summary.Agent,
 			len(sum.Errors), len(sum.Subagents), len(sum.Unknown))
 	}
 	return nil
+}
+
+// writeSession writes one fold's session row, logging when it replaces a row
+// another file wrote: two files resolving to one session is otherwise
+// invisible, since whichever folded last simply holds the row. Paths only; a
+// failed lookup costs the line, not the fold.
+func writeSession(ctx context.Context, st *summaries.Store, sum *summary.SessionSummary,
+	source summaries.SourceInfo) error {
+	prior, err := st.SessionSourcePath(string(sum.Agent), sum.SessionID)
+	if err != nil {
+		log.Printf("check %s: %v", source.Path, err)
+	} else if prior != "" && prior != source.Path {
+		log.Printf("collision %s: replaces the row from %s", source.Path, prior)
+	}
+	return st.WriteSummary(ctx, sum, source)
 }
 
 // codexImportCopy reports whether a received codex rollout is a Codex

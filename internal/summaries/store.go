@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -34,6 +35,16 @@ var ErrSchemaTooNew = errors.New("summary db schema is newer than this binary")
 // Store is a thin wrapper over a SQLite database.
 type Store struct {
 	db *sql.DB
+	// folds is what this handle has folded, by source path. It lives on the
+	// Store because a fold is only known to have happened to this database: a
+	// rebuild's fresh Store has to start without it.
+	folds sync.Map
+}
+
+// foldStamp is a source file's size and effective mtime at its last fold.
+type foldStamp struct {
+	size  int64
+	mtime time.Time
 }
 
 // Open opens (and migrates) the SQLite database at path. The file is created
@@ -190,6 +201,39 @@ func (s *Store) SessionAlreadyCurrent(agent, sessionID string, size int64,
 		return false, nil
 	}
 	return true, nil
+}
+
+// RecordFold notes that the source file at path folded successfully at this
+// size and mtime.
+func (s *Store) RecordFold(path string, size int64, mtime time.Time) {
+	s.folds.Store(path, foldStamp{size: size, mtime: mtime})
+}
+
+// FoldedUnchanged reports whether this Store already folded the file at path
+// at this size and mtime. SessionAlreadyCurrent can't answer that for two
+// files that resolve to one row: each fold overwrites the size and mtime the
+// other is compared against, so without this neither ever reads as current.
+func (s *Store) FoldedUnchanged(path string, size int64, mtime time.Time) bool {
+	v, ok := s.folds.Load(path)
+	if !ok {
+		return false
+	}
+	stamp := v.(foldStamp)
+	return stamp.size == size && stamp.mtime.Equal(mtime)
+}
+
+// SessionSourcePath returns the source_path of the (agent, session_id) row,
+// empty when there is no row or it records no path.
+func (s *Store) SessionSourcePath(agent, sessionID string) (string, error) {
+	var path sql.NullString
+	err := s.db.QueryRow(
+		`SELECT source_path FROM sessions WHERE agent = ? AND session_id = ?`,
+		agent, sessionID,
+	).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return path.String, err
 }
 
 // WriteSummary upserts one SessionSummary into the DB inside a transaction.
