@@ -5,7 +5,6 @@ package tui
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -359,8 +358,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q":
 				a.overlay = overlayNone
 				return a, nil
-			case "t":
-				return a.launchTk()
 			}
 			var cmd tea.Cmd
 			a.detail, cmd = a.detail.update(msg)
@@ -629,7 +626,7 @@ func (a App) View() string {
 
 func (a App) helpLine() string {
 	if a.overlay == overlayDetail {
-		return "↑↓ scroll  │  t open in tk  │  esc/q close"
+		return "↑↓ scroll  │  esc/q close"
 	}
 	if a.overlay == overlayKnowledge {
 		if a.knowledge.filing != nil {
@@ -663,26 +660,6 @@ func (a App) helpLine() string {
 		return "↑↓ scroll · n/p review · enter response · e executions · a history · d telemetry · r refresh · esc/q runs"
 	}
 	return "↑↓ select  │  enter open  │  s sort  │  w runs  │  a activity  │  c knowledge  │  r refresh  │  q quit"
-}
-
-// launchTk shells out to `tk ui --repo <path>` via tea.ExecProcess so the
-// child takes over the terminal. On exit we return to the dashboard; the
-// next refresh tick (or an immediate one we queue here) picks up any ticket
-// edits the user made inside tk.
-func (a App) launchTk() (tea.Model, tea.Cmd) {
-	if a.detail.project == nil || a.detail.project.Path == "" {
-		return a, statusCmd("path unresolved — cannot open tk")
-	}
-	if _, err := exec.LookPath("tk"); err != nil {
-		return a, statusCmd("tk not on $PATH")
-	}
-	cmd := exec.Command("tk", "ui", "--repo", a.detail.project.Path)
-	return a, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			return statusMsg("tk exited: " + err.Error())
-		}
-		return nil
-	})
 }
 
 func statusCmd(msg string) tea.Cmd {

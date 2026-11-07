@@ -3,6 +3,7 @@ package tui
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -168,6 +169,43 @@ func TestEditCountsItsPendingCommit(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("the edit dispatched no editor, so nothing will decrement the count")
+	}
+}
+
+// TestProjectDetailTKeyIsInert: the detail overlay leaves t unbound, so the key
+// starts no process and reports nothing. Each status is a footer the key must
+// leave alone: the help line when none is set, or a line already on screen. The
+// project has a path because a pathless one could only ever have refused.
+func TestProjectDetailTKeyIsInert(t *testing.T) {
+	for _, status := range []string{"", "refreshing…"} {
+		var m tea.Model = New()
+		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		m, _ = m.Update(projectsLoadedMsg{{Slug: "proj", Name: "proj", Path: t.TempDir()}})
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		app := m.(App)
+		if app.overlay != overlayDetail {
+			t.Fatalf("overlay = %v after enter, want the project detail", app.overlay)
+		}
+		app.status = status
+		before := app.View()
+
+		m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+		if cmd != nil {
+			t.Errorf("status %q: t returned a command", status)
+		}
+		after := m.(App)
+		if after.overlay != overlayDetail {
+			t.Errorf("status %q: overlay = %v after t", status, after.overlay)
+		}
+		if after.status != status {
+			t.Errorf("status = %q after t, want %q", after.status, status)
+		}
+		if v := after.View(); v != before {
+			t.Errorf("status %q: view changed on t:\n%s\nwant:\n%s", status, v, before)
+		}
+		if strings.Contains(after.helpLine(), "tk") {
+			t.Errorf("help = %q, still offers a tk key", after.helpLine())
+		}
 	}
 }
 
