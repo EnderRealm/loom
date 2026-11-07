@@ -202,9 +202,9 @@ func Kickstart(label string) error {
 	return nil
 }
 
-// Uninstall boots the job out of launchd and removes the plist. Tolerant of
+// Stop boots the job out of launchd, leaving its plist in place. Tolerant of
 // "not loaded" (the install may have been partial or already cleaned up).
-func Uninstall(label string) error {
+func Stop(label string) error {
 	out, err := exec.Command("launchctl", "bootout", target(label)).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -215,6 +215,14 @@ func Uninstall(label string) error {
 			!strings.Contains(msg, "not find specified service") {
 			return fmt.Errorf("launchctl bootout %s: %s", label, msg)
 		}
+	}
+	return nil
+}
+
+// Uninstall stops the job and removes the plist.
+func Uninstall(label string) error {
+	if err := Stop(label); err != nil {
+		return err
 	}
 	plistPath, err := PlistPath(label)
 	if err != nil {

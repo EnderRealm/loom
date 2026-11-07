@@ -11,6 +11,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -345,4 +348,49 @@ func registrySize(t *testing.T, root string) int64 {
 		return nil
 	})
 	return size
+}
+
+// The supported deployment: a receiver bound to loopback behind a TLS
+// terminator, with the shipper on an https server_url. A transcript lands
+// through the proxy with the bearer token intact, and the sync health that
+// `loom status` prints is fed by that same https health check.
+func TestShipsThroughTLSTerminator(t *testing.T) {
+	home := t.TempDir()
+	loomHome := filepath.Join(home, "loom")
+	t.Setenv("HOME", home)
+	t.Setenv("LOOM_HOME", loomHome)
+	received := filepath.Join(loomHome, "received")
+	cwd := filepath.Join(home, "proj")
+	slug := strings.ReplaceAll(cwd, "/", "-")
+	write(t, filepath.Join(home, ".claude", "projects", slug, rootSession+".jsonl"), claudeLines(rootSession, cwd, time.Now(), 1, 1, 0, 0))
+
+	addr := freePort(t)
+	defer startReceiver(t, addr, received)()
+	terminator := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: addr}))
+	defer terminator.Close()
+
+	// The shipper uses the default transport, so this is how the test's
+	// self-signed terminator gets trusted without weakening verification.
+	orig := http.DefaultTransport
+	http.DefaultTransport = terminator.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	write(t, filepath.Join(loomHome, "config.json"), fmt.Sprintf(`{"server_url":%q,"auth_token":"tok","notify_on_failure":false}`, terminator.URL))
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	shipper.Once()
+
+	if !strings.Contains(logs.String(), "shipped=1 skipped=0 failed=0") {
+		t.Fatalf("tick log:\n%s", logs.String())
+	}
+	files, err := filepath.Glob(filepath.Join(received, "*", "*", rootSession+".jsonl"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("received files = %v, %v", files, err)
+	}
+	if _, ok := shipper.LastSync(); !ok {
+		t.Fatal("no last sync recorded after a healthy https tick")
+	}
 }

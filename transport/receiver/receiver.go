@@ -33,6 +33,9 @@ import (
 // path can name its plist consistently.
 const AgentLabel = "com.loom.receiver"
 
+// DefaultAddr is the listen address when none is configured.
+const DefaultAddr = ":8765"
+
 // Options configures Run. Zero values follow flag defaults: bind :8765,
 // storage at $LOOM_HOME/received, auth from $LOOM_RECEIVER_TOKEN or the
 // persisted ~/.loom/receiver-token if Token is empty.
@@ -46,7 +49,7 @@ type Options struct {
 // fails. Cancellation gracefully shuts down the HTTP server.
 func Run(ctx context.Context, opts Options) error {
 	if opts.Addr == "" {
-		opts.Addr = ":8765"
+		opts.Addr = DefaultAddr
 	}
 	if opts.Storage == "" {
 		opts.Storage = filepath.Join(config.Home(), "received")

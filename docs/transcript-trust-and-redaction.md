@@ -24,7 +24,7 @@ Three legs, and they are not equivalent.
 **verbatim and unredacted** to the receiver's `/v1/ingest`
 (`transport/shipper/shipper.go`), which writes them to `~/.loom/received/` on
 the receiver host. When the shipping machine is not the receiving one, and it
-usually is not, raw transcript text crosses a host boundary here, over HTTP with
+usually is not, raw transcript text crosses a host boundary here, over HTTPS with
 a shared bearer token (`--auth-token`, `LOOM_RECEIVER_TOKEN`, or
 `~/.loom/receiver-token`).
 
@@ -38,17 +38,30 @@ the transport's own property — an authenticated endpoint between two hosts the
 operator controls — and that is where a change belongs if the receiver ever
 stops being one of those.
 
-The authentication is a shared bearer token, which is not confidentiality. The
-receiver serves plain HTTP, and the shipper sends over whatever scheme
-`server_url` names, so **confidentiality on this hop is the network's property,
-not loom's**: an observer on the path reads both the transcripts and the token.
-That is acceptable on loopback or on a private network the operator trusts end
-to end. Anywhere else, `server_url` must name an `https://` endpoint — TLS
-terminated in front of the receiver, with Go's HTTP client verifying the
-certificate by default — or the hop must run inside an encrypted tunnel.
-Enforcing a confidential transport in the shipper and receiver themselves,
-rather than leaving it to how the operator deploys them, is tracked in
-`loom/require-confidential-transport-3a9a`.
+The authentication is a shared bearer token, which is not confidentiality, so
+**the shipper enforces confidentiality on this hop**: it refuses a `server_url`
+that is not `https://` unless the host is loopback, and Go's HTTP client verifies
+the certificate, with no option to skip that. `transport/shipper/config.go`
+applies the rule in `LoadConfig`, which every shipper path goes through, and
+again to each redirect hop, because a same-host redirect keeps the
+`Authorization` header and a 307 or 308 re-sends the body. A refusal fails
+`loom install shipper`, stops the tick with the reason in the shipper's log, and
+is printed by `loom status`.
+
+The receiver still serves plain HTTP. TLS is terminated in front of it, by Caddy
+or `tailscale serve` for example, with the receiver bound to loopback through
+`receiver_addr`; the README's server setup describes that deployment. The
+shipper can only hold up its own end. It cannot see what the terminator does
+with the connection, and a receiver left on its default all-interfaces bind
+still has a plaintext port beside the terminator, so the receiver's side of this
+remains the operator's deployment.
+
+The one way back to plaintext is `allow_plaintext_transcripts_and_token`, which
+the operator sets by name in `config.json` and which covers `http://` only. It
+exists for a path already secured some other way, such as an encrypted tunnel or
+a network trusted end to end. With it set, confidentiality on this hop is the
+network's property and not loom's, an observer on an unprotected path reads both
+the transcripts and the token, and every shipper tick logs a warning saying so.
 
 Subagent transcripts travel on this leg too. Claude Code writes one under
 `<session>/subagents/` for each agent a session dispatched, and the shipper

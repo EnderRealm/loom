@@ -2,8 +2,12 @@ package shipper
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"loom/internal/config"
@@ -19,6 +23,14 @@ const (
 // when summarizer_interval_seconds is absent.
 const DefaultSummarizerInterval = 30 * time.Second
 
+// allowPlaintextKey is the JSON key of Config.AllowPlaintextTranscriptsAndToken,
+// named in the refusal and in the shipper's warning.
+const allowPlaintextKey = "allow_plaintext_transcripts_and_token"
+
+// ErrTransportRefused marks a URL the shipper will not send to: a configured
+// server_url, or a redirect target, that is not a confidential transport.
+var ErrTransportRefused = errors.New("transport refused")
+
 // Config is $LOOM_HOME/config.json for both roles: the shipper's fields,
 // validated by LoadConfig, and the seconds cadences, validated by
 // readConfig, which the server role reads without a server_url. Path
@@ -31,6 +43,17 @@ type Config struct {
 	// "Authorization: Bearer <token>". May be empty for localhost/dev;
 	// the receiver accepts empty if it too has no token.
 	AuthToken string `json:"auth_token"`
+
+	// AllowPlaintextTranscriptsAndToken permits http:// to a non-loopback
+	// host, which exposes both to anyone on the path. It covers no other
+	// scheme, and redirects are held to it the same way as ServerURL.
+	AllowPlaintextTranscriptsAndToken bool `json:"allow_plaintext_transcripts_and_token,omitempty"`
+
+	// ReceiverAddr is the listen address `loom install receiver` passes to
+	// the receiver, so a TLS terminator can front it without the plaintext
+	// port staying open beside it. Read on the server role through
+	// ReceiverAddr. Absent keeps the receiver's default bind.
+	ReceiverAddr string `json:"receiver_addr,omitempty"`
 
 	// IntervalMinutes is the in-process ticker cadence inside
 	// `loom shipper daemon` when IntervalSeconds is absent. Note: launchd's
@@ -91,8 +114,8 @@ func (c *Config) SummarizerInterval() time.Duration {
 	return DefaultSummarizerInterval
 }
 
-// LoadConfig reads $LOOM_HOME/config.json, applies defaults, and
-// validates required fields.
+// LoadConfig reads $LOOM_HOME/config.json, applies defaults, and validates
+// required fields and that server_url is a confidential transport.
 func LoadConfig() (*Config, error) {
 	path := config.Path()
 	c, err := readConfig(path)
@@ -111,7 +134,59 @@ func LoadConfig() (*Config, error) {
 	if c.ServerURL == "" {
 		return nil, fmt.Errorf("%s: server_url is required", path)
 	}
+	u, err := url.Parse(c.ServerURL)
+	if err != nil {
+		// Not wrapped: url.Parse errors echo the input, and a server_url can
+		// carry credentials.
+		return nil, fmt.Errorf("%s: server_url: %w: not a valid URL; want https://host[:port]", path, ErrTransportRefused)
+	}
+	if err := checkTransport(u, c.AllowPlaintextTranscriptsAndToken); err != nil {
+		return nil, fmt.Errorf("%s: server_url: %w", path, err)
+	}
 	return c, nil
+}
+
+// checkTransport is the one rule for where transcripts and the bearer token
+// may be sent: https to any host, http to a loopback host, or http anywhere
+// under the explicit opt-out. Errors name only scheme and host, so userinfo
+// never reaches a log.
+func checkTransport(u *url.URL, allowPlaintext bool) error {
+	target := u.Scheme + "://" + u.Host
+	switch {
+	case u.Hostname() == "":
+		return fmt.Errorf("%w: %q names no host; want https://host[:port]", ErrTransportRefused, target)
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme != "http":
+		return fmt.Errorf("%w: scheme of %q is not supported; want https://, or http:// to a loopback host", ErrTransportRefused, target)
+	case net.ParseIP(u.Hostname()).IsLoopback() || u.Hostname() == "localhost" || allowPlaintext:
+		return nil
+	}
+	return fmt.Errorf("%w: %s would expose session transcripts and the bearer token to anyone on the network path; "+
+		"use an https:// URL (TLS terminated in front of the receiver, see the README) or set %q to true in config.json to accept that exposure",
+		ErrTransportRefused, target, allowPlaintextKey)
+}
+
+// ReceiverAddr reads receiver_addr from config.json. A missing file is the
+// normal state of a server with no tuning and yields "", as does an absent
+// field. The port must be fixed and numeric: install polls /healthz on it.
+func ReceiverAddr() (string, error) {
+	path := config.Path()
+	c, err := readConfig(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if c.ReceiverAddr == "" {
+		return "", nil
+	}
+	_, port, splitErr := net.SplitHostPort(c.ReceiverAddr)
+	if n, err := strconv.ParseUint(port, 10, 16); splitErr != nil || err != nil || n == 0 {
+		return "", fmt.Errorf("%s: receiver_addr must be host:port with a numeric port, got %q", path, c.ReceiverAddr)
+	}
+	return c.ReceiverAddr, nil
 }
 
 // SummarizerInterval reads the summarizer cadence from config.json. A

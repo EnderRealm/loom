@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,7 +31,8 @@ var statusCmd = &cobra.Command{
 		// Both cadences live in config.json; the summarizer's is read at
 		// daemon start, so a missing file yields its default.
 		shipperInterval := ""
-		if cfg, err := shipper.LoadConfig(); err == nil {
+		cfg, cfgErr := shipper.LoadConfig()
+		if cfgErr == nil {
 			shipperInterval = fmt.Sprintf("%s (capture+ship ticker)", cfg.Interval())
 		}
 		summarizerInterval, err := shipper.SummarizerInterval()
@@ -131,6 +133,11 @@ var statusCmd = &cobra.Command{
 			fmt.Println("  config.json: present")
 		} else {
 			fmt.Println("  config.json: missing")
+		}
+		// Only a transport refusal: LoadConfig's other failures include a
+		// server role's normal states, no config.json and no server_url.
+		if errors.Is(cfgErr, shipper.ErrTransportRefused) {
+			fmt.Printf("  *** SHIPPING REFUSED: %v\n", cfgErr)
 		}
 		return nil
 	},

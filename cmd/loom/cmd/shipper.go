@@ -42,6 +42,9 @@ var shipperReconcileCmd = &cobra.Command{
 var shipperDaemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Run the shipper as a long-lived daemon",
+	// launchd respawns a refused config every ThrottleInterval, so the log
+	// should carry the reason alone.
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()

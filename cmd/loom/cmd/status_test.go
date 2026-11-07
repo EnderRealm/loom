@@ -3,8 +3,10 @@ package cmd
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,5 +79,68 @@ func TestPrintScopeReportNamesCollidingScopes(t *testing.T) {
 		"  unresolved: 1 sessions (no .loom-project marker naming a scope this store has, and no usable git remote)\n\n"
 	if out.String() != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
+	}
+}
+
+// runStatus drives the real command against a temporary HOME, so no plist of
+// the host's is read, and returns what it printed to stdout.
+func runStatus(t *testing.T) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+	out := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		out <- string(b)
+	}()
+	statusCmd.SetOut(w)
+	defer statusCmd.SetOut(nil)
+	runErr := statusCmd.RunE(statusCmd, nil)
+	w.Close()
+	os.Stdout = orig
+	if runErr != nil {
+		t.Fatalf("status: %v", runErr)
+	}
+	return <-out
+}
+
+// A daemon stopped by a refused server_url looks like any quiet shipper
+// unless status says why, and it says so even with no shipper plist.
+func TestStatusSurfacesARefusedServerURL(t *testing.T) {
+	writeLoomConfig(t, `{"server_url":"http://loom.example:8765"}`)
+	out := runStatus(t)
+	for _, want := range []string{"SHIPPING REFUSED", "loom.example:8765", "allow_plaintext_transcripts_and_token"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// A server role with no config.json, or one holding only server-side
+// fields, is healthy, and so are the transports the shipper accepts.
+func TestStatusQuietWithoutARefusal(t *testing.T) {
+	t.Run("no config", func(t *testing.T) {
+		t.Setenv("LOOM_HOME", t.TempDir())
+		if out := runStatus(t); strings.Contains(out, "REFUSED") {
+			t.Fatalf("status:\n%s", out)
+		}
+	})
+	for name, body := range map[string]string{
+		"no server_url": `{"receiver_addr":"127.0.0.1:8765"}`,
+		"https":         `{"server_url":"https://loom.example"}`,
+		"loopback":      `{"server_url":"http://127.0.0.1:8765"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeLoomConfig(t, body)
+			if out := runStatus(t); strings.Contains(out, "REFUSED") {
+				t.Fatalf("status:\n%s", out)
+			}
+		})
 	}
 }

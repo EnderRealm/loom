@@ -29,7 +29,7 @@ var receiverCmd = &cobra.Command{
 
 func init() {
 	f := receiverCmd.Flags()
-	f.String("addr", ":8765", "listen address")
+	f.String("addr", receiver.DefaultAddr, "listen address")
 	f.String("storage", "", "storage directory (default $LOOM_HOME/received)")
 	f.String("auth-token", "", "shared bearer token (env: LOOM_RECEIVER_TOKEN)")
 	rootCmd.AddCommand(receiverCmd)

@@ -2,13 +2,20 @@ package cmd
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"loom/internal/config"
 	"loom/internal/launchd"
 	"loom/internal/updater"
+	"loom/transport/receiver"
 	"loom/transport/shipper"
 )
 
@@ -63,7 +70,7 @@ func TestResolveReceiverTokenNonInteractiveErrors(t *testing.T) {
 func TestReceiverSpecOmitsToken(t *testing.T) {
 	t.Setenv("LOOM_HOME", t.TempDir())
 
-	spec := receiverSpec("/Users/me/.local/bin/loom", "/tmp/receiver.log")
+	spec := receiverSpec("/Users/me/.local/bin/loom", "/tmp/receiver.log", "")
 	if _, ok := spec.Env["LOOM_RECEIVER_TOKEN"]; ok {
 		t.Fatal("receiver Spec env contains LOOM_RECEIVER_TOKEN")
 	}
@@ -149,5 +156,146 @@ func TestInstallUpdaterSucceedsWhenRunning(t *testing.T) {
 	}
 	if got := strings.Join(*calls, ","); got != "install,await" {
 		t.Fatalf("calls = %s, want install then await", got)
+	}
+}
+
+func writeLoomConfig(t *testing.T, body string) {
+	t.Helper()
+	t.Setenv("LOOM_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(config.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.Path(), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func stubStop(t *testing.T) *[]string {
+	t.Helper()
+	stopped := new([]string)
+	orig := stopAgent
+	stopAgent = func(label string) error {
+		*stopped = append(*stopped, label)
+		return nil
+	}
+	t.Cleanup(func() { stopAgent = orig })
+	return stopped
+}
+
+// The updater's re-bootstrap arrives here with a shipper still running the
+// pre-update image, which has no transport check. A refused server_url has
+// to stop that process, not merely decline to replace it.
+func TestInstallShipperRefusalStopsTheRunningShipper(t *testing.T) {
+	writeLoomConfig(t, `{"server_url":"http://loom.example:8765"}`)
+	calls, _, _ := stubInstall(t, nil)
+	stopped := stubStop(t)
+
+	err := installShipper()
+	if !errors.Is(err, shipper.ErrTransportRefused) {
+		t.Fatalf("installShipper err = %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("calls = %v, want no install", *calls)
+	}
+	if !reflect.DeepEqual(*stopped, []string{shipper.AgentLabel}) {
+		t.Fatalf("stopped = %v, want %s", *stopped, shipper.AgentLabel)
+	}
+}
+
+// Any other config failure keeps its old meaning: nothing changed about
+// where the running daemon sends, so it is left alone.
+func TestInstallShipperOtherConfigErrorLeavesTheShipperRunning(t *testing.T) {
+	t.Setenv("LOOM_HOME", t.TempDir())
+	stubInstall(t, nil)
+	stopped := stubStop(t)
+
+	if err := installShipper(); err == nil {
+		t.Fatal("installShipper with no config = nil, want error")
+	}
+	if len(*stopped) != 0 {
+		t.Fatalf("stopped = %v, want none", *stopped)
+	}
+}
+
+func TestInstallShipperAcceptsHTTPS(t *testing.T) {
+	writeLoomConfig(t, `{"server_url":"https://loom.example"}`)
+	calls, installed, _ := stubInstall(t, nil)
+	stopped := stubStop(t)
+
+	if err := installShipper(); err != nil {
+		t.Fatalf("installShipper: %v", err)
+	}
+	if got := strings.Join(*calls, ","); got != "install,await" || installed.Label != shipper.AgentLabel {
+		t.Fatalf("calls = %s, label = %s", got, installed.Label)
+	}
+	if len(*stopped) != 0 {
+		t.Fatalf("stopped = %v, want none", *stopped)
+	}
+}
+
+// installReceiver is what `loom install receiver` runs, and so what the
+// updater's re-bootstrap runs: the bind comes from config.json, not from
+// anything the installing process carries, so it survives an update.
+func TestInstallReceiverUsesConfiguredAddr(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			hits.Add(1)
+		}
+	}))
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	writeLoomConfig(t, `{"receiver_addr":"`+addr+`"}`)
+	t.Setenv("LOOM_RECEIVER_TOKEN", "tok")
+	_, installed, _ := stubInstall(t, nil)
+
+	if err := installReceiver(); err != nil {
+		t.Fatalf("installReceiver: %v", err)
+	}
+	if want := []string{"receiver", "--addr", addr}; !reflect.DeepEqual(installed.Args, want) {
+		t.Fatalf("args = %v, want %v", installed.Args, want)
+	}
+	if !strings.Contains(installed.PlistXML(), "<string>"+addr+"</string>") {
+		t.Fatalf("plist lacks the address:\n%s", installed.PlistXML())
+	}
+	if hits.Load() == 0 {
+		t.Fatal("install never polled /healthz on the configured address")
+	}
+}
+
+// No receiver_addr keeps today's plist exactly; a malformed one fails the
+// install before launchd is touched, leaving any running receiver in place.
+func TestInstallReceiverDefaultAndInvalidAddr(t *testing.T) {
+	writeLoomConfig(t, `{}`)
+	if got := receiverSpec("/bin/loom", "/tmp/r.log", "").Args; !reflect.DeepEqual(got, []string{"receiver"}) {
+		t.Fatalf("default args = %v", got)
+	}
+
+	writeLoomConfig(t, `{"receiver_addr":"8765"}`)
+	t.Setenv("LOOM_RECEIVER_TOKEN", "tok")
+	calls, _, _ := stubInstall(t, nil)
+	if err := installReceiver(); err == nil || !strings.Contains(err.Error(), "receiver_addr") {
+		t.Fatalf("installReceiver err = %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("calls = %v, want no install", *calls)
+	}
+}
+
+func TestReceiverHealthzURL(t *testing.T) {
+	cases := map[string]string{
+		"":                   "http://127.0.0.1:8765/healthz",
+		receiver.DefaultAddr: "http://127.0.0.1:8765/healthz",
+		":9000":              "http://127.0.0.1:9000/healthz",
+		"0.0.0.0:9000":       "http://127.0.0.1:9000/healthz",
+		"[::]:9000":          "http://127.0.0.1:9000/healthz",
+		"127.0.0.1:9000":     "http://127.0.0.1:9000/healthz",
+		"[::1]:9000":         "http://[::1]:9000/healthz",
+		"100.64.0.1:8765":    "http://100.64.0.1:8765/healthz",
+	}
+	for addr, want := range cases {
+		if got := receiverHealthzURL(addr); got != want {
+			t.Errorf("receiverHealthzURL(%q) = %q, want %q", addr, got, want)
+		}
 	}
 }

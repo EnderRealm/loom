@@ -49,6 +49,7 @@ const (
 	class4xx    errClass = "4xx"    // client error — NOT retryable
 	classResync errClass = "resync" // 409 — handled by cursor correction
 	classIO     errClass = "io"     // local file/cursor error
+	classPolicy errClass = "policy" // redirect to a refused transport — NOT retryable
 )
 
 type httpError struct {
@@ -63,6 +64,11 @@ func (e *httpError) Error() string {
 func classify(err error) errClass {
 	if err == nil {
 		return classNone
+	}
+	// Ahead of the net.Error check: the *url.Error around a CheckRedirect
+	// refusal satisfies net.Error, and retrying cannot change the answer.
+	if errors.Is(err, ErrTransportRefused) {
+		return classPolicy
 	}
 	var re *wire.ResyncError
 	if errors.As(err, &re) {
@@ -121,7 +127,7 @@ func (t tickCounts) classBreakdown() string {
 		return ""
 	}
 	parts := []string{}
-	for _, c := range []errClass{classNet, class5xx, class4xx, classIO} {
+	for _, c := range []errClass{classNet, class5xx, class4xx, classIO, classPolicy} {
 		if n := t.byClass[c]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%s=%d", c, n))
 		}
@@ -149,6 +155,9 @@ func Once() {
 	if err != nil {
 		log.Printf("fail stage=config err=%q", err)
 		return
+	}
+	if cfg.AllowPlaintextTranscriptsAndToken {
+		log.Printf("warn stage=config %s is set: transcripts and the bearer token may cross the network unencrypted", allowPlaintextKey)
 	}
 
 	if err := cursor.Migrate(); err != nil {
@@ -529,8 +538,7 @@ func postIngest(cfg *Config, req wire.IngestRequest) (int64, error) {
 	if cfg.AuthToken != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := cfg.httpClient(30 * time.Second).Do(httpReq)
 	if err != nil {
 		return 0, err
 	}
@@ -559,8 +567,7 @@ func postIngest(cfg *Config, req wire.IngestRequest) (int64, error) {
 
 func healthCheck(cfg *Config) error {
 	url := strings.TrimRight(cfg.ServerURL, "/") + "/healthz"
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := cfg.httpClient(2 * time.Second).Get(url)
 	if err != nil {
 		return err
 	}
@@ -570,6 +577,23 @@ func healthCheck(cfg *Config) error {
 		return &httpError{status: resp.StatusCode, body: strings.TrimSpace(string(b))}
 	}
 	return nil
+}
+
+// httpClient holds every redirect hop to the transport rule server_url
+// passed: a same-host redirect keeps the Authorization header, and a 307 or
+// 308 re-sends the body, so https redirected to http would otherwise leak
+// both. A CheckRedirect replaces the default policy, so it carries the
+// default's hop limit too.
+func (c *Config) httpClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return checkTransport(req.URL, c.AllowPlaintextTranscriptsAndToken)
+		},
+	}
 }
 
 // ---------- notifier helpers ----------
@@ -617,7 +641,7 @@ func classSummary(byClass map[errClass]int) string {
 		return "unknown"
 	}
 	parts := []string{}
-	for _, c := range []errClass{classNet, class5xx, class4xx, classIO} {
+	for _, c := range []errClass{classNet, class5xx, class4xx, classIO, classPolicy} {
 		if n := byClass[c]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%s=%d", c, n))
 		}

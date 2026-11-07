@@ -246,7 +246,7 @@ jq -c 'select(.class == "unattributable") | {ticket, reason}' ~/.loom/escapes.js
 
 # Transport
 
-A lightweight agent-session shipper. The client (`loom shipper daemon`) walks agent session files, ships byte-delta batches to the server (`loom receiver`) over HTTP, and persists per-session cursors so subsequent runs are incremental and idempotent. The shipper runs as a long-lived KeepAlive daemon with an in-process ticker (driven by `interval_minutes` in config); it does not rely on launchd's `StartInterval`, which dasd coalesces aggressively on modern macOS.
+A lightweight agent-session shipper. The client (`loom shipper daemon`) walks agent session files, ships byte-delta batches to the server (`loom receiver`) over HTTPS (see [Terminate TLS](#3-terminate-tls-in-front-of-the-receiver)), and persists per-session cursors so subsequent runs are incremental and idempotent. The shipper runs as a long-lived KeepAlive daemon with an in-process ticker (driven by `interval_minutes` in config); it does not rely on launchd's `StartInterval`, which dasd coalesces aggressively on modern macOS.
 
 **Agents supported:** Cursor CLI (the received `cursor-store-v1` journals, with children as separate sessions), Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`, plus the transcripts of the subagents that session dispatched, anywhere under `~/.claude/projects/<sanitized-cwd>/<uuid>/subagents/` — directly in it for a plain dispatch, one level deeper under `workflows/<wf_id>/` for a workflow one, whose `journal.jsonl` is the workflow's own bookkeeping and is not a transcript) and Codex CLI (rollouts at `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<uuid>.jsonl`).
 
@@ -328,11 +328,55 @@ This:
 3. Writes `~/Library/LaunchAgents/com.loom.receiver.plist` with `KeepAlive=true` (restarts on exit), `RunAtLoad=true` (starts immediately), and `LOOM_HOME` baked into `EnvironmentVariables`. The token is read from `~/.loom/receiver-token` at runtime, not the plist, so it's not exposed via the plist or `launchctl print`
 4. Validates the plist with `plutil -lint`
 5. Boots out any prior instance, bootstraps the new one, and waits for launchd to run a process for it — `kickstart`ing once if none appears, and failing the install by label if none comes up
-6. Polls `http://127.0.0.1:8765/healthz` for up to 10s to confirm it came up
+6. Polls `/healthz` on the receiver's local bind (`http://127.0.0.1:8765/healthz` by default) for up to 10s to confirm it came up
 
 The plist runs the loom binary at the absolute path of whichever `loom` was on `$PATH` at install time. Rebuild to the same path and the next respawn picks up new code.
 
-For a remote server, replace `127.0.0.1` with its reachable address when verifying from elsewhere; also open port 8765 or set up a tunnel as needed.
+### 3. Terminate TLS in front of the receiver
+
+The receiver serves plain HTTP and does not terminate TLS itself. Shippers carry verbatim transcripts and the bearer token, and they refuse a non-loopback `server_url` that is not `https://`, so a server reached from another machine runs a TLS terminator in front of a receiver bound to loopback. Do not open port 8765.
+
+Bind the receiver to loopback in the server's `$LOOM_HOME/config.json`, then reinstall it. Without this it listens on `:8765`, all interfaces, leaving the plaintext port reachable beside the terminator:
+
+```json
+{
+  "receiver_addr": "127.0.0.1:8765"
+}
+```
+
+```sh
+loom install receiver
+```
+
+`receiver_addr` becomes the plist's `--addr`, so the updater's re-bootstrap keeps it. It needs a fixed numeric port.
+
+Then point a terminator at it. Either of these works:
+
+```sh
+# Tailscale: HTTPS on the tailnet, with a certificate Tailscale provisions.
+# server_url = https://<machine>.<tailnet>.ts.net
+tailscale serve --bg --https=443 127.0.0.1:8765
+```
+
+```
+# Caddy: a public name, certificate managed by Caddy.
+# server_url = https://loom.example.com
+loom.example.com {
+	reverse_proxy 127.0.0.1:8765
+}
+```
+
+Any terminator will do if it meets these requirements:
+
+- It forwards `/healthz` and `/v1/ingest` to the receiver with the `Authorization` header and POST body intact, and allows large request bodies: one POST carries a session's whole unshipped delta, which on first ship is the full transcript. Some proxies cap bodies by default (nginx at 1 MB).
+- It answers on the `https://` URL directly. The shipper holds every redirect to the same rule as `server_url`, so a redirect to `http://` is refused rather than followed.
+- Its certificate chains to a CA the shipping machine's system trust store accepts. The shipper verifies it and has no option to skip that. A private CA, such as Caddy's `tls internal`, has to be trusted on each shipping machine first.
+
+Health checks stay on their own side of the terminator:
+
+- `loom install receiver` polls the receiver's local bind over plain HTTP, which works whether or not a terminator is running. A wildcard bind is polled on `127.0.0.1`.
+- The shipper's per-tick health check is `GET <server_url>/healthz` over HTTPS, through the terminator, and it gates shipping.
+- `loom status` sends no request of its own: its sync health reports the result the shipper last recorded. From a shipping machine, `curl https://<server>/healthz` checks the whole path, certificate included.
 
 ### Receiver flags (for manual runs)
 
@@ -361,7 +405,7 @@ Each machine you want to ship sessions from runs its own loom shipper daemon + c
 
 ```json
 {
-  "server_url": "http://your-server:8765",
+  "server_url": "https://your-server",
   "auth_token": "the-same-token-as-the-server",
   "interval_minutes": 10
 }
@@ -369,13 +413,28 @@ Each machine you want to ship sessions from runs its own loom shipper daemon + c
 
 | Field                         | Required | Default | Notes                                                                                                   |
 | ----------------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------- |
-| `server_url`                  | yes      | —       | Base URL of the receiver; no trailing `/v1/ingest`                                                      |
+| `server_url`                  | yes      | —       | Base URL of the receiver; no trailing `/v1/ingest`. Must be `https://`, or `http://` to a loopback host (see below) |
 | `auth_token`                  | no       | empty   | Bearer token; must match the server                                                                     |
 | `interval_minutes`            | no       | `10`    | In-process ticker cadence inside `loom shipper daemon`                                                  |
 | `interval_seconds`            | no       | unset   | Same cadence in seconds; when set it takes precedence over `interval_minutes`. Must be positive.        |
 | `summarizer_interval_seconds` | no       | `30`    | Watch-mode sweep cadence baked into the summarizer plist by `loom install summarizer`. Must be positive. |
+| `allow_plaintext_transcripts_and_token` | no | `false` | Lets the shipper use `http://` to a non-loopback host, exposing transcripts and the token to the network path. See below. |
+| `receiver_addr`               | no       | unset   | Server role: the receiver's listen address, as `host:port`, baked into its plist by `loom install receiver`. Unset keeps `:8765`. |
 
-The seconds fields are the only ones the server role reads: a server has no `server_url`, and `loom install summarizer` reads `summarizer_interval_seconds` from `$LOOM_HOME/config.json` when the file exists, falling back to `30` when it does not. A zero or negative value in either seconds field is rejected rather than defaulted.
+The seconds fields and `receiver_addr` are the only ones the server role reads: a server has no `server_url`, and `loom install summarizer` reads `summarizer_interval_seconds` from `$LOOM_HOME/config.json` when the file exists, falling back to `30` when it does not. A zero or negative value in either seconds field is rejected rather than defaulted.
+
+The shipper sends verbatim transcripts and the bearer token, and bearer auth provides no confidentiality, so it requires a confidential transport and refuses anything else:
+
+| `server_url`                                              | Result                                                                   |
+| --------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `https://…`                                               | Accepted; the server's certificate is verified                           |
+| `http://` to `localhost`, `127.0.0.0/8` or `[::1]`        | Accepted; nothing leaves the machine                                     |
+| `http://` to anything else                                | Refused, unless `allow_plaintext_transcripts_and_token` is `true`        |
+| Any other scheme, no host, or not a URL                   | Refused; the opt-out does not cover these                                |
+
+Redirects are held to the same table, hop by hop. A refusal fails `loom install shipper`, stops any tick with the reason in `~/.loom/transport/shipper.log`, and is printed by `loom status`.
+
+`allow_plaintext_transcripts_and_token` is for a path you have already secured some other way, such as an encrypted tunnel, or a network you trust end to end. Every shipper tick logs a warning while it is set.
 
 Permissions: `chmod 600 ~/.loom/config.json` — it contains the bearer token.
 
@@ -473,6 +532,9 @@ The updater will reinstate the latest release on its next tick, so use this only
 
 Re-run `loom install <component>` when any of these change:
 
+- **`receiver_addr`** in config — baked into the receiver plist as `--addr` at install time; reinstall the receiver after editing
+- **`server_url`** after a transport refusal — a refused `loom install shipper` stops the running shipper, so reinstall it once the config is fixed
+
 - **Binary path** — you moved the loom binary off the absolute path the plist pinned
 - **`interval_minutes` / `interval_seconds`** in config — only take effect at daemon startup; reinstall (or kickstart -k) the shipper after editing
 - **`summarizer_interval_seconds`** in config — baked into the summarizer plist as `--interval` at install time; reinstall the summarizer after editing
@@ -480,6 +542,10 @@ Re-run `loom install <component>` when any of these change:
 - **`LOOM_RECEIVER_TOKEN`** — persisted to `~/.loom/receiver-token` at install time; re-export and reinstall (or edit the file) to rotate
 
 `loom install` boots out any prior instance with the same label before bootstrapping the new plist, so reinstall is always safe.
+
+### Upgrading a shipper that uses `http://`
+
+Releases before the transport check accepted any `server_url`. When the updater reaches a machine whose `server_url` is now refused, it stops that shipper instead of leaving it on the old binary sending plaintext; `loom status` then says `SHIPPING REFUSED`, and at the next login launchd respawns the shipper, which exits with the same reason every 10 seconds. Nothing is captured or shipped until the config is fixed. Moving the server behind TLS first (see [Terminate TLS](#3-terminate-tls-in-front-of-the-receiver)) and changing `server_url`, or setting `allow_plaintext_transcripts_and_token`, avoids the gap. Then run `loom install shipper`.
 
 ### Wire protocol changes
 
@@ -533,7 +599,13 @@ First stop for any issue: `loom status`. It reports which agents are loaded, whe
 
 **Shipper logs `shipped=0 skipped=60 failed=0`** — nothing to ship. All cursors are at EOF for every session. This is the steady state.
 
-**Shipper logs `shipped=0 skipped=0 failed=60`** — everything failed. Check `server_url` (is it reachable? `curl <url>/healthz`), check auth, and check the receiver's log at `~/.loom/receiver.log`.
+**`server_url: transport refused`** (from `loom install shipper`, `loom status`, or `shipper.log`) — `server_url` is not a confidential transport. Point it at the HTTPS terminator (see "Server setup" step 3), or set `allow_plaintext_transcripts_and_token` if you accept the exposure, then run `loom install shipper`.
+
+**Shipper logs `class=policy`** — the receiver's URL redirected to one the shipper refuses, usually a terminator or proxy sending `https://` to `http://`. Fix the redirect, or point `server_url` at where it ends up.
+
+**Shipper logs `x509:` or `certificate` errors** — the terminator's certificate doesn't chain to a CA this machine trusts, or doesn't match the `server_url` host. `curl https://<server>/healthz` shows the same failure.
+
+**Shipper logs `shipped=0 skipped=0 failed=60`** — everything failed. Check `server_url` (is it reachable over its own scheme? `curl <server_url>/healthz` goes through the terminator; on the server, `curl http://127.0.0.1:8765/healthz` skips it and tells you which side is down), check auth, and check the receiver's log at `~/.loom/receiver.log`.
 
 **`another shipper is running, skipping`** — the flock is held. Usually means the daemon is running and you tried `loom shipper once` against it. That's expected; the daemon already covers the workload.
 

@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,11 +92,12 @@ func loomHomeForPlist() string {
 	return os.Getenv("LOOM_HOME")
 }
 
-// installSpec and awaitRunning are package vars so tests can drive
-// installAgent without touching launchd on the host.
+// installSpec, awaitRunning and stopAgent are package vars so tests can drive
+// the install paths without touching launchd on the host.
 var (
 	installSpec  = launchd.Install
 	awaitRunning = updater.AwaitRunning
+	stopAgent    = launchd.Stop
 )
 
 // installAgent writes and bootstraps spec, then holds launchd to actually
@@ -117,6 +120,14 @@ func installAgent(spec launchd.Spec) error {
 func installShipper() error {
 	cfg, err := shipper.LoadConfig()
 	if err != nil {
+		// The updater re-bootstraps through here. Failing without stopping
+		// the job would leave a daemon on the pre-update image, which has no
+		// transport check, shipping in the clear until its next restart.
+		if errors.Is(err, shipper.ErrTransportRefused) {
+			if stopErr := stopAgent(shipper.AgentLabel); stopErr != nil {
+				return fmt.Errorf("%w; stopping the running shipper failed: %v", err, stopErr)
+			}
+		}
 		return err
 	}
 	bin, err := loomBinary()
@@ -199,12 +210,17 @@ func resolveReceiverToken() (string, error) {
 
 // receiverSpec builds the receiver's launchd Spec. The token is read from
 // ~/.loom/receiver-token at runtime, not the plist, so it isn't exposed via
-// the plist file or `launchctl print`.
-func receiverSpec(bin, logPath string) launchd.Spec {
+// the plist file or `launchctl print`. An empty addr leaves the receiver on
+// its default bind.
+func receiverSpec(bin, logPath, addr string) launchd.Spec {
+	args := []string{"receiver"}
+	if addr != "" {
+		args = append(args, "--addr", addr)
+	}
 	return launchd.Spec{
 		Label:     receiver.AgentLabel,
 		Program:   bin,
-		Args:      []string{"receiver"},
+		Args:      args,
 		LogPath:   logPath,
 		Env:       map[string]string{"LOOM_HOME": config.Home()},
 		KeepAlive: true,
@@ -212,8 +228,26 @@ func receiverSpec(bin, logPath string) launchd.Spec {
 	}
 }
 
+// receiverHealthzURL is where install polls a receiver bound to addr. It is
+// plain HTTP on purpose: this is the local side of any TLS terminator. A
+// wildcard bind is reached on loopback; addr has passed shipper.ReceiverAddr.
+func receiverHealthzURL(addr string) string {
+	if addr == "" {
+		addr = receiver.DefaultAddr
+	}
+	host, port, _ := net.SplitHostPort(addr)
+	if host == "" || net.ParseIP(host).IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz"
+}
+
 func installReceiver() error {
 	if _, err := resolveReceiverToken(); err != nil {
+		return err
+	}
+	addr, err := shipper.ReceiverAddr()
+	if err != nil {
 		return err
 	}
 	bin, err := loomBinary()
@@ -225,12 +259,12 @@ func installReceiver() error {
 	}
 	logPath := filepath.Join(config.Home(), "receiver.log")
 
-	spec := receiverSpec(bin, logPath)
+	spec := receiverSpec(bin, logPath, addr)
 	if err := installAgent(spec); err != nil {
 		return err
 	}
 
-	if waitForHealthz("http://127.0.0.1:8765/healthz", 10*time.Second) {
+	if waitForHealthz(receiverHealthzURL(addr), 10*time.Second) {
 		fmt.Printf("installed receiver:\n")
 		fmt.Printf("  label:    %s\n", spec.Label)
 		fmt.Printf("  binary:   %s\n", bin)
