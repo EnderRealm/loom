@@ -284,6 +284,9 @@ just read that output and is the only other check on it. Control characters are
 spelled out, each command and stream is bounded, and every recorded line carries a
 `| ` gutter inside its fence, so command output cannot become a heading, a fence or
 a `---` to the readers of the file: apart from `status`, the record parses as it did.
+The record stays in the store: `load_reference_truths_from()` keeps only a truth
+whose status is `validated`, so a demoted one is not sent to a provider as a few-shot
+example.
 
 ## Enforcement points
 

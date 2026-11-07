@@ -37,6 +37,12 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   `identity=cwd="…"` and `identity=remote="…"`, because a hosted agent chooses
   both and a newline in either would forge a log record.
 
+### Fixed
+
+- `extract.py` takes as reference examples and scoring refs only a truth or
+  decision whose status is `validated`, so a truth `sweep.py` demoted no longer
+  reaches the extractor's prompt with its record.
+
 ## [1.12.0] — 2026-10-27 — Project liveness, ticket-bound candidates and universal truths
 
 ### Upgrade

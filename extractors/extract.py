@@ -137,9 +137,17 @@ def load_reference_truths_from(scope_dir: Path, label: str = "reference examples
         # remember — the few-shot block goes to a provider.
         # See docs/transcript-trust-and-redaction.md.
         text, found, n = redact_with_report(path.read_text())
+        truth = parse_truth(text, source=str(path))
+        # A deprecated truth is one a human judged false, with the command output
+        # of its demotion recorded on it: not an example to imitate, and not text
+        # for a provider. A file with no status is left out too, though the Go
+        # loader reads it as validated by location: only a stated status counts
+        # toward what leaves the store.
+        if truth.get("status") != "validated":
+            continue
         counts.update(found)
         chars += n
-        truths.append(parse_truth(text, source=str(path)))
+        truths.append(truth)
     log_redaction(label, counts, chars)
     return truths
 
