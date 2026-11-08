@@ -6,8 +6,32 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-11-08 — Full tool output, confidential transport and knowledge dupes
+
+### Upgrade
+
+- The shipper refuses a `server_url` that is not `https`, unless it is
+  `http` to loopback or `allow_plaintext_transcripts_and_token` is set. A
+  machine shipping to a remote `http://` receiver stops shipping after the
+  updater installs this release and `loom status` reports the refusal: move
+  the receiver behind a TLS terminator, or opt in explicitly.
+- No schema version change; `summaries.db` stays at schema 12.
+
 ### Added
 
+- `loom tool-output --since <t> --until <t> --match <regex> [--command
+  <substr>] [--json]` returns every tool call in the received transcripts of
+  all three agents whose full output matches, beyond the 800-character
+  `result_summary` the database keeps, with agent, session, ticket when known,
+  start time and key arg. It is read-only: `summaries.db` is opened immutable,
+  so a run not yet checkpointed out of the WAL reports a null ticket. An
+  unreadable input is one `{path,error}` JSON line on stderr and exit 1.
+- `loom knowledge dupes` clusters truth candidates that state the same fact:
+  same-id clusters without a model call, the rest blocked by keyword Jaccard
+  and partitioned by a claude judge (`--no-judge` prints blocking only).
+- `loom ui` remembers the dashboard sort column across launches.
+- `make test-extractors` and `make test-extractors-yaml` run the extractor
+  test suites, so a `verify:` line can name them through `make`.
 - The shipper reads hosted agents' Claude transcripts from
   `$LOOM_HOME/spool/claude/projects/`, which the worker fills from
   `weftagentN`'s home, and ships them under `claude-code`. The listing skips
@@ -36,8 +60,19 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 - The receiver's `ingest` log line quotes the value of its identity tag,
   `identity=cwd="…"` and `identity=remote="…"`, because a hosted agent chooses
   both and a newline in either would forge a log record.
+- The project detail view no longer offers the `tk ui` launcher.
 
 ### Fixed
+
+- `project_path` and the registry check honor `TK_STORE_ROOT`, refusing a
+  relative or empty override rather than falling back to the real store.
+- `knowledge.Load` sorts candidate, validated, then any other status, so a
+  demoted truth no longer pins older validated rows behind it.
+- `loom status` counts the sessions a listing returned alongside its error.
+- The spool listing checks a directory's name whole, so `x..jsonl` no longer
+  fails at the receiver on every tick.
+- The summarizer stops re-folding two source files that resolve to one
+  session row on every sweep.
 
 - `extract.py` takes as reference examples and scoring refs only a truth or
   decision whose status is `validated`, so a truth `sweep.py` demoted no longer
