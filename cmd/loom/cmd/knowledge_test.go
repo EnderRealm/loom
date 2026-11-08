@@ -3,11 +3,17 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // seedStore points the knowledge store at a fresh git repo with one commit, as
@@ -445,4 +451,507 @@ func TestKnowledgeConflictsListsContradictions(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
 	}
+}
+
+// TestFakeJudgeProcess is the judge fakeJudge's wrapper script re-executes in
+// place of claude. It records the cluster each call was asked about, one line
+// per call, and partitions it: the ids LOOM_TEST_JUDGE_SAME names form one
+// group, every other id a group of its own. A cluster holding the id in
+// LOOM_TEST_JUDGE_BREAK gets a reply that is no partition, and one holding
+// LOOM_TEST_JUDGE_FAIL a CLI that exits non-zero.
+func TestFakeJudgeProcess(t *testing.T) {
+	if os.Getenv("LOOM_TEST_JUDGE") != "1" {
+		return
+	}
+	prompt, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, _ := strings.Cut(string(prompt), "<candidates>\n")
+	body, _, _ := strings.Cut(rest, "\n</candidates>")
+	var members []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(body), &members); err != nil {
+		t.Fatalf("prompt carries no candidate list: %v", err)
+	}
+	var ids []string
+	for _, m := range members {
+		ids = append(ids, m.ID)
+	}
+	f, err := os.OpenFile(os.Getenv("LOOM_TEST_JUDGE_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, strings.Join(ids, ","))
+	f.Close()
+
+	if slices.Contains(ids, os.Getenv("LOOM_TEST_JUDGE_FAIL")) {
+		fmt.Fprintln(os.Stderr, "fake judge: model unavailable")
+		os.Exit(3)
+	}
+	type group struct {
+		IDs    []string `json:"ids"`
+		Reason string   `json:"reason"`
+	}
+	var groups []group
+	if !slices.Contains(ids, os.Getenv("LOOM_TEST_JUDGE_BREAK")) {
+		same := strings.Split(os.Getenv("LOOM_TEST_JUDGE_SAME"), ",")
+		var together []string
+		for _, id := range ids {
+			if slices.Contains(same, id) {
+				together = append(together, id)
+				continue
+			}
+			groups = append(groups, group{IDs: []string{id}, Reason: "fake: distinct claim"})
+		}
+		if len(together) > 0 {
+			groups = append(groups, group{IDs: together, Reason: "fake: one truth"})
+		}
+	}
+	out, _ := json.Marshal(map[string]any{"groups": groups})
+	fmt.Println("Partition follows.\n" + string(out))
+	os.Exit(0)
+}
+
+// fakeJudge points the dupes judge at a script re-executing this test binary
+// as TestFakeJudgeProcess, partitioning by the ids in same, and returns the
+// path of the log its calls are recorded in.
+func fakeJudge(t *testing.T, same ...string) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\nLOOM_TEST_JUDGE=1 exec '" + strings.ReplaceAll(exe, "'", `'\''`) + "' -test.run='^TestFakeJudgeProcess$'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "calls.log")
+	t.Setenv("LOOM_DUPES_JUDGE_BIN", script)
+	t.Setenv("LOOM_TEST_JUDGE_LOG", log)
+	t.Setenv("LOOM_TEST_JUDGE_SAME", strings.Join(same, ","))
+	t.Setenv("LOOM_TEST_JUDGE_BREAK", "")
+	t.Setenv("LOOM_TEST_JUDGE_FAIL", "")
+	return log
+}
+
+// judgeCalls reads the fake judge's log: one entry per call, the cluster's ids.
+func judgeCalls(t *testing.T, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+// writeTruthCandidate files one truth candidate the way extract.py shapes it.
+func writeTruthCandidate(t *testing.T, root, scope, file, id, title, claim, session string) string {
+	t.Helper()
+	rel := filepath.Join("_candidates", "truths", scope, file)
+	body := "---\nid: " + id + "\ntitle: " + title + "\nscope: " + scope + "\ntype: truth\nstatus: candidate\n" +
+		"sources:\n  - session: " + session + "\n    project: " + scope + "\n    date: 2026-08-15\n---\n\n## Claim\n\n" + claim + "\n"
+	p := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return rel
+}
+
+func runDupes(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := newKnowledgeCmd()
+	cmd.SetArgs(append([]string{"dupes"}, args...))
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	err := cmd.Execute()
+	return out.String(), errOut.String(), err
+}
+
+// reportedGroup is one partition group of a judged cluster as the report prints
+// it.
+type reportedGroup struct {
+	cluster int
+	same    bool
+	ids     []string
+}
+
+// parseJudgedGroups reads the judged clusters' groups back off the report.
+func parseJudgedGroups(t *testing.T, report string) []reportedGroup {
+	t.Helper()
+	var out []reportedGroup
+	cluster, inJudged := 0, false
+	for _, line := range strings.Split(report, "\n") {
+		switch {
+		case strings.HasPrefix(line, "judged cluster "):
+			cluster++
+			inJudged = true
+		case strings.HasPrefix(line, "same-id cluster "), strings.HasPrefix(line, "blocked cluster "):
+			inJudged = false
+		case !inJudged:
+		case strings.HasPrefix(line, "  same: "), strings.HasPrefix(line, "  distinct: "):
+			out = append(out, reportedGroup{cluster: cluster, same: strings.HasPrefix(line, "  same: ")})
+		case strings.HasPrefix(line, "    ") && len(out) > 0 && out[len(out)-1].cluster == cluster:
+			_, rest, ok := strings.Cut(line, "  id=")
+			if !ok {
+				t.Fatalf("member line without an id: %q", line)
+			}
+			id, _, _ := strings.Cut(rest, "  ")
+			g := &out[len(out)-1]
+			if !slices.Contains(g.ids, id) {
+				g.ids = append(g.ids, id)
+			}
+		}
+	}
+	return out
+}
+
+// TestKnowledgeDupesIsReadOnlyAndReportsMembers: every member of a judged
+// cluster is printed with its path, id and sessions beside the judge's call
+// and reason, and the store's git tree and file bytes are untouched.
+func TestKnowledgeDupesIsReadOnlyAndReportsMembers(t *testing.T) {
+	root := seedStore(t)
+	fakeJudge(t, "loom-widget-cache-stale", "warp-widget-cache-goes-stale")
+	a := writeTruthCandidate(t, root, "loom", "loom-widget-cache-stale--20260815-101010.md", "loom-widget-cache-stale",
+		"Widget cache goes stale after rebuild", "The widget cache keeps stale entries after a rebuild.", "sess-a")
+	b := writeTruthCandidate(t, root, "warp", "warp-widget-cache-goes-stale--20260815-111111.md", "warp-widget-cache-goes-stale",
+		"Widget cache stale entries survive rebuild", "Stale widget cache entries survive a rebuild.", "sess-b")
+	writeTruthCandidate(t, root, "loom", "loom-unrelated--20260815-121212.md", "loom-unrelated",
+		"Receiver token rotation", "Rotating the bearer token restarts the receiver.", "sess-c")
+	storeGit(t, root, "add", "-A")
+	storeGit(t, root, "commit", "-m", "seed candidates")
+	before := snapshotTree(t, root)
+
+	out, _, err := runDupes(t)
+	if err != nil {
+		t.Fatalf("knowledge dupes: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"judged cluster 1 (2 ids)",
+		"  same: fake: one truth",
+		"    " + a + "  id=loom-widget-cache-stale  sessions=sess-a",
+		"    " + b + "  id=warp-widget-cache-goes-stale  sessions=sess-b",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "loom-unrelated") {
+		t.Errorf("a candidate with no overlap was clustered:\n%s", out)
+	}
+
+	// Bytes first: git status may refresh .git/index itself.
+	if after := snapshotTree(t, root); !maps.Equal(before, after) {
+		t.Errorf("store files changed: before %v, after %v", slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+	}
+	if status := storeGit(t, root, "status", "--porcelain", "--ignored"); status != "" {
+		t.Errorf("store working tree changed:\n%s", status)
+	}
+}
+
+// snapshotTree maps every file under root, .git included, to its bytes.
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		out[p] = string(b)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestKnowledgeDupesSameIDNeedsNoJudge: files under one id once the run stamp
+// is removed are one cluster, however differently each extraction worded the
+// claim, and no judge is consulted for them.
+func TestKnowledgeDupesSameIDNeedsNoJudge(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+	t.Setenv("LOOM_HOME", t.TempDir())
+	log := fakeJudge(t)
+	a := writeTruthCandidate(t, root, "loom", "loom-shipper-backoff--20260815-101010.md", "loom-shipper-backoff",
+		"Shipper backs off exponentially", "Failed ships double the retry delay.", "sess-a")
+	b := writeTruthCandidate(t, root, "warp", "loom-shipper-backoff--20260816-090909.md", "loom-shipper-backoff--20260816-090909",
+		"Retry interval grows", "Each rejected upload waits twice as long.", "sess-b")
+
+	out, _, err := runDupes(t)
+	if err != nil {
+		t.Fatalf("knowledge dupes: %v\n%s", err, out)
+	}
+	want := "same-id cluster loom-shipper-backoff (2 files)\n" +
+		"  same: ids equal once the --<timestamp> suffix is removed\n" +
+		"    " + a + "  id=loom-shipper-backoff  sessions=sess-a\n" +
+		"    " + b + "  id=loom-shipper-backoff--20260816-090909  sessions=sess-b\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("report missing\n%s\ngot:\n%s", want, out)
+	}
+	if calls := judgeCalls(t, log); len(calls) != 0 {
+		t.Errorf("judge called %d time(s) for a same-id cluster: %v", len(calls), calls)
+	}
+}
+
+// TestKnowledgeDupesJudgeCallsOncePerCluster: three blocked clusters cost three
+// calls, each asked about its whole cluster; a same-id node is one member; the
+// report carries each partition, and a cluster whose reply is no partition, or
+// whose CLI fails, is reported without costing the others.
+func TestKnowledgeDupesJudgeCallsOncePerCluster(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+	t.Setenv("LOOM_HOME", t.TempDir())
+	log := fakeJudge(t, "loom-b1", "loom-b2")
+	t.Setenv("LOOM_TEST_JUDGE_BREAK", "loom-c1")
+	t.Setenv("LOOM_TEST_JUDGE_FAIL", "loom-d1")
+	// Cluster B: b1 (filed twice), b2, b3 share the parser vocabulary.
+	writeTruthCandidate(t, root, "loom", "loom-b1--20260815-010101.md", "loom-b1", "Parser drops trailing frontmatter keys", "parser frontmatter", "s1")
+	writeTruthCandidate(t, root, "loom", "loom-b1--20260815-020202.md", "loom-b1", "Parser drops trailing frontmatter keys", "parser frontmatter", "s2")
+	writeTruthCandidate(t, root, "warp", "loom-b2--20260815-030303.md", "loom-b2", "Frontmatter parser loses trailing keys", "drops", "s3")
+	writeTruthCandidate(t, root, "loom", "loom-b3--20260815-040404.md", "loom-b3", "Parser frontmatter keys are lowercase", "trailing", "s4")
+	// Cluster C and D: pairs on their own vocabularies.
+	writeTruthCandidate(t, root, "loom", "loom-c1--20260815-050505.md", "loom-c1", "Launchd plist lint gate", "plutil bootstrap", "s5")
+	writeTruthCandidate(t, root, "loom", "loom-c2--20260815-060606.md", "loom-c2", "Launchd plist lint before bootstrap", "plutil", "s6")
+	writeTruthCandidate(t, root, "loom", "loom-d1--20260815-070707.md", "loom-d1", "Receiver bearer token persisted", "mode 0600", "s7")
+	writeTruthCandidate(t, root, "loom", "loom-d2--20260815-080808.md", "loom-d2", "Receiver bearer token persisted 0600", "mode", "s8")
+
+	out, errOut, err := runDupes(t)
+	if err == nil || !strings.Contains(err.Error(), "2 of 3 blocked cluster(s) could not be judged") {
+		t.Errorf("err = %v, want the two failed clusters counted", err)
+	}
+	calls := judgeCalls(t, log)
+	if want := []string{"loom-b1,loom-b2,loom-b3", "loom-c1,loom-c2", "loom-d1,loom-d2"}; !slices.Equal(calls, want) {
+		t.Errorf("judge calls = %v, want one per cluster %v", calls, want)
+	}
+	groups := parseJudgedGroups(t, out)
+	want := []reportedGroup{
+		{cluster: 1, same: true, ids: []string{"loom-b1", "loom-b2"}},
+		{cluster: 1, same: false, ids: []string{"loom-b3"}},
+	}
+	if !reflect.DeepEqual(groups, want) {
+		t.Errorf("groups = %+v, want %+v\n%s", groups, want, out)
+	}
+	for _, want := range []string{
+		"judged cluster 2 (2 ids)\n  judge failed: judge reply: no group holds loom-c1, loom-c2\n",
+		"judged cluster 3 (2 ids)\n  judge failed: ",
+		"fake judge: model unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	for _, want := range []string{
+		"cluster 2 (loom-c1, loom-c2): judge failed: judge reply: no group holds loom-c1, loom-c2",
+		"cluster 3 (loom-d1, loom-d2): judge failed: ",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr missing %q:\n%s", want, errOut)
+		}
+	}
+
+	// Every call is on the judge log, under LOOM_HOME and not the store: the
+	// cluster asked about, the prompt and the raw reply.
+	judgeLog, err := os.ReadFile(filepath.Join(os.Getenv("LOOM_HOME"), "dupes-judge.log"))
+	if err != nil {
+		t.Fatalf("judge log: %v", err)
+	}
+	for _, want := range []string{
+		"cluster: loom-b1, loom-b2, loom-b3\n--- prompt\n",
+		"<candidates>",
+		"Partition follows.",
+		"fake judge: model unavailable",
+	} {
+		if !strings.Contains(string(judgeLog), want) {
+			t.Errorf("judge log missing %q:\n%s", want, judgeLog)
+		}
+	}
+	if n := strings.Count(string(judgeLog), "=== "); n != 3 {
+		t.Errorf("judge log holds %d call(s), want 3", n)
+	}
+
+	// --no-judge prints the same blocking without a call.
+	before := len(calls)
+	out, _, err = runDupes(t, "--no-judge")
+	if err != nil {
+		t.Fatalf("knowledge dupes --no-judge: %v", err)
+	}
+	if !strings.Contains(out, "blocked cluster 1 (3 ids, not judged)") {
+		t.Errorf("--no-judge report missing the blocked cluster:\n%s", out)
+	}
+	if n := len(judgeCalls(t, log)); n != before {
+		t.Errorf("--no-judge called the judge %d time(s)", n-before)
+	}
+}
+
+// TestKnowledgeDupesFixtureForgeReviewAgents runs the candidates behind the
+// 2026-11-07 measurement, verbatim from the live store, with a fake judge that
+// calls the five forge review-agents ids one truth and everything else
+// distinct.
+func TestKnowledgeDupesFixtureForgeReviewAgents(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+	t.Setenv("LOOM_HOME", t.TempDir())
+	forge := []string{
+		"forge-review-agents-no-tk-mcp-access",
+		"forge-review-agents-stateless-inline-required",
+		"forge-review-agents-stateless-need-inlined-tickets",
+		"forge-review-agents-stateless-no-mcp",
+		"forge-stateless-review-agents-need-inlined-context",
+	}
+	fakeJudge(t, forge...)
+	paths, err := filepath.Glob(filepath.Join("testdata", "dupes-fixture", "loom", "*.md"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no dupes fixtures: %v", err)
+	}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(root, "_candidates", "truths", "loom", filepath.Base(p))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, _, err := runDupes(t)
+	if err != nil {
+		t.Fatalf("knowledge dupes: %v\n%s", err, out)
+	}
+	groups := parseJudgedGroups(t, out)
+	found := false
+	for _, g := range groups {
+		if g.same && slices.Equal(slices.Sorted(slices.Values(g.ids)), forge) {
+			found = true
+		}
+		for _, pair := range [][2]string{
+			{"forge-pipeline-stage-routing-by-ticket-type", "ticket-task-pipeline-no-implement-stage"},
+			{"forge-tk-dev-mcp-config-split", "forge-dist-bundle-src-drift"},
+			{"forge-tk-dev-mcp-config-split", "forge-skill-md-cache-drift"},
+		} {
+			if g.same && slices.Contains(g.ids, pair[0]) && slices.Contains(g.ids, pair[1]) {
+				t.Errorf("%s and %s reported as one truth:\n%s", pair[0], pair[1], out)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no same-truth group holds exactly the five forge review-agents ids %v; groups %+v\n%s", forge, groups, out)
+	}
+	// The related-but-distinct pair blocking proposes reaches the judge and is
+	// reported as its call, rather than passing only because it was never asked.
+	distinct := 0
+	for _, g := range groups {
+		if !g.same && (slices.Contains(g.ids, "forge-pipeline-stage-routing-by-ticket-type") || slices.Contains(g.ids, "ticket-task-pipeline-no-implement-stage")) {
+			distinct++
+		}
+	}
+	if distinct != 2 {
+		t.Errorf("pipeline routing vs ticket task pipeline: %d distinct group(s) reported, want 2\n%s", distinct, out)
+	}
+}
+
+// TestKnowledgeDupesJudgeCallsNeedTheBinaryOnce: a judge binary that is not
+// there is one error naming the path and its override, before any cluster is
+// tried, and --no-judge does not need it.
+func TestKnowledgeDupesJudgeCallsNeedTheBinaryOnce(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+	t.Setenv("LOOM_HOME", t.TempDir())
+	missing := filepath.Join(t.TempDir(), "no-claude")
+	t.Setenv("LOOM_DUPES_JUDGE_BIN", missing)
+	writeTruthCandidate(t, root, "loom", "loom-c1--20260815-050505.md", "loom-c1", "Launchd plist lint gate", "plutil bootstrap", "s5")
+	writeTruthCandidate(t, root, "loom", "loom-c2--20260815-060606.md", "loom-c2", "Launchd plist lint before bootstrap", "plutil", "s6")
+
+	out, errOut, err := runDupes(t)
+	if err == nil || !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "LOOM_DUPES_JUDGE_BIN") {
+		t.Errorf("err = %v, want one naming %s and LOOM_DUPES_JUDGE_BIN", err, missing)
+	}
+	if out != "" || errOut != "" {
+		t.Errorf("output before the refusal:\nstdout %q\nstderr %q", out, errOut)
+	}
+	if out, _, err := runDupes(t, "--no-judge"); err != nil || !strings.Contains(out, "blocked cluster 1 (2 ids, not judged)") {
+		t.Errorf("--no-judge without a judge binary: err %v\n%s", err, out)
+	}
+}
+
+// TestKnowledgeDupesEscapesTerminalControls: candidate ids, filenames and
+// sessions are transcript-derived and parseArtifact keeps any control they
+// carry, so every place the report prints one — same-id heading, judged and
+// unjudged members, the judge-failure line on stderr, the shed list — has to
+// emit it inert.
+func TestKnowledgeDupesEscapesTerminalControls(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", root)
+	t.Setenv("LOOM_HOME", t.TempDir())
+	fakeJudge(t)
+	failID := "esc-a-0\x1b]0;pwned\x07"
+	t.Setenv("LOOM_TEST_JUDGE_FAIL", failID)
+	// Two groups of six and a bridge the cap sheds, as TestDupesCapsClusterSize.
+	for i, u := range []string{"aone", "atwo", "athree", "afour", "afive", "asix"} {
+		id := "esc-a-" + string(rune('0'+i))
+		if i == 0 {
+			id = failID
+		}
+		writeTruthCandidate(t, root, "loom", fmt.Sprintf("esc-a-%d--20260815-01010%d.md", i, i), id, "apple apricot avocado", "acorn "+u, "sess-a")
+	}
+	for i, u := range []string{"bone", "btwo", "bthree", "bfour", "bfive", "bsix"} {
+		writeTruthCandidate(t, root, "warp", fmt.Sprintf("esc-b-%d--20260815-02020%d.md", i, i), fmt.Sprintf("esc-b-%d", i),
+			"banana blueberry bilberry", "beech "+u, "sess-b\x1b[2J\u202e")
+	}
+	writeTruthCandidate(t, root, "loom", "esc-bridge--20260815-030303.md", "esc-bridge\x1b[H", "apple apricot", "banana blueberry", "sess-c")
+	writeTruthCandidate(t, root, "loom", "esc-same\x1b[31m--20260815-040404.md", "esc-same\x1b[31m", "Receiver token", "rotation", "sess-d")
+	writeTruthCandidate(t, root, "loom", "esc-same\x1b[31m--20260815-050505.md", "esc-same\x1b[31m", "Shipper backoff", "doubling", "sess-e")
+
+	inert := func(name, s string) {
+		t.Helper()
+		for _, r := range s {
+			if r != '\n' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+				t.Errorf("%s carries %U:\n%q", name, r, s)
+				return
+			}
+		}
+	}
+	out, errOut, err := runDupes(t)
+	if err == nil {
+		t.Error("the failing cluster was not counted")
+	}
+	inert("stdout", out)
+	inert("stderr", errOut)
+	for _, want := range []string{
+		"same-id cluster esc-same [31m (2 files)",
+		"id=esc-a-0 ]0;pwned  sessions=sess-a",
+		"sessions=sess-b [2J",
+		"shed by the size cap (1 ids)",
+		"id=esc-bridge [H  sessions=sess-c",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(errOut, "(esc-a-0 ]0;pwned, esc-a-1, ") {
+		t.Errorf("stderr does not name the failed cluster:\n%s", errOut)
+	}
+
+	out, errOut, err = runDupes(t, "--no-judge")
+	if err != nil {
+		t.Fatalf("knowledge dupes --no-judge: %v", err)
+	}
+	inert("--no-judge stdout", out)
+	inert("--no-judge stderr", errOut)
 }

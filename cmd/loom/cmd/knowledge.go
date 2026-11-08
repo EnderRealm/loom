@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -62,7 +63,146 @@ func newKnowledgeCmd() *cobra.Command {
 	cmd.AddCommand(newKnowledgeWriteCmd())
 	cmd.AddCommand(newKnowledgeScopeCmd())
 	cmd.AddCommand(newKnowledgeConflictsCmd())
+	cmd.AddCommand(newKnowledgeDupesCmd())
 	return cmd
+}
+
+func newKnowledgeDupesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "dupes",
+		Short: "Report truth candidates that look like the same truth",
+		Long: "Loads the truth candidates (LOOM_KNOWLEDGE_ROOT, else ~/.loom/knowledge) and prints " +
+			"a cluster report. Candidates whose ids match once the --<YYYYMMDD-HHMMSS> run stamp is " +
+			"removed form a same-id cluster with no judge call. The remaining blocking is keyword " +
+			"Jaccard over title + claim across every scope; each blocked cluster is partitioned into " +
+			"same-truth groups by one claude call (" + knowledge.EnvDupesJudgeBin + " overrides the " +
+			"binary; every call is logged to $LOOM_HOME/dupes-judge.log). A component over the size cap " +
+			"is re-split at a higher threshold, and the candidates that leaves in no cluster are " +
+			"listed as shed. A cluster the judge could not partition is reported as such, on the " +
+			"report and stderr, and the command exits non-zero after the full report. Read-only: " +
+			"merging is the reviewer's, through the candidate review screen.",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			noJudge, _ := cmd.Flags().GetBool("no-judge")
+			arts, err := knowledge.Load()
+			if err != nil {
+				return err
+			}
+			d := knowledge.FindDupes(arts)
+			var judge knowledge.Judge
+			if !noJudge && len(d.Blocked) > 0 {
+				cj, err := knowledge.NewClaudeJudge()
+				if err != nil {
+					return err
+				}
+				judge = cj
+			}
+			return reportDupes(cmd.OutOrStdout(), cmd.ErrOrStderr(), knowledge.Root(), d, judge)
+		},
+	}
+	cmd.Flags().Bool("no-judge", false, "print the blocked clusters without calling the judge")
+	return cmd
+}
+
+// reportDupes prints the same-id clusters, then each blocked cluster with the
+// judge's partition of it — or, with a nil judge, unpartitioned — then the
+// nodes the size cap shed. A judge failure costs only its own cluster; the
+// count of them is the returned error. Every candidate-derived field passes
+// through oneLine on its way out: ids, paths and sessions are frontmatter and
+// filenames the extractor wrote from transcripts, and parseArtifact keeps any
+// terminal control they carry.
+func reportDupes(out, errOut io.Writer, root string, d knowledge.Dupes, judge knowledge.Judge) error {
+	fmt.Fprintf(out, "%d truth candidate(s): %d same-id cluster(s), %d blocked cluster(s), %d shed by the size cap\n",
+		d.Candidates, len(d.SameID), len(d.Blocked), len(d.Shed))
+	for _, n := range d.SameID {
+		fmt.Fprintf(out, "\nsame-id cluster %s (%d files)\n", oneLine(n.Key), len(n.Files))
+		fmt.Fprintln(out, "  same: ids equal once the --<timestamp> suffix is removed")
+		printDupeNode(out, root, n)
+	}
+
+	failed := 0
+	for i, c := range d.Blocked {
+		keys := make([]string, len(c))
+		for j, n := range c {
+			keys[j] = oneLine(n.Key)
+		}
+		if judge == nil {
+			fmt.Fprintf(out, "\nblocked cluster %d (%d ids, not judged)\n", i+1, len(c))
+			for _, n := range c {
+				printDupeNode(out, root, n)
+			}
+			continue
+		}
+		fmt.Fprintf(errOut, "judging cluster %d/%d (%d ids)\n", i+1, len(d.Blocked), len(c))
+		groups, err := knowledge.JudgeCluster(judge, c)
+		if err != nil {
+			failed++
+			msg := oneLine(err.Error())
+			fmt.Fprintf(errOut, "cluster %d (%s): judge failed: %s\n", i+1, strings.Join(keys, ", "), msg)
+			fmt.Fprintf(out, "\njudged cluster %d (%d ids)\n", i+1, len(c))
+			fmt.Fprintf(out, "  judge failed: %s\n", msg)
+			for _, n := range c {
+				printDupeNode(out, root, n)
+			}
+			continue
+		}
+		byKey := map[string]knowledge.DupeNode{}
+		for _, n := range c {
+			byKey[n.Key] = n
+		}
+		fmt.Fprintf(out, "\njudged cluster %d (%d ids)\n", i+1, len(c))
+		for _, g := range groups {
+			call := "distinct"
+			if g.Same() {
+				call = "same"
+			}
+			fmt.Fprintf(out, "  %s: %s\n", call, oneLine(g.Reason))
+			for _, id := range g.IDs {
+				printDupeNode(out, root, byKey[id])
+			}
+		}
+	}
+	if len(d.Shed) > 0 {
+		fmt.Fprintf(out, "\nshed by the size cap (%d ids): blocked at Jaccard >= %.2f, in no cluster once an oversized component was re-split\n",
+			len(d.Shed), knowledge.DupesMinJaccard)
+		for _, n := range d.Shed {
+			printDupeNode(out, root, n)
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d blocked cluster(s) could not be judged", failed, len(d.Blocked))
+	}
+	return nil
+}
+
+// printDupeNode prints one line per file under a node: its path relative to the
+// store, its id and its source sessions.
+func printDupeNode(out io.Writer, root string, n knowledge.DupeNode) {
+	for _, f := range n.Files {
+		sessions := "-"
+		if len(f.Sessions) > 0 {
+			safe := make([]string, len(f.Sessions))
+			for i, s := range f.Sessions {
+				safe[i] = oneLine(s)
+			}
+			sessions = strings.Join(safe, ", ")
+		}
+		fmt.Fprintf(out, "    %s  id=%s  sessions=%s\n", oneLine(relPath(root, f.Path)), oneLine(f.ID), sessions)
+	}
+}
+
+// oneLine flattens untrusted text — candidate fields, model output, CLI
+// stderr — onto one line with no control or format characters, so it cannot
+// break the report's layout or drive the terminal it is read on.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, s)), " ")
 }
 
 func newKnowledgeConflictsCmd() *cobra.Command {

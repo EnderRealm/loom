@@ -37,6 +37,8 @@ Knowledge:
                                  store, committing what it touched
   knowledge scope add <name>   Create truths/<name>/ so that project's sessions
                                  are extracted rather than skipped
+  knowledge dupes [--no-judge] Report truth candidates that look like the same
+                                 truth (read-only)
 
 Reports:
   work-report [--since|--until]  /work-run compliance metrics from summaries.db, as JSON
