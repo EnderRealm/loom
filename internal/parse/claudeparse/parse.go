@@ -775,6 +775,7 @@ func (st *state) applyToolResult(rec userRecord, ts time.Time) {
 		// is usually longer than resultTextLimit.
 		content := decodeToolResultContent(b.Content)
 		st.recordLenses(content, summary.OriginToolResult, b.ToolUseID, tc.TurnIdx, ts)
+		tc.Output = content
 		tc.ResultSummary = truncate(content, resultTextLimit)
 		if !ts.IsZero() && !tc.StartedAt.IsZero() {
 			tc.DurationMs = ts.Sub(tc.StartedAt).Milliseconds()

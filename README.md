@@ -227,6 +227,19 @@ loom run-report --run transcript:claude-code:<session>:0 | jq '.telemetry.gaps'
 - **Breakdowns and the tree.** `executions` lists every node depth-first, root first, then the unresolved ones (`placement`), each with its own span's metrics and duration; `stages` groups stage attempts by `(stage, occurrence)` with a `retries` count; `lenses` joins the lens execution records with the transcript's lens attempts on `(lens, round, attempt)`, listing an attempt from either side alone, each with an `attribution` — `execution` where a record joined, `transcript` where only the transcript paired a response (a native subagent lens writes no record), `unknown` where neither stands behind it; `attempts` is the flat retry view. `tree`, `unresolved` and `diagnostics` are the run as `internal/runs` reads it, with every empty list rendered `[]`.
 - **A missing rate leaves the metrics standing.** Cost is priced as `cost-report` prices it, at the rates in `internal/pricing/rates.json` in force at the run's start; a model the table does not carry ([coverage](docs/pricing.md)) leaves `cost_usd` null, `pricing.available` false and the cause in `pricing_warnings`, and every other figure is still reported. Each scope is priced on its own — a Claude parent at Claude's rates and semantics, a Codex descendant at OpenAI's — and the total is their sum, or null when any scope in it is. `pricing` names the table's currency, source and checked date. An unknown run id is an error (`run not found: <id>`); a `summaries.db` older than schema 9 is refused until `loom summarize --rebuild`.
 
+### Full tool output
+
+`loom tool-output` finds tool calls by what they printed, where `summaries.db` keeps only the first 800 characters of each result. It reads the received transcripts themselves — Claude Code with its subagent transcripts, Codex CLI, Cursor CLI — through the same parsers the summarizer folds them with.
+
+```sh
+loom tool-output --since 2026-11-01 --until 2026-11-08 --match 'teardown:|kern\.procargs2' --command 'go test' --json
+```
+
+- **One JSON array** of `{agent, session_id, ticket, started_at, key_arg, output}` for every call started in `[--since, --until)` whose whole output matches `--match` (a Go regexp) and whose key argument contains `--command`, ordered by start. A window with nothing in it prints `[]` and exits 0. Without `--json` each match is a header line followed by its output.
+- **`ticket` is null unless one run places the call.** Tickets come from the runs in `summaries.db` (`internal/runs`): a subagent or lens session takes its run's ticket, and a call in a run's root session takes the ticket of the run whose span holds its start. No `summaries.db`, no run, or runs that disagree all mean null.
+- **Unreadable input is named, never skipped.** Each transcript, directory or `summaries.db` that cannot be read is one `{"path", "error"}` JSON line on stderr, and stderr carries nothing else; the rest are still read and printed, and the command exits 1, so a partial answer is never taken for a complete one.
+- **Read-only.** Nothing under `$LOOM_HOME` is written. `summaries.db` is always opened immutable, so SQLite reads the main file alone and never creates or touches `-wal`/`-shm`, whatever the summarizer is doing. The accepted cost: runs still only in the uncheckpointed `-wal` are not seen, so their calls carry a null ticket until the summarizer checkpoints; a checkpoint landing mid-read can also fail the read (reported) or misattribute a ticket. A transcript last modified before `--since` is not opened, since it cannot hold a later call.
+
 ### Bug escape attribution
 
 `loom escapes` attributes every done bug in the tk store to the agent sessions whose commits introduced it, and prints the share of loom commits that introduced a bug per (agent, model, cli_version), with precision against the hand-labelled fixture beneath.

@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -43,6 +45,9 @@ Knowledge:
 Reports:
   work-report [--since|--until]  /work-run compliance metrics from summaries.db, as JSON
   cost-report [--since|--until]  Per-/work-run cost — turns, tokens, tools, time — as JSON
+  tool-output --since <t> --until <t> --match <regex> [--command <substr>] [--json]
+                               Tool calls whose full output matches, read from the
+                                 received transcripts (read-only)
 
 Lifecycle:
   install <component>          Install a launchd agent for the running loom binary
@@ -80,9 +85,19 @@ func init() {
 	})
 }
 
+// errReported marks a failure the command already wrote to stderr in its own
+// format, so a reader parsing that stream sees nothing else on it.
+var errReported = errors.New("reported on stderr")
+
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printError(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func printError(w io.Writer, err error) {
+	if !errors.Is(err, errReported) {
+		fmt.Fprintln(w, err)
 	}
 }

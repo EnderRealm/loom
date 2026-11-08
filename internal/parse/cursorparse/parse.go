@@ -654,7 +654,7 @@ func (st *state) foldTool(t *summary.Turn, raw []byte) {
 	} else {
 		st.addUnknown("tool_call", "duration_unavailable:"+id, t.StartedAt)
 	}
-	call := summary.ToolCall{TurnIdx: t.Idx, CallID: id, ToolName: name, Kind: classify(name), KeyArg: ce.keyArg, StartedAt: start, DurationMs: duration, DurationUnavailable: durationUnavailable, IsError: ce.isError, ResultSummary: truncate(ce.result)}
+	call := summary.ToolCall{TurnIdx: t.Idx, CallID: id, ToolName: name, Kind: classify(name), KeyArg: ce.keyArg, StartedAt: start, DurationMs: duration, DurationUnavailable: durationUnavailable, IsError: ce.isError, ResultSummary: truncate(ce.result), Output: ce.result}
 	if task := fieldBytes(f, 19); len(task) > 0 {
 		st.foldTaskResult(&call, task[0])
 	}

@@ -168,6 +168,10 @@ type ToolCall struct {
 	ExitCode            *int
 	IsError             bool
 	ResultSummary       string
+	// Output is the whole result text ResultSummary is cut from, for readers
+	// that need what lies past the cut. Carried in-process only; summaries.db
+	// stores ResultSummary alone.
+	Output string
 	// Child identity and duration reported by a structured dispatch result,
 	// independent of whether the child's own transcript has arrived.
 	ChildSessionID  string

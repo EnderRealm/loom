@@ -462,6 +462,13 @@ func (st *state) applyExecCommandEnd(p eventMsgPayload, ts time.Time,
 	// than the summary keeps.
 	st.recordCallLenses(p.CallID, p.Stdout+"\n"+p.Stderr, tc.TurnIdx, ts)
 	tc.ResultSummary = truncate(execResultSummary(p), 800)
+	tc.Output = p.Stdout
+	if p.Stderr != "" {
+		if tc.Output != "" {
+			tc.Output += "\n"
+		}
+		tc.Output += p.Stderr
+	}
 	if tc.IsError {
 		st.s.Errors = append(st.s.Errors, summary.ErrorEvent{
 			TurnIdx: tc.TurnIdx,
@@ -489,8 +496,10 @@ func (st *state) applyPatchApplyEnd(p eventMsgPayload, ts time.Time,
 	tc.Kind = summary.KindPatchApply
 	tc.IsError = !p.Success
 	if p.Success {
+		tc.Output = p.Stdout
 		tc.ResultSummary = truncate(p.Stdout, 400)
 	} else {
+		tc.Output = p.Stderr
 		tc.ResultSummary = truncate(p.Stderr, 400)
 		st.s.Errors = append(st.s.Errors, summary.ErrorEvent{
 			TurnIdx: tc.TurnIdx,
@@ -521,6 +530,7 @@ func (st *state) applyMCPToolEnd(p eventMsgPayload, _ time.Time,
 	tc := &st.s.ToolCalls[idx]
 	tc.Kind = summary.KindMCP
 	tc.DurationMs = parseDurationMs(p.Duration)
+	tc.Output = string(p.Result)
 	tc.ResultSummary = truncate(string(p.Result), 400)
 }
 
@@ -607,6 +617,7 @@ func (st *state) applyToolOutput(callID string, output json.RawMessage,
 		if tc.Kind == summary.KindCustom {
 			text = decodeCustomOutput(output)
 		}
+		tc.Output = text
 		tc.ResultSummary = truncate(text, 800)
 	}
 	if tc.DurationMs == 0 && !tc.StartedAt.IsZero() && !ts.IsZero() {
