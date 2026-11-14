@@ -105,13 +105,25 @@ func loomHomeForPlist() string {
 	return os.Getenv("LOOM_HOME")
 }
 
-// installSpec, awaitRunning and stopAgent are package vars so tests can drive
-// the install paths without touching launchd on the host.
+// installSpec, awaitRunning, stopAgent and systemPlistPath are package vars
+// so tests can drive the install paths without touching launchd on the host.
 var (
-	installSpec  = launchd.Install
-	awaitRunning = updater.AwaitRunning
-	stopAgent    = launchd.Stop
+	installSpec     = launchd.Install
+	awaitRunning    = updater.AwaitRunning
+	stopAgent       = launchd.Stop
+	systemPlistPath = launchd.SystemPlistPath
 )
+
+// refuseSystemDaemon refuses a LaunchAgent for label when a boot-time
+// daemon for it is installed: a login would run both on the same state.
+func refuseSystemDaemon(label string) error {
+	p := systemPlistPath(label)
+	if _, err := os.Stat(p); err == nil {
+		return fmt.Errorf("%s is installed as a system daemon: %s; a LaunchAgent would run a second copy on every login. "+
+			"Remove it first with `sudo loom uninstall --system`", label, p)
+	}
+	return nil
+}
 
 // installAgent writes and bootstraps spec, then holds launchd to actually
 // running a process for it. bootstrap honors RunAtLoad on initial load, but
@@ -141,6 +153,9 @@ func installShipper() error {
 				return fmt.Errorf("%w; stopping the running shipper failed: %v", err, stopErr)
 			}
 		}
+		return err
+	}
+	if err := refuseSystemDaemon(shipper.AgentLabel); err != nil {
 		return err
 	}
 	bin, err := loomBinary()
@@ -403,6 +418,9 @@ func installExtractor() error {
 // binary, and re-bootstraps every other loom agent (itself last).
 // LOOM_UPDATER_INTERVAL_MINUTES tunes the poll cadence.
 func installUpdater() error {
+	if err := refuseSystemDaemon(updater.AgentLabel); err != nil {
+		return err
+	}
 	bin, err := loomBinary()
 	if err != nil {
 		return err

@@ -107,6 +107,18 @@ func installSystem(component, userName string) error {
 	spec.Env["LOOM_HOME"] = loomHome
 	spec.Env[launchd.DomainEnv] = launchd.SystemDomain
 
+	// HOME is the daemon user's by now, so this resolves their LaunchAgent.
+	// With both installed, a login would start a second copy on the same state.
+	agentPlist, err := launchd.User.PlistPath(spec.Label)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(agentPlist); err == nil {
+		return fmt.Errorf("%s already has a LaunchAgent for %s: %s; remove it as %s first "+
+			"(launchctl bootout gui/%s/%s, then rm %s, or `loom uninstall` to remove all of %s's loom LaunchAgents)",
+			u.Username, spec.Label, agentPlist, u.Username, u.Uid, spec.Label, agentPlist, u.Username)
+	}
+
 	if err := ensureDaemonPaths(uid, gid, spec.LogPath, loomHome, filepath.Dir(spec.LogPath)); err != nil {
 		return err
 	}

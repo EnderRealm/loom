@@ -223,6 +223,49 @@ func TestInstallSystemRefusesBinaryTheUserCannotReplace(t *testing.T) {
 	}
 }
 
+// A boot-time daemon beside the daemon user's own LaunchAgent for the same
+// label would run a second copy whenever that user logs in, so system mode
+// refuses before writing anything.
+func TestInstallSystemRefusesExistingAgent(t *testing.T) {
+	for _, c := range []struct{ component, label string }{
+		{"shipper", shipper.AgentLabel},
+		{"updater", updater.AgentLabel},
+	} {
+		t.Run(c.component, func(t *testing.T) {
+			_, home := stubSystem(t, 0)
+			if c.component == "shipper" {
+				writeLoomConfig(t, `{"server_url":"https://loom.example"}`)
+			}
+			calls, _, _ := stubInstall(t, nil)
+			path, checked := stubSudoers(t, nil)
+			agentDir := filepath.Join(home, "Library", "LaunchAgents")
+			if err := os.MkdirAll(agentDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			plist := filepath.Join(agentDir, c.label+".plist")
+			if err := os.WriteFile(plist, []byte("plist\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			err := installSystem(c.component, "engine")
+			if err == nil || !strings.Contains(err.Error(), plist) {
+				t.Fatalf("installSystem err = %v, want it to name %s", err, plist)
+			}
+			if len(*calls) != 0 || len(*checked) != 0 {
+				t.Fatalf("refusal still installed: calls=%v sudoers=%v", *calls, *checked)
+			}
+			if _, err := os.Stat(path); err == nil {
+				t.Fatal("refusal still wrote the sudoers grant")
+			}
+			for _, dir := range []string{filepath.Join(home, ".loom"), filepath.Join(os.Getenv("LOOM_HOME"), "transport")} {
+				if _, err := os.Stat(dir); err == nil {
+					t.Fatalf("refusal still created %s", dir)
+				}
+			}
+		})
+	}
+}
+
 func TestInstallSystemUpdater(t *testing.T) {
 	_, home := stubSystem(t, 0)
 	calls, installed, _ := stubInstall(t, nil)

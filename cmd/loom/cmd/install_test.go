@@ -103,10 +103,16 @@ func TestSummarizerSpecCarriesTheInterval(t *testing.T) {
 
 // stubInstall records the spec handed to launchd and the (label, bin) the
 // post-install await was called with, in call order, so neither touches the
-// host's launchd. awaitErr is what the await reports.
+// host's launchd. System plists resolve into an empty temp dir, so a host's
+// own boot-time daemons never refuse a test install. awaitErr is what the
+// await reports.
 func stubInstall(t *testing.T, awaitErr error) (calls *[]string, installed *launchd.Spec, awaited *[2]string) {
 	t.Helper()
 	calls, installed, awaited = new([]string), new(launchd.Spec), new([2]string)
+	systemDir := t.TempDir()
+	origPlistPath := systemPlistPath
+	systemPlistPath = func(label string) string { return filepath.Join(systemDir, label+".plist") }
+	t.Cleanup(func() { systemPlistPath = origPlistPath })
 	origInstall, origAwait := installSpec, awaitRunning
 	installSpec = func(spec launchd.Spec) error {
 		*calls = append(*calls, "install")
@@ -156,6 +162,37 @@ func TestInstallUpdaterSucceedsWhenRunning(t *testing.T) {
 	}
 	if got := strings.Join(*calls, ","); got != "install,await" {
 		t.Fatalf("calls = %s, want install then await", got)
+	}
+}
+
+// A LaunchAgent beside a boot-time daemon for the same label would run a
+// second shipper or updater on every login, so the user-mode install refuses.
+func TestInstallRefusesExistingSystemDaemon(t *testing.T) {
+	cases := []struct {
+		label   string
+		install func() error
+	}{
+		{shipper.AgentLabel, installShipper},
+		{updater.AgentLabel, installUpdater},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			writeLoomConfig(t, `{"server_url":"https://loom.example"}`)
+			calls, _, _ := stubInstall(t, nil)
+			stopped := stubStop(t)
+			plist := systemPlistPath(c.label)
+			if err := os.WriteFile(plist, []byte("plist\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			err := c.install()
+			if err == nil || !strings.Contains(err.Error(), "sudo loom uninstall --system") || !strings.Contains(err.Error(), plist) {
+				t.Fatalf("install err = %v, want the plist %s and sudo loom uninstall --system", err, plist)
+			}
+			if len(*calls) != 0 || len(*stopped) != 0 {
+				t.Fatalf("refusal still acted: calls=%v stopped=%v", *calls, *stopped)
+			}
+		})
 	}
 }
 
