@@ -120,6 +120,22 @@ Default: 5-minute poll. Override via plist environment:
 
 The reusable pattern (Go binary on launchd that updates itself) is documented in [`docs/auto-update-pattern.md`](./docs/auto-update-pattern.md); loom runs its artifact-fetch variant.
 
+### Boot-time daemons (headless hosts)
+
+`loom install` writes LaunchAgents, which launchd runs only inside a login session. A host that boots with nobody logged in (no auto-login, FileVault off) never starts them. System mode installs the shipper and updater as boot-time LaunchDaemons that run as a named unprivileged user instead:
+
+```sh
+sudo ~engine/.local/bin/loom install --system --user engine shipper
+sudo ~engine/.local/bin/loom install --system --user engine updater
+loom status                       # reports both from the system domain
+sudo ~engine/.local/bin/loom uninstall --system   # removes both daemons and the sudoers grant
+```
+
+- **As root, for one user.** `--system` refuses unless run as root, requires `--user`, refuses root as that user, and accepts only `shipper` and `updater`. The plists land in `/Library/LaunchDaemons` (root:wheel 0644) with `UserName`, `HOME`, `LOOM_HOME` and `LOOM_LAUNCHD_DOMAIN=system` baked in, so config, state and logs are the user's (`~engine/.loom` unless `LOOM_HOME` is passed through sudo), never root's. Missing state and log paths are created owned by that user.
+- **The binary must be the user's.** The updater runs as that user and replaces the binary in place, so install refuses a binary (or a directory holding it) the user does not own. Run the user's own copy under sudo, as above.
+- **Restart via a narrow sudoers grant.** A LaunchDaemon can only be restarted by root, so install writes `/etc/sudoers.d/loom` (root:wheel 0440, checked with `visudo -cf` before it is moved into place) granting the user `NOPASSWD` for exactly four command lines — `/bin/launchctl bootout system/<label>` and `/bin/launchctl bootstrap system /Library/LaunchDaemons/<label>.plist` for `com.loom.shipper` and `com.loom.updater` — and nothing else. After installing a release the updater restarts each daemon with `sudo -n` and those exact argv, then checks it came back on the new binary. Root never fetches from the network: the download and install run as the user. A root updater, or a root restart helper, would have put network-fetched code or a privileged entry point in root's hands; the grant does neither.
+- **Plists are not rewritten by the updater.** In system mode the updater restarts the daemons from their existing plists (it cannot write `/Library`). A release that changes a plist's shape takes effect when `loom install --system` is re-run.
+
 ### Knowledge extraction
 
 The `loom extract` agent closes the loop between capture and the durable knowledge store: every sweep it walks summarized sessions that have not been extracted yet and runs `extractors/extract.py` over each one, so candidates land in `~/.loom/knowledge/_candidates/<type>s/<scope>/` and show up in the TUI's candidate review screen.
@@ -491,7 +507,7 @@ First tick walks every session under `~/.claude/projects/` and `~/.codex/session
 loom uninstall
 ```
 
-Removes every loom launchd agent (tolerant of any being absent) and their plist files. **Preserves** `~/.loom/` state and the installed binary. Full wipe:
+Removes every loom launchd agent (tolerant of any being absent) and their plist files. **Preserves** `~/.loom/` state and the installed binary. `sudo loom uninstall --system` does the same for the boot-time daemons and removes `/etc/sudoers.d/loom`. Full wipe:
 
 ```sh
 rm -rf ~/.loom

@@ -135,11 +135,11 @@ func stubRestartCheck(t *testing.T, procs map[string]launchd.Process, kicked *[]
 	t.Helper()
 	origProc, origKick := agentProcess, kickstartAgent
 	origTimeout, origInterval, origAfter := verifyTimeout, verifyInterval, kickstartAfter
-	agentProcess = func(label string) (launchd.Process, bool, error) {
+	agentProcess = func(_ launchd.Domain, label string) (launchd.Process, bool, error) {
 		p, ok := procs[label]
 		return p, ok, nil
 	}
-	kickstartAgent = func(label string) error {
+	kickstartAgent = func(_ launchd.Domain, label string) error {
 		if kicked != nil {
 			*kicked = append(*kicked, label)
 		}
@@ -407,7 +407,7 @@ func TestVerifyRestartedSelf(t *testing.T) {
 	}, nil)
 	logs := captureLog(t)
 
-	VerifyRestarted(AgentLabel, freshBin(t))
+	VerifyRestarted(launchd.User, AgentLabel, freshBin(t))
 
 	got := logs.String()
 	for _, want := range []string{
@@ -434,7 +434,7 @@ func TestVerifyRestartedWithoutBinaryMtime(t *testing.T) {
 	}, nil)
 	logs := captureLog(t)
 
-	VerifyRestarted(AgentLabel, filepath.Join(t.TempDir(), "loom"))
+	VerifyRestarted(launchd.User, AgentLabel, filepath.Join(t.TempDir(), "loom"))
 
 	got := logs.String()
 	for _, want := range []string{
@@ -460,7 +460,7 @@ func TestAwaitRunning(t *testing.T) {
 	}, &kicked)
 	bin := freshBin(t)
 
-	err := AwaitRunning(AgentLabel, bin)
+	err := AwaitRunning(launchd.User, AgentLabel, bin)
 	if err == nil || !strings.Contains(err.Error(), "no process") {
 		t.Fatalf("AwaitRunning(processless) = %v, want no process", err)
 	}
@@ -468,7 +468,7 @@ func TestAwaitRunning(t *testing.T) {
 		t.Errorf("kickstarts = %v, want exactly one for %s", kicked, AgentLabel)
 	}
 
-	if err := AwaitRunning(shipper.AgentLabel, bin); err != nil {
+	if err := AwaitRunning(launchd.User, shipper.AgentLabel, bin); err != nil {
 		t.Fatalf("AwaitRunning(running) = %v", err)
 	}
 }
@@ -523,4 +523,66 @@ func readFile(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestReBootstrapAgentsSystemDomain pins system mode: the daemon user cannot
+// run `loom install` against /Library, so each present system daemon is
+// restarted through sudo from its existing plist, verified against the
+// system domain, and self is still the detached reexec done last.
+func TestReBootstrapAgentsSystemDomain(t *testing.T) {
+	t.Setenv(launchd.DomainEnv, launchd.SystemDomain)
+	loaded := map[string]bool{
+		shipper.AgentLabel: true,
+		AgentLabel:         true,
+	}
+
+	var restarts []string
+	selfSpawned := false
+	origPlist, origInstall, origSpawn, origSudo := plistPresent, installComponent, spawnSelfReexec, sudoRestart
+	plistPresent = func(label string) bool { return loaded[label] }
+	installComponent = func(bin, component string) error {
+		t.Errorf("system mode ran `loom install %s`", component)
+		return nil
+	}
+	sudoRestart = func(label string) error {
+		if selfSpawned {
+			t.Fatalf("worker restart %q ran after self reexec", label)
+		}
+		restarts = append(restarts, label)
+		return nil
+	}
+	spawnSelfReexec = func(bin string) error {
+		selfSpawned = true
+		return nil
+	}
+	t.Cleanup(func() {
+		plistPresent, installComponent, spawnSelfReexec, sudoRestart = origPlist, origInstall, origSpawn, origSudo
+	})
+	stubRestartCheck(t, map[string]launchd.Process{
+		shipper.AgentLabel: {PID: 31, Started: time.Now()},
+	}, nil)
+	var domains []launchd.Domain
+	stubbedProcess := agentProcess
+	agentProcess = func(d launchd.Domain, label string) (launchd.Process, bool, error) {
+		domains = append(domains, d)
+		return stubbedProcess(d, label)
+	}
+
+	if err := reBootstrapAgents(freshBin(t)); err != nil {
+		t.Fatalf("reBootstrapAgents: %v", err)
+	}
+	if !reflect.DeepEqual(restarts, []string{shipper.AgentLabel}) {
+		t.Fatalf("sudo restarts = %v, want [%s]", restarts, shipper.AgentLabel)
+	}
+	if !selfSpawned {
+		t.Fatal("self reexec was not spawned for the loaded updater")
+	}
+	if len(domains) == 0 {
+		t.Fatal("shipper restart was never verified")
+	}
+	for _, d := range domains {
+		if d != launchd.System {
+			t.Fatalf("verified against %v, want the system domain", d)
+		}
+	}
 }

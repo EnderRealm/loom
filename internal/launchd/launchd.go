@@ -1,4 +1,5 @@
-// Package launchd owns macOS LaunchAgent management for every loom component.
+// Package launchd owns macOS LaunchAgent (and boot-time LaunchDaemon)
+// management for every loom component.
 // One Spec shape generates the plist XML, plutil-lints it, and drives
 // bootout/bootstrap/kickstart. The shipper, receiver, and summarizer share
 // this package so plist drift between components is impossible.
@@ -16,6 +17,54 @@ import (
 	"strings"
 	"time"
 )
+
+// Domain is the launchctl domain a job loads into. The zero value is the
+// invoking user's login session, where every loom component ran before
+// system mode.
+type Domain int
+
+const (
+	// User is gui/<uid>: LaunchAgents in ~/Library/LaunchAgents, which run
+	// only while that user has a login session.
+	User Domain = iota
+	// System is the boot-time domain: LaunchDaemons in /Library/LaunchDaemons,
+	// which run from boot with nobody logged in.
+	System
+)
+
+const (
+	// SystemDomain is the system domain's launchctl name.
+	SystemDomain = "system"
+	// SystemPlistDir holds boot-time LaunchDaemon plists.
+	SystemPlistDir = "/Library/LaunchDaemons"
+	// Launchctl is launchctl's absolute path. sudoers matches commands by
+	// absolute path, so the argv run under sudo must name exactly this.
+	Launchctl = "/bin/launchctl"
+	// Sudo is sudo's absolute path, so a daemon's restart does not depend on
+	// the PATH baked into its plist.
+	Sudo = "/usr/bin/sudo"
+	// DomainEnv is set to SystemDomain in a LaunchDaemon's environment. It is
+	// the only signal a loom process uses to decide it manages system-domain
+	// jobs; nothing is inferred from which plists exist.
+	DomainEnv = "LOOM_LAUNCHD_DOMAIN"
+)
+
+// DomainFromEnv returns System when DomainEnv marks this process as a
+// system-domain daemon (or a child of one), User otherwise.
+func DomainFromEnv() Domain {
+	if os.Getenv(DomainEnv) == SystemDomain {
+		return System
+	}
+	return User
+}
+
+// String returns the launchctl domain name: gui/<uid> or system.
+func (d Domain) String() string {
+	if d == System {
+		return SystemDomain
+	}
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
 
 // Spec describes one LaunchAgent. Zero values are sensible: an agent with
 // only Label/Program/Args/LogPath set produces a one-shot daemon that runs
@@ -40,6 +89,14 @@ type Spec struct {
 	// spawns. launchd's default is 10; we set it explicitly so respawn
 	// behavior is documented in the plist.
 	ThrottleIntervalSeconds int
+
+	// Domain selects a LaunchAgent (User, the zero value) or a boot-time
+	// LaunchDaemon (System).
+	Domain Domain
+
+	// UserName maps to launchd's UserName: the user a LaunchDaemon runs as.
+	// Empty omits the key. Required for System: no loom daemon runs as root.
+	UserName string
 }
 
 // PlistXML renders the LaunchAgent plist. Order of keys is fixed so two runs
@@ -52,6 +109,9 @@ func (s Spec) PlistXML() string {
 	b.WriteString("<dict>\n")
 
 	writeStringKey(&b, "Label", s.Label)
+	if s.UserName != "" {
+		writeStringKey(&b, "UserName", s.UserName)
+	}
 
 	b.WriteString("    <key>ProgramArguments</key>\n    <array>\n")
 	b.WriteString("        <string>" + xmlEscape(s.Program) + "</string>\n")
@@ -107,6 +167,15 @@ func xmlEscape(s string) string {
 
 // PlistPath returns ~/Library/LaunchAgents/<label>.plist.
 func PlistPath(label string) (string, error) {
+	return User.PlistPath(label)
+}
+
+// PlistPath returns where label's plist lives in d:
+// ~/Library/LaunchAgents/<label>.plist or /Library/LaunchDaemons/<label>.plist.
+func (d Domain) PlistPath(label string) (string, error) {
+	if d == System {
+		return SystemPlistPath(label), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -114,14 +183,38 @@ func PlistPath(label string) (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", label+".plist"), nil
 }
 
-// domain returns the gui/<uid> launchctl domain for the current user.
-func domain() string {
-	return fmt.Sprintf("gui/%d", os.Getuid())
+// SystemPlistPath returns /Library/LaunchDaemons/<label>.plist.
+func SystemPlistPath(label string) string {
+	return filepath.Join(SystemPlistDir, label+".plist")
 }
 
-// target returns gui/<uid>/<label>, the launchctl target string.
-func target(label string) string {
-	return domain() + "/" + label
+// target returns <domain>/<label>, the launchctl target string.
+func (d Domain) target(label string) string {
+	return d.String() + "/" + label
+}
+
+// SystemRestartArgv returns the bootout and bootstrap command lines,
+// launchctl's absolute path first, that restart label in the system domain.
+// The sudoers grant is rendered from these and the updater runs them under
+// sudo, so the two cannot drift apart.
+func SystemRestartArgv(label string) (bootout, bootstrap []string) {
+	return []string{Launchctl, "bootout", System.target(label)},
+		[]string{Launchctl, "bootstrap", SystemDomain, SystemPlistPath(label)}
+}
+
+// SudoRestart restarts label in the system domain from an unprivileged
+// process, running SystemRestartArgv through `sudo -n` so a missing sudoers
+// grant fails instead of prompting.
+func SudoRestart(label string) error {
+	bootout, bootstrap := SystemRestartArgv(label)
+	sudo := []string{Sudo, "-n"}
+	return restart(System, label, append(sudo, bootout...), append(sudo, bootstrap...))
+}
+
+// run executes argv and returns its combined output. A package var so tests
+// can record the launchctl and sudo command lines without touching launchd.
+var run = func(argv ...string) ([]byte, error) {
+	return exec.Command(argv[0], argv[1:]...).CombinedOutput()
 }
 
 // Install writes the plist, validates it with plutil, boots out any prior
@@ -131,7 +224,7 @@ func Install(s Spec) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	plistPath, err := PlistPath(s.Label)
+	plistPath, err := s.Domain.PlistPath(s.Label)
 	if err != nil {
 		return err
 	}
@@ -141,29 +234,47 @@ func Install(s Spec) error {
 	if err := os.WriteFile(plistPath, []byte(s.PlistXML()), 0o644); err != nil {
 		return err
 	}
+	if s.Domain == System {
+		// launchd refuses a LaunchDaemon plist that is not root-owned or is
+		// group/world-writable; WriteFile keeps a prior owner and the umask
+		// decides the mode, so set both explicitly.
+		if err := os.Chown(plistPath, 0, 0); err != nil {
+			return err
+		}
+		if err := os.Chmod(plistPath, 0o644); err != nil {
+			return err
+		}
+	}
 	// plutil-lint catches generator bugs before they poison ~/Library.
 	if out, err := exec.Command("plutil", "-lint", plistPath).CombinedOutput(); err != nil {
 		_ = os.Remove(plistPath)
 		return fmt.Errorf("plutil -lint: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+	bootout := []string{"launchctl", "bootout", s.Domain.target(s.Label)}
+	bootstrap := []string{"launchctl", "bootstrap", s.Domain.String(), plistPath}
+	if s.Domain == System {
+		bootout, bootstrap = SystemRestartArgv(s.Label)
+	}
+	return restart(s.Domain, s.Label, bootout, bootstrap)
+}
+
+// restart runs bootout then bootstrap for label in d.
+func restart(d Domain, label string, bootout, bootstrap []string) error {
 	// bootout-then-bootstrap is the macOS-recommended replace pattern. bootout
 	// returns nonzero if nothing was loaded; ignored.
-	_ = exec.Command("launchctl", "bootout", target(s.Label)).Run()
+	_, _ = run(bootout...)
 	// bootout returns before launchd finishes tearing the job down, so an
 	// immediate bootstrap can fail with EIO ("Bootstrap failed: 5: Input/
 	// output error"). Wait for the service to actually disappear from the
 	// domain, then retry bootstrap on transient EIO.
-	waitForBootout(s.Label, 5*time.Second)
-	if err := bootstrapWithRetry(domain(), plistPath, s.Label); err != nil {
-		return err
-	}
-	return nil
+	waitForBootout(d.target(label), 5*time.Second)
+	return bootstrapWithRetry(bootstrap, label)
 }
 
-func waitForBootout(label string, timeout time.Duration) {
+func waitForBootout(target string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		out, err := exec.Command("launchctl", "print", target(label)).CombinedOutput()
+		out, err := run("launchctl", "print", target)
 		if err != nil && strings.Contains(string(out), "Could not find service") {
 			return
 		}
@@ -171,11 +282,11 @@ func waitForBootout(label string, timeout time.Duration) {
 	}
 }
 
-func bootstrapWithRetry(dom, plistPath, label string) error {
+func bootstrapWithRetry(argv []string, label string) error {
 	var lastOut string
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
-		out, err := exec.Command("launchctl", "bootstrap", dom, plistPath).CombinedOutput()
+		out, err := run(argv...)
 		if err == nil {
 			return nil
 		}
@@ -195,7 +306,13 @@ func bootstrapWithRetry(dom, plistPath, label string) error {
 // Used after Install to confirm the binary actually starts (catches problems
 // like a non-executable program path before the first natural tick).
 func Kickstart(label string) error {
-	out, err := exec.Command("launchctl", "kickstart", target(label)).CombinedOutput()
+	return User.Kickstart(label)
+}
+
+// Kickstart is Kickstart for a job in d. Kickstarting a system-domain job
+// needs root.
+func (d Domain) Kickstart(label string) error {
+	out, err := exec.Command("launchctl", "kickstart", d.target(label)).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("launchctl kickstart %s: %v: %s", label, err, strings.TrimSpace(string(out)))
 	}
@@ -205,7 +322,12 @@ func Kickstart(label string) error {
 // Stop boots the job out of launchd, leaving its plist in place. Tolerant of
 // "not loaded" (the install may have been partial or already cleaned up).
 func Stop(label string) error {
-	out, err := exec.Command("launchctl", "bootout", target(label)).CombinedOutput()
+	return User.Stop(label)
+}
+
+// Stop is Stop for a job in d.
+func (d Domain) Stop(label string) error {
+	out, err := exec.Command("launchctl", "bootout", d.target(label)).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		// launchctl exit codes are poorly documented; filter on message.
@@ -221,10 +343,15 @@ func Stop(label string) error {
 
 // Uninstall stops the job and removes the plist.
 func Uninstall(label string) error {
-	if err := Stop(label); err != nil {
+	return User.Uninstall(label)
+}
+
+// Uninstall is Uninstall for a job in d.
+func (d Domain) Uninstall(label string) error {
+	if err := d.Stop(label); err != nil {
 		return err
 	}
-	plistPath, err := PlistPath(label)
+	plistPath, err := d.PlistPath(label)
 	if err != nil {
 		return err
 	}
@@ -238,7 +365,12 @@ func Uninstall(label string) error {
 // when the agent is not loaded (so callers can render a friendly message
 // rather than dump the print error).
 func Status(label string) (output string, loaded bool, err error) {
-	out, runErr := exec.Command("launchctl", "print", target(label)).CombinedOutput()
+	return User.Status(label)
+}
+
+// Status is Status for a job in d.
+func (d Domain) Status(label string) (output string, loaded bool, err error) {
+	out, runErr := exec.Command("launchctl", "print", d.target(label)).CombinedOutput()
 	if runErr != nil {
 		return "", false, nil
 	}
@@ -264,7 +396,12 @@ type Process struct {
 // ProcessFor returns the process launchd currently runs for label. ok is
 // false when the job is not loaded or is loaded with no process at all.
 func ProcessFor(label string) (p Process, ok bool, err error) {
-	out, loaded, err := Status(label)
+	return User.ProcessFor(label)
+}
+
+// ProcessFor is ProcessFor for a job in d.
+func (d Domain) ProcessFor(label string) (p Process, ok bool, err error) {
+	out, loaded, err := d.Status(label)
 	if err != nil || !loaded {
 		return Process{}, false, err
 	}
@@ -380,6 +517,9 @@ func (s Spec) validate() error {
 	}
 	if !filepath.IsAbs(s.Program) {
 		return fmt.Errorf("launchd: Program for %s must be absolute, got %q", s.Label, s.Program)
+	}
+	if s.Domain == System && s.UserName == "" {
+		return fmt.Errorf("launchd: system daemon %s needs a UserName; no loom daemon runs as root", s.Label)
 	}
 	return nil
 }

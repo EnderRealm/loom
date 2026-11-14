@@ -233,7 +233,13 @@ type agentReport struct {
 }
 
 func printAgent(r agentReport) {
-	plistPath, _ := launchd.PlistPath(r.label)
+	// A boot-time daemon is reported from the system domain; a component is
+	// installed in one domain or the other.
+	d := launchd.User
+	if _, err := os.Stat(launchd.SystemPlistPath(r.label)); err == nil {
+		d = launchd.System
+	}
+	plistPath, _ := d.PlistPath(r.label)
 	if plistPath == "" {
 		return
 	}
@@ -250,7 +256,7 @@ func printAgent(r agentReport) {
 		return
 	}
 	fmt.Printf("=== %s ===\n", r.human)
-	out, loaded, _ := launchd.Status(r.label)
+	out, loaded, _ := d.Status(r.label)
 	if !loaded {
 		fmt.Println("  installed but not loaded")
 	} else {

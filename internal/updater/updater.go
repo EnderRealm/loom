@@ -163,7 +163,12 @@ var workerComponents = []struct {
 // daemon never runs the new code. bootout+bootstrap both restarts the daemon
 // and re-registers the launch constraint for the new binary; that is exactly
 // what `loom install <component>` does, so we re-run it via the new binary.
+//
+// A system-domain updater runs as an unprivileged user and cannot rewrite
+// /Library/LaunchDaemons, so it restarts each daemon from its existing plist
+// through the sudoers grant `loom install --system` wrote instead.
 var reBootstrapAgents = func(bin string) error {
+	d := launchd.DomainFromEnv()
 	// Workers run in their OWN launchd jobs, so we can wait on each child:
 	// the child boots out and bootstraps a different job and exits cleanly,
 	// leaving this updater process untouched. A failure on one logs and
@@ -172,11 +177,17 @@ var reBootstrapAgents = func(bin string) error {
 		if !plistPresent(wc.label) {
 			continue
 		}
-		if err := installComponent(bin, wc.component); err != nil {
+		var err error
+		if d == launchd.System {
+			err = sudoRestart(wc.label)
+		} else {
+			err = installComponent(bin, wc.component)
+		}
+		if err != nil {
 			log.Printf("re-bootstrap %s: %v", wc.label, err)
 			continue
 		}
-		VerifyRestarted(wc.label, bin)
+		VerifyRestarted(d, wc.label, bin)
 	}
 
 	// Last: re-bootstrap self. We CANNOT wait on `<bin> install updater` —
@@ -205,12 +216,16 @@ var installComponent = func(bin, component string) error {
 	return nil
 }
 
+// sudoRestart restarts a system-domain daemon from its plist via `sudo -n
+// launchctl`. A package var so tests can record the restarts without sudo.
+var sudoRestart = launchd.SudoRestart
+
 // agentProcess reports the process launchd currently runs for an agent, and
 // kickstartAgent nudges a job that bootstrapped but never spawned. Package
 // vars so tests can drive both verify paths without launchctl or ps.
 var (
-	agentProcess   = launchd.ProcessFor
-	kickstartAgent = launchd.Kickstart
+	agentProcess   = launchd.Domain.ProcessFor
+	kickstartAgent = launchd.Domain.Kickstart
 )
 
 // Bounds for the post-install check. bootstrap is asynchronous, so the new
@@ -223,7 +238,7 @@ var (
 	kickstartAfter = 3 * time.Second
 )
 
-// VerifyRestarted holds label against the binary at bin after a
+// VerifyRestarted holds label in d against the binary at bin after a
 // bootout+bootstrap and logs the outcome by name. The install's exit code
 // says the job was re-registered, not that a new process came up on the new
 // image; agents have been observed running the pre-update image for days
@@ -231,12 +246,12 @@ var (
 // re-bootstrapped by the detached `loom updater reexec` helper in cmd, which
 // is the only process that outlives the teardown far enough to observe the
 // result; internal/updater cannot import cmd.
-func VerifyRestarted(label, bin string) {
+func VerifyRestarted(d launchd.Domain, label, bin string) {
 	binMtime, err := binaryMtime(bin)
 	if err != nil {
 		log.Printf("stat %s: %v — cannot check whether %s is on the new image", bin, err, label)
 	}
-	if verr := verifyRestarted(label, binMtime, err == nil); verr != nil {
+	if verr := verifyRestarted(d, label, binMtime, err == nil); verr != nil {
 		log.Printf("re-bootstrap %s: %v", label, verr)
 		return
 	}
@@ -254,9 +269,9 @@ func VerifyRestarted(label, bin string) {
 // CLI exits non-zero when launchd registered the job but never spawned a
 // process for it. A bin that cannot be stat'd drops the image comparison
 // and waits for any process.
-func AwaitRunning(label, bin string) error {
+func AwaitRunning(d launchd.Domain, label, bin string) error {
 	binMtime, err := binaryMtime(bin)
-	return verifyRestarted(label, binMtime, err == nil)
+	return verifyRestarted(d, label, binMtime, err == nil)
 }
 
 // binaryMtime returns bin's mtime, the reference point a freshly spawned
@@ -278,13 +293,13 @@ func binaryMtime(bin string) (time.Time, error) {
 // failure, and bootstrap has already re-registered the launch constraint by
 // this point, so kickstart is a nudge here rather than the (insufficient)
 // activation path above.
-func verifyRestarted(label string, binMtime time.Time, haveMtime bool) error {
+func verifyRestarted(d launchd.Domain, label string, binMtime time.Time, haveMtime bool) error {
 	deadline := time.Now().Add(verifyTimeout)
 	kickAt := time.Now().Add(kickstartAfter)
 	kicked := false
 	for {
 		var last error
-		p, ok, err := agentProcess(label)
+		p, ok, err := agentProcess(d, label)
 		switch {
 		case err != nil:
 			last = fmt.Errorf("cannot read process state: %v", err)
@@ -298,7 +313,7 @@ func verifyRestarted(label string, binMtime time.Time, haveMtime bool) error {
 		}
 		if !kicked && !ok && time.Now().After(kickAt) {
 			kicked = true
-			if err := kickstartAgent(label); err != nil {
+			if err := kickstartAgent(d, label); err != nil {
 				log.Printf("kickstart %s: %v", label, err)
 			}
 		}
@@ -532,11 +547,12 @@ func resolveLoomBinary() (string, error) {
 	return self, nil
 }
 
-// plistPresent reports whether label's launchd plist exists, gating which
-// agents count as "loaded" and so get re-bootstrapped. A package var so
-// tests can control the loaded set without touching the real filesystem.
+// plistPresent reports whether label's launchd plist exists in this
+// process's domain, gating which agents count as "loaded" and so get
+// re-bootstrapped. A package var so tests can control the loaded set without
+// touching the real filesystem.
 var plistPresent = func(label string) bool {
-	p, err := launchd.PlistPath(label)
+	p, err := launchd.DomainFromEnv().PlistPath(label)
 	if err != nil {
 		return false
 	}

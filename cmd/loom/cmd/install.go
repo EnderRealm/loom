@@ -29,10 +29,16 @@ const (
 var installCmd = &cobra.Command{
 	Use:       "install <component>",
 	Short:     "Install a loom launchd agent",
-	Long:      "Components: server | remote | receiver | summarizer | extractor | shipper | updater. Each writes a launchd plist that runs the current loom binary. The server and remote profiles also record the machine's role for health reporting.",
+	Long:      "Components: server | remote | receiver | summarizer | extractor | shipper | updater. Each writes a launchd plist that runs the current loom binary. The server and remote profiles also record the machine's role for health reporting.\n\nWith --system (as root, --user required) shipper and updater are installed as boot-time LaunchDaemons running as that user, for a host that boots with nobody logged in.",
 	ValidArgs: []string{"server", "remote", "receiver", "summarizer", "extractor", "shipper", "updater"},
 	Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if installSystemFlag {
+			return installSystem(args[0], installUserFlag)
+		}
+		if installUserFlag != "" {
+			return fmt.Errorf("--user is only meaningful with --system")
+		}
 		switch args[0] {
 		case "server":
 			if err := installReceiver(); err != nil {
@@ -66,7 +72,14 @@ var installCmd = &cobra.Command{
 	},
 }
 
+var (
+	installSystemFlag bool
+	installUserFlag   string
+)
+
 func init() {
+	installCmd.Flags().BoolVar(&installSystemFlag, "system", false, "install a boot-time LaunchDaemon (root; shipper or updater only)")
+	installCmd.Flags().StringVar(&installUserFlag, "user", "", "unprivileged user the --system daemon runs as")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -111,7 +124,7 @@ func installAgent(spec launchd.Spec) error {
 	if err := installSpec(spec); err != nil {
 		return err
 	}
-	if err := awaitRunning(spec.Label, spec.Program); err != nil {
+	if err := awaitRunning(spec.Domain, spec.Label, spec.Program); err != nil {
 		return fmt.Errorf("%s: %w", spec.Label, err)
 	}
 	return nil
@@ -137,8 +150,26 @@ func installShipper() error {
 	if err := os.MkdirAll(config.TransportDir(), 0o700); err != nil {
 		return err
 	}
-	logPath := filepath.Join(config.TransportDir(), "shipper.log")
+	logPath := shipperLogPath()
 
+	spec := shipperSpec(bin, logPath)
+	if err := installAgent(spec); err != nil {
+		return err
+	}
+	fmt.Printf("installed shipper:\n")
+	fmt.Printf("  label:    %s\n", spec.Label)
+	fmt.Printf("  binary:   %s\n", bin)
+	fmt.Printf("  interval: %s (in-process ticker; plist is KeepAlive)\n", cfg.Interval())
+	fmt.Printf("  log:      %s\n", logPath)
+	return nil
+}
+
+func shipperLogPath() string {
+	return filepath.Join(config.TransportDir(), "shipper.log")
+}
+
+// shipperSpec builds the shipper's launchd Spec.
+func shipperSpec(bin, logPath string) launchd.Spec {
 	spec := launchd.Spec{
 		Label:                   shipper.AgentLabel,
 		Program:                 bin,
@@ -151,15 +182,7 @@ func installShipper() error {
 	if h := loomHomeForPlist(); h != "" {
 		spec.Env = map[string]string{"LOOM_HOME": h}
 	}
-	if err := installAgent(spec); err != nil {
-		return err
-	}
-	fmt.Printf("installed shipper:\n")
-	fmt.Printf("  label:    %s\n", spec.Label)
-	fmt.Printf("  binary:   %s\n", bin)
-	fmt.Printf("  interval: %s (in-process ticker; plist is KeepAlive)\n", cfg.Interval())
-	fmt.Printf("  log:      %s\n", logPath)
-	return nil
+	return spec
 }
 
 // stdinIsTTY reports whether stdin is an interactive terminal. A package
@@ -386,25 +409,7 @@ func installUpdater() error {
 	}
 	logPath := updater.LogPath()
 
-	env := map[string]string{
-		"LOOM_HOME":                     config.Home(),
-		"LOOM_UPDATER_INTERVAL_MINUTES": strconv.Itoa(updater.DefaultIntervalMinutes),
-		// PATH for launchctl discovery; launchd's stripped PATH already
-		// covers /bin, but a comprehensive PATH keeps every loom agent
-		// consistent.
-		"PATH": canonicalPath(),
-	}
-
-	spec := launchd.Spec{
-		Label:                   updater.AgentLabel,
-		Program:                 bin,
-		Args:                    []string{"updater", "daemon"},
-		LogPath:                 logPath,
-		Env:                     env,
-		KeepAlive:               true,
-		RunAtLoad:               true,
-		ThrottleIntervalSeconds: 30,
-	}
+	spec := updaterSpec(bin, logPath)
 	if err := installAgent(spec); err != nil {
 		return err
 	}
@@ -414,6 +419,29 @@ func installUpdater() error {
 	fmt.Printf("  interval: %d min\n", updater.DefaultIntervalMinutes)
 	fmt.Printf("  log:      %s\n", logPath)
 	return nil
+}
+
+// updaterSpec builds the updater's launchd Spec.
+func updaterSpec(bin, logPath string) launchd.Spec {
+	env := map[string]string{
+		"LOOM_HOME":                     config.Home(),
+		"LOOM_UPDATER_INTERVAL_MINUTES": strconv.Itoa(updater.DefaultIntervalMinutes),
+		// PATH for launchctl discovery; launchd's stripped PATH already
+		// covers /bin, but a comprehensive PATH keeps every loom agent
+		// consistent.
+		"PATH": canonicalPath(),
+	}
+
+	return launchd.Spec{
+		Label:                   updater.AgentLabel,
+		Program:                 bin,
+		Args:                    []string{"updater", "daemon"},
+		LogPath:                 logPath,
+		Env:                     env,
+		KeepAlive:               true,
+		RunAtLoad:               true,
+		ThrottleIntervalSeconds: 30,
+	}
 }
 
 // canonicalPath returns a PATH that includes the common Homebrew and

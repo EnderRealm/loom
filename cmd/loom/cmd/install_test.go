@@ -113,7 +113,7 @@ func stubInstall(t *testing.T, awaitErr error) (calls *[]string, installed *laun
 		*installed = spec
 		return nil
 	}
-	awaitRunning = func(label, bin string) error {
+	awaitRunning = func(_ launchd.Domain, label, bin string) error {
 		*calls = append(*calls, "await")
 		*awaited = [2]string{label, bin}
 		return awaitErr

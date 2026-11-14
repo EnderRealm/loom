@@ -17,7 +17,11 @@ import (
 var uninstallCmd = &cobra.Command{
 	Use:   "uninstall",
 	Short: "Remove all loom launchd agents (state preserved)",
+	Long:  "Removes every loom LaunchAgent. With --system (as root) removes the boot-time shipper and updater LaunchDaemons and the sudoers grant instead.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if uninstallSystemFlag {
+			return uninstallSystem()
+		}
 		labels := []string{shipper.AgentLabel, receiver.AgentLabel, summarizerLabel, extract.AgentLabel, updater.AgentLabel}
 		for _, label := range labels {
 			plistPath, _ := launchd.PlistPath(label)
@@ -38,6 +42,9 @@ var uninstallCmd = &cobra.Command{
 	},
 }
 
+var uninstallSystemFlag bool
+
 func init() {
+	uninstallCmd.Flags().BoolVar(&uninstallSystemFlag, "system", false, "remove the boot-time LaunchDaemons and sudoers grant (root)")
 	rootCmd.AddCommand(uninstallCmd)
 }

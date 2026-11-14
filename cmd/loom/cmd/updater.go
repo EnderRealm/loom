@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"loom/internal/launchd"
 	"loom/internal/updater"
 )
 
@@ -56,7 +57,14 @@ var updaterReexecCmd = &cobra.Command{
 		// Let the spawning updater process exit so its launchd job is idle
 		// before we bootout+bootstrap it.
 		time.Sleep(2 * time.Second)
-		if err := installUpdater(); err != nil {
+		d := launchd.DomainFromEnv()
+		if d == launchd.System {
+			// The daemon user cannot rewrite /Library/LaunchDaemons; restart
+			// from the existing plist through the sudoers grant.
+			if err := launchd.SudoRestart(updater.AgentLabel); err != nil {
+				return err
+			}
+		} else if err := installUpdater(); err != nil {
 			return err
 		}
 		// A stale updater is the worst case of all: it keeps running the
@@ -69,7 +77,7 @@ var updaterReexecCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		updater.VerifyRestarted(updater.AgentLabel, bin)
+		updater.VerifyRestarted(d, updater.AgentLabel, bin)
 		return nil
 	},
 }
