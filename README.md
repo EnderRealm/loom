@@ -279,6 +279,8 @@ A lightweight agent-session shipper. The client (`loom shipper daemon`) walks ag
 
 **Agents supported:** Cursor CLI (the received `cursor-store-v1` journals, with children as separate sessions), Claude Code (sessions at `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl`, plus the transcripts of the subagents that session dispatched, anywhere under `~/.claude/projects/<sanitized-cwd>/<uuid>/subagents/` — directly in it for a plain dispatch, one level deeper under `workflows/<wf_id>/` for a workflow one, whose `journal.jsonl` is the workflow's own bookkeeping and is not a transcript) and Codex CLI (rollouts at `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<uuid>.jsonl`).
 
+A host can also ship a JSON-lines metric sample log, named by `host_metrics_log` in its `config.json`; capture follows it across newsyslog rotation, the summarizer folds it into `host_samples`, and `loom samples` serves it by host and time range. See [`docs/host-metrics.md`](./docs/host-metrics.md).
+
 A session run from a throwaway working directory — a review lens started in an empty `mktemp -d` so the reviewed repo cannot instruct its reviewer — reports that directory as its cwd, which would make every run its own project and leave it with no knowledge scope. Its launcher stamps the checkout it is about in `~/.loom/attribution.jsonl` and the Codex adapter resolves identity through it; the producer contract is [`docs/attribution-stamps.md`](./docs/attribution-stamps.md).
 
 A hosted Claude session reaches the shipper through a spool. Under `weft-worker --agent-user` claude runs as `weftagentN`, whose 0700 home the operator's shipper cannot read, so the worker copies that user's transcripts into `$LOOM_HOME/spool/claude/projects/`, a mirror of `~/.claude/projects`: `<project>/<session>.jsonl` and `<project>/<session>/subagents/**`. They ship under `claude-code` through the same listing as the operator's own tree, and a machine with no hosted runs has no spool and no error. The copier's side of the contract:
@@ -458,6 +460,7 @@ Each machine you want to ship sessions from runs its own loom shipper daemon + c
 | `summarizer_interval_seconds` | no       | `30`    | Watch-mode sweep cadence baked into the summarizer plist by `loom install summarizer`. Must be positive. |
 | `allow_plaintext_transcripts_and_token` | no | `false` | Lets the shipper use `http://` to a non-loopback host, exposing transcripts and the token to the network path. See below. |
 | `receiver_addr`               | no       | unset   | Server role: the receiver's listen address, as `host:port`, baked into its plist by `loom install receiver`. Unset keeps `:8765`. |
+| `host_metrics_log`            | no       | unset   | Absolute path of a metric sample log this host writes, shipped as `loom-host-metrics`. Unset ships none. See [`docs/host-metrics.md`](./docs/host-metrics.md). |
 
 The seconds fields and `receiver_addr` are the only ones the server role reads: a server has no `server_url`, and `loom install summarizer` reads `summarizer_interval_seconds` from `$LOOM_HOME/config.json` when the file exists, falling back to `30` when it does not. A zero or negative value in either seconds field is rejected rather than defaulted.
 
@@ -534,6 +537,7 @@ rm -f ~/.local/bin/loom
 | `loom work-report`            | `/work`-run compliance metrics from the summary DB, as JSON.                |
 | `loom cost-report`            | Per-`/work`-run cost — turns, tokens, tools, time, conditions — as JSON.    |
 | `loom run-report --run <id>`  | One run's tree with parent, descendant and total metrics, as JSON.          |
+| `loom samples --host <h> --since <t> --until <t>` | A host's metric samples in `[since, until)`, as a JSON array of the lines as written. |
 | `loom ui`                     | Interactive dashboard (alias: `loom tui`); `--run <id>` opens a run's detail. |
 | `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `extractor` / `shipper`. `server`/`remote` also record the machine role. |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |

@@ -19,6 +19,11 @@ package summaries
 // (addRunsRootTranscript) and the next import of a changed registry fills it.
 // A binary predating it names its columns on upsert and leaves it alone.
 //
+// host_samples and host_sample_imports carry no version either: they are
+// folded from the host-metrics sample log (docs/host-metrics.md), not from
+// transcripts, so a v12 database gains them on open and the next sweep
+// imports every received log from its start.
+//
 // schemaVersion 12: subagents gains tool_use_id, started_at and ended_at —
 // the dispatching tool_use and the span of the dispatch's own transcript, so
 // a run report can place a Claude subagent under its run's root and against
@@ -454,5 +459,32 @@ CREATE TABLE IF NOT EXISTS project_state (
     open_tickets             INTEGER NOT NULL,
     tickets_closed_in_window INTEGER NOT NULL,
     dormant                  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS host_samples (
+    host                     TEXT NOT NULL,
+    ts                       TEXT NOT NULL,
+    v                        INTEGER,
+    cpu_user_pct             REAL,
+    cpu_sys_pct              REAL,
+    gpu_device_pct           REAL,
+    memory_pressure_level    INTEGER,
+    budget_wired_mib         INTEGER,
+    disk_avail_bytes         INTEGER,
+    tailnet_path             TEXT,
+    tailnet_latency_ms       REAL,
+    updates_restart_required INTEGER,
+    sample                   TEXT NOT NULL,
+    source_path              TEXT NOT NULL,
+    source_line              INTEGER NOT NULL,
+    PRIMARY KEY (host, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_host_samples_source ON host_samples(source_path);
+
+CREATE TABLE IF NOT EXISTS host_sample_imports (
+    source_path TEXT PRIMARY KEY,
+    offset      INTEGER NOT NULL,
+    lines       INTEGER NOT NULL,
+    imported_at TEXT NOT NULL
 );
 `

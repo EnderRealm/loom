@@ -173,7 +173,7 @@ func Once() {
 	counts := tickCounts{}
 	now := time.Now().UTC()
 
-	capturePass(&counts)
+	capturePass(cfg, &counts)
 
 	healthErr := healthCheck(cfg)
 	var shipSummary string
@@ -263,8 +263,12 @@ func Daemon(ctx context.Context) error {
 
 // ---------- capture pass ----------
 
-func capturePass(counts *tickCounts) {
-	captureAdapters(counts, source.Adapters())
+func capturePass(cfg *Config, counts *tickCounts) {
+	adapters := source.Adapters()
+	if cfg.HostMetricsLog != "" {
+		adapters = append(adapters, source.HostMetrics(cfg.HostMetricsLog))
+	}
+	captureAdapters(counts, adapters)
 }
 
 func captureAdapters(counts *tickCounts, adapters []source.Adapter) {
@@ -291,6 +295,10 @@ func captureAdapters(counts *tickCounts, adapters []source.Adapter) {
 			}
 			if snapshot, ok := ad.(source.SnapshotAdapter); ok {
 				captureSnapshot(snapshot, s, gitCache, counts)
+				continue
+			}
+			if agent == source.HostMetricsAgent {
+				captureFollowed(s, counts)
 				continue
 			}
 			// A subagent gets its own cursor, namespaced under its parent.

@@ -120,7 +120,7 @@ func LoadProjects() ([]Project, error) {
 			return
 		}
 		for _, a := range entries {
-			if !a.IsDir() || a.Name() == summaries.ExecutionsAgent {
+			if !a.IsDir() || a.Name() == summaries.ExecutionsAgent || a.Name() == summaries.HostMetricsAgent {
 				continue
 			}
 			slugs, err := os.ReadDir(filepath.Join(root, a.Name()))
@@ -520,9 +520,9 @@ func walkAgentSlugSessions(root string, fn func(agent, slug, sid, path string, i
 			continue
 		}
 		agent := a.Name()
-		// The execution-record registry ships under an agent segment like a
-		// transcript but is not a session of any project.
-		if agent == summaries.ExecutionsAgent {
+		// The execution-record registry and host sample logs ship under an
+		// agent segment like a transcript but are not sessions of any project.
+		if agent == summaries.ExecutionsAgent || agent == summaries.HostMetricsAgent {
 			continue
 		}
 		slugs, err := os.ReadDir(filepath.Join(root, agent))

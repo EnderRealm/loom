@@ -197,6 +197,7 @@ func sweep(ctx context.Context, st *summaries.Store, receivedDir string,
 	walkAgent(ctx, st, summary.AgentCursor,
 		filepath.Join(receivedDir, "cursor-cli"), force, verbose, &r)
 	walkExecutions(ctx, st, filepath.Join(receivedDir, summaries.ExecutionsAgent), force, &r)
+	walkHostSamples(ctx, st, filepath.Join(receivedDir, summaries.HostMetricsAgent), force, &r)
 	r.duration = time.Since(start)
 	return r
 }
@@ -248,6 +249,58 @@ func walkExecutions(ctx context.Context, st *summaries.Store, root string,
 		}
 		log.Printf("executions %s runs=%d executions=%d diagnostics=%d",
 			path, counts.Runs, counts.Executions, counts.Diagnostics)
+		r.parsed++
+		return nil
+	})
+}
+
+// walkHostSamples folds every shipped host sample log
+// (received/loom-host-metrics/<host>/*.jsonl) into host_samples. A received
+// file only grows, so each is read from where its last import stopped and
+// skipped when that is its size. Log lines carry counts and the path only —
+// never a sample.
+func walkHostSamples(ctx context.Context, st *summaries.Store, root string,
+	force bool, r *sweepResult) {
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return
+	}
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		r.seen++
+		info, err := d.Info()
+		if err != nil {
+			r.errored++
+			return nil
+		}
+		if !force {
+			current, err := st.HostSamplesCurrent(path, info.Size())
+			if err != nil {
+				log.Printf("check %s: %v", path, err)
+			} else if current {
+				r.skipped++
+				return nil
+			}
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			log.Printf("host samples %s: %v", path, err)
+			r.errored++
+			return nil
+		}
+		defer f.Close()
+		counts, err := st.ImportHostSamples(ctx, path, f, info.Size(), force)
+		if err != nil {
+			log.Printf("host samples %s: %v", path, err)
+			r.errored++
+			return nil
+		}
+		log.Printf("host samples %s stored=%d malformed=%d unknown_version=%d reset=%t",
+			path, counts.Stored, counts.Malformed, counts.UnknownVersion, counts.Reset)
 		r.parsed++
 		return nil
 	})

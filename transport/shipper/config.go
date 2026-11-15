@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -54,6 +55,11 @@ type Config struct {
 	// port staying open beside it. Read on the server role through
 	// ReceiverAddr. Absent keeps the receiver's default bind.
 	ReceiverAddr string `json:"receiver_addr,omitempty"`
+
+	// HostMetricsLog is the path of a JSON-lines metric sample log this host
+	// writes, shipped as agent loom-host-metrics (docs/host-metrics.md).
+	// Absent ships none; the path is host-specific, so loom names no default.
+	HostMetricsLog string `json:"host_metrics_log,omitempty"`
 
 	// IntervalMinutes is the in-process ticker cadence inside
 	// `loom shipper daemon` when IntervalSeconds is absent. Note: launchd's
@@ -142,6 +148,11 @@ func LoadConfig() (*Config, error) {
 	}
 	if err := checkTransport(u, c.AllowPlaintextTranscriptsAndToken); err != nil {
 		return nil, fmt.Errorf("%s: server_url: %w", path, err)
+	}
+	// Relative would resolve against the daemon's working directory, which
+	// launchd sets to /.
+	if c.HostMetricsLog != "" && !filepath.IsAbs(c.HostMetricsLog) {
+		return nil, fmt.Errorf("%s: host_metrics_log must be an absolute path, got %q", path, c.HostMetricsLog)
 	}
 	return c, nil
 }

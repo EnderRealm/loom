@@ -100,7 +100,13 @@ func ReadDeltaBytes(path string, from int64) (data []byte, toOffset int64, err e
 		return nil, from, err
 	}
 	defer f.Close()
+	return ReadDeltaFile(f, from)
+}
 
+// ReadDeltaFile is ReadDeltaBytes over a file the caller already holds open,
+// for a reader that must know which inode it read: a path can be renamed out
+// from under it between a stat and an open.
+func ReadDeltaFile(f *os.File, from int64) (data []byte, toOffset int64, err error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, from, err
