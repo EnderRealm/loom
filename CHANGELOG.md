@@ -6,6 +6,45 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-11-14 — Boot-time daemons and host metric samples
+
+### Upgrade
+
+- No schema version change; `summaries.db` stays at schema 12. The new
+  `host_samples` and `host_sample_imports` tables are created on open and
+  filled by the next sweep.
+- Installs made with `loom install --system` are not rewritten by the
+  updater: a release that changes a daemon plist's shape takes effect when
+  `loom install --system` is re-run.
+
+### Added
+
+- `loom install --system --user <name> <shipper|updater>` installs the
+  shipper and updater as boot-time LaunchDaemons that run as the named
+  unprivileged user, so a headless host with nobody logged in still ships
+  and updates. The updater restarts them through `/etc/sudoers.d/loom`, a
+  visudo-checked grant limited to the exact `launchctl` bootout/bootstrap
+  argv for the two labels. `loom uninstall --system` removes both daemons
+  and the grant, and `loom status` reports system-domain jobs.
+- The shipper ships a host's JSON-lines metric sample log when
+  `host_metrics_log` (an absolute path) is set in `config.json`, under the
+  `loom-host-metrics` agent. Capture follows the file by inode across
+  newsyslog rotation, so a line written across a rotation is neither lost nor
+  duplicated.
+- The summarizer folds received samples into `host_samples`, keyed on
+  `(host, ts)` with the raw line beside a set of scalar columns, importing
+  each file incrementally; `loom summarize --rebuild` reproduces it.
+- `loom samples --host <h> --since <t> --until <t>` prints that host's
+  samples in `[since, until)` as a JSON array of the lines exactly as
+  written, ordered by `ts`. See `docs/host-metrics.md`.
+
+### Changed
+
+- `loom install --system` refuses when the daemon user already has a
+  LaunchAgent plist for the label, and user-mode `loom install
+  shipper|updater` refuses when `/Library/LaunchDaemons` holds the system
+  plist, so one job never runs in both launchd domains.
+
 ## [1.13.0] — 2026-11-08 — Full tool output, confidential transport and knowledge dupes
 
 ### Upgrade
