@@ -95,6 +95,37 @@ DESTINATIONS = ("truth", "ticket")
 # also accepts epic, which no single finding is.
 TICKET_TYPES = ("bug", "feature")
 
+# A truth's optional `kind:`. Absent (or empty) is an ordinary truth. `measured`
+# is a process finding the session derived by measuring its own artifacts, and
+# its three signals are enforced as sections rather than left to the model's
+# judgement. Any other value is dropped, not read as ordinary: an unknown kind
+# is a shape this process cannot check, and filing it would hand a reviewer a
+# claim to a class nothing vetted. See docs/candidate-destinations.md.
+MEASURED_KIND = "measured"
+TRUTH_KINDS = (MEASURED_KIND,)
+
+# The sections a measured truth carries besides Claim and How to verify, as
+# parse_truth keys and the headings the prompt names: what was believed
+# beforehand, the measurement that contradicted it, and where it holds past the
+# ticket that produced it.
+MEASURED_SECTIONS = (
+    ("hypothesis", "Hypothesis"),
+    ("measurement", "Measurement"),
+    ("applies_beyond", "Applies beyond"),
+)
+
+# A Measurement must carry a re-runnable command: a non-empty fenced block, or
+# an inline code span of at least two words (`wc -l x`, not a bare `x.py`).
+MEASUREMENT_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+MEASUREMENT_INLINE_RE = re.compile(r"`([^`\n]+)`")
+# ...and the numbers it produced, outside the code: a digit inside the command
+# (`HEAD~1`, `head -20`) is not a result. A standalone number token (`1,200`,
+# `47%`, `3.5`), so a sha (`a1fd6f5`) or a version (`v2`) in the prose is not
+# one either, and an ordered-list marker (`1.`, `2)`) is removed before the
+# search: a numbered list of steps states no result.
+MEASUREMENT_NUMBER_RE = re.compile(r"(?<![\w.])\d[\d,.]*%?(?!\w)")
+MEASUREMENT_LIST_MARKER_RE = re.compile(r"^[ \t]*\d+[.)][ \t]+", re.MULTILINE)
+
 STOPWORDS = set("a an and are as at be but by for from has have if in is it of on or that the this to was were will with not no which when where who why how into over under across between".split())
 
 INPUT_GUIDANCE_SUMMARY = """You will receive a session artifact. Most often it is a markdown summary with a frontmatter block (project, session_id, date) and sections like `### Overview`, `### Decisions`, `### Problems`, `### Discoveries`. Those sections tell you where to look — `### Discoveries` and `### Problems` for observed behavior, `### Decisions` for choices and their reasoning.
@@ -116,6 +147,7 @@ Places where candidates tend to surface:
 3. **User pushback**: when the user says "no" or redirects, the new direction sometimes names a constraint.
 4. **Evidence-backed claims**: an ASSISTANT block that cites specific file paths, line numbers, grep counts, or commit shas and draws a conclusion from them.
 5. **Architecture statements**: "X is designed as Y", "agents are stateless text processors", "the dist bundle is what runs, not the source".
+6. **Self-measurement**: TOOL/RESULT blocks where the session measured its own output (diff stats, file comparisons, counts), followed by an ASSISTANT block revising what was believed before — a candidate for a measured truth.
 
 Finding one of these tells you where to look. It does not settle whether the candidate passes the tests above.
 
@@ -225,6 +257,7 @@ def parse_truth(text: str, source: str = "") -> dict:
         "type": frontmatter.get("type", ""),
         "destination": frontmatter.get("destination", ""),
         "ticket_type": frontmatter.get("ticket_type", ""),
+        "kind": frontmatter.get("kind", ""),
         "status": frontmatter.get("status", ""),
         "claim": sections.get("claim", "") or sections.get("choice", ""),
         "problem": sections.get("problem", ""),
@@ -234,6 +267,7 @@ def parse_truth(text: str, source: str = "") -> dict:
         "alternatives": sections.get("alternatives", ""),
         "rationale": sections.get("rationale", ""),
         "principle": sections.get("principle", ""),
+        **{key: sections.get(key, "") for key, _ in MEASURED_SECTIONS},
         "evidence_paths": evidence_paths,
         "evidence_commits": evidence_commits,
         "evidence_count": evidence_count,
@@ -873,6 +907,29 @@ def emit_candidates(candidates: list[dict], base_dir: Path, scope: str,
     return changes, routed
 
 
+def measured_defect(c: dict) -> str:
+    """Why a `kind: measured` truth lacks its class's shape, "" when it has it.
+
+    The class is what the sections prove, not what the model calls it: a
+    Hypothesis the measurement contradicted, a Measurement a reader can re-run
+    and whose numbers it states, and where the finding Applies beyond the
+    ticket that produced it.
+    """
+    missing = [heading for key, heading in MEASURED_SECTIONS if not c.get(key)]
+    if missing:
+        return f"without {', '.join(missing)}"
+    measurement = c["measurement"]
+    commands = [block.strip() for block in MEASUREMENT_FENCE_RE.findall(measurement)]
+    prose = MEASUREMENT_FENCE_RE.sub(" ", measurement)
+    commands += [span for span in MEASUREMENT_INLINE_RE.findall(prose) if len(span.split()) > 1]
+    if not any(commands):
+        return "whose Measurement has no command"
+    results = MEASUREMENT_LIST_MARKER_RE.sub(" ", MEASUREMENT_INLINE_RE.sub(" ", prose))
+    if not MEASUREMENT_NUMBER_RE.search(results):
+        return "whose Measurement states no number outside its commands"
+    return ""
+
+
 def split_destinations(candidates: list[dict]) -> dict[str, list[dict]]:
     """Group truth-extractor candidates by the destination each one declares.
 
@@ -881,7 +938,9 @@ def split_destinations(candidates: list[dict]) -> dict[str, list[dict]]:
     tk type. Anything else is dropped with a warning: a missing destination is
     never defaulted, because defaulting is the reframe the destination field
     exists to end, and a mis-shaped one would reach a reviewer as something it
-    is not.
+    is not. `kind:` is a truth attribute: a truth declaring one is held to that
+    kind's shape, and is dropped when the kind is one this process does not
+    know (TRUTH_KINDS); any other artifact declaring one is dropped.
     """
     out: dict[str, list[dict]] = {d: [] for d in DESTINATIONS}
     for c in candidates:
@@ -898,6 +957,22 @@ def split_destinations(candidates: list[dict]) -> dict[str, list[dict]]:
             print(f"  warn: dropping candidate {cid[:80]!r}: destination truth "
                   f"without Claim and How to verify", file=sys.stderr)
             continue
+        kind = c.get("kind") or ""
+        if kind and dest != "truth":
+            print(f"  warn: dropping candidate {cid[:80]!r}: kind "
+                  f"{echo_scope(kind)!r} on destination {dest} — kind is a "
+                  f"truth attribute", file=sys.stderr)
+            continue
+        if kind and kind not in TRUTH_KINDS:
+            print(f"  warn: dropping candidate {cid[:80]!r}: kind "
+                  f"{echo_scope(kind)!r} is not one of {', '.join(TRUTH_KINDS)}",
+                  file=sys.stderr)
+            continue
+        defect = measured_defect(c) if kind == MEASURED_KIND else ""
+        if defect:
+            print(f"  warn: dropping candidate {cid[:80]!r}: {MEASURED_KIND} truth "
+                  f"{defect}", file=sys.stderr)
+            continue
         if dest == "ticket" and not (c.get("problem") and c.get("ticket_type") in TICKET_TYPES):
             print(f"  warn: dropping candidate {cid[:80]!r}: destination ticket "
                   f"without a Problem and a ticket_type of {' or '.join(TICKET_TYPES)}",
@@ -908,18 +983,26 @@ def split_destinations(candidates: list[dict]) -> dict[str, list[dict]]:
 
 
 def decision_candidates(candidates: list[dict]) -> list[dict]:
-    """A decision run's candidates, less any that declare the ticket destination.
+    """A decision run's candidates, less any that declare the ticket destination
+    or a truth `kind:`.
 
     parse_truth accepts a ticket-shaped artifact whatever the run, but only a
     truth run routes by destination: a decision run files everything under
     _candidates/decisions/, where a ticket would reach a reviewer as a decision.
+    A kind is checked only on a truth, so a decision declaring one would reach a
+    reviewer claiming a class nothing vetted.
     """
     out = []
     for c in candidates:
+        cid = c.get("id") or ""
         if c.get("destination") == "ticket":
-            cid = c.get("id") or ""
             print(f"  warn: dropping candidate {cid[:80]!r}: destination ticket "
                   f"in a decision run", file=sys.stderr)
+            continue
+        if c.get("kind"):
+            print(f"  warn: dropping candidate {cid[:80]!r}: kind "
+                  f"{echo_scope(c['kind'])!r} in a decision run — kind is a "
+                  f"truth attribute", file=sys.stderr)
             continue
         out.append(c)
     return out
@@ -1188,6 +1271,20 @@ def summary_provenance(path: Path) -> tuple[str | None, list[str]]:
         if len(valid) >= MAX_SOURCE_TICKETS:
             break
     return runtime, valid
+
+
+def candidate_record(c: dict) -> dict:
+    """One candidate as --json-out reports it. A measured truth carries its
+    kind and the sections that make it one, so a run's record shows what was
+    measured and not only what was concluded."""
+    record = {"id": c["id"], "title": c["title"], "scope": c.get("scope", ""),
+              "destination": c.get("destination", ""), "claim": c.get("claim", ""),
+              "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0),
+              "warnings": c.get("warnings", [])}
+    if c.get("destination") == "truth" and c.get("kind") == MEASURED_KIND:
+        record["kind"] = c["kind"]
+        record.update({key: c.get(key, "") for key, _ in MEASURED_SECTIONS})
+    return record
 
 
 def main():
@@ -1506,7 +1603,7 @@ def main():
                 "ticket_candidates": len(by_destination.get("ticket", [])),
                 "references_loaded": 0,
                 "verdict": "UNSCORED",
-                "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "destination": c.get("destination", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
+                "candidates": [candidate_record(c) for c in valid],
             }, indent=2))
         return
 
@@ -1560,7 +1657,7 @@ def main():
             "verdict": verdict,
             "references": report["results"],
             "extras": [scored[i]["id"] for i in report["extras"]],
-            "candidates": [{"id": c["id"], "title": c["title"], "scope": c.get("scope", ""), "destination": c.get("destination", ""), "claim": c.get("claim", ""), "verify": c.get("verify", ""), "evidence_count": c.get("evidence_count", 0), "warnings": c.get("warnings", [])} for c in valid],
+            "candidates": [candidate_record(c) for c in valid],
         }, indent=2))
 
     sys.exit(0 if verdict == "PASS" else 1)

@@ -49,6 +49,37 @@ Because nothing auto-files, there is no unattended write to tk to bound.
   artifact lacks — is dropped with a stderr warning. A missing destination is
   never defaulted to `truth`: defaulting is the reframe the key exists to end.
 
+### Measured truths
+
+A truth may carry `kind: measured`: a process finding the session derived by
+measuring its own artifacts, whose numbers contradicted what was believed
+beforehand, and which holds past the ticket that produced it. It is a truth,
+not a new destination, and lands in `_candidates/truths/<scope>/` with the
+rest. `split_destinations` enforces the class by shape rather than trusting
+the label:
+
+- **Sections.** Besides Claim and How to verify, a non-empty `## Hypothesis`,
+  `## Measurement` and `## Applies beyond`. One missing any is dropped.
+- **Measurement.** At least one command — a non-empty fenced block, or an
+  inline code span of two or more words — and a standalone number (`1,200`,
+  `47%`) in the prose outside the code, so a digit in the command, a sha or a
+  version is not mistaken for a result. One missing either is dropped.
+- **Unknown kind.** Any `kind:` other than `measured` on a truth is dropped,
+  fail-closed: a shape this process cannot check is not filed as an ordinary
+  truth. An absent or empty `kind:` is an ordinary truth, unaffected.
+- **Kind off a truth.** `kind:` is a truth attribute. A ticket candidate, or a
+  decision run's artifact, declaring one is dropped rather than filed claiming
+  a class nothing checked.
+
+The key and the sections pass through to the candidate file as the model wrote
+them, and `--json-out` adds `kind`, `hypothesis`, `measurement` and
+`applies_beyond` to a measured candidate's record. A measured truth is counted
+separately from ordinary truths, as ticket candidates are, so the truth
+ceiling never crowds one out. `summarizer.md` carries each self-measurement as
+one `### Measurements` entry — the question, the commands, the numbers, the
+conclusion and an `overturned`/`confirmed` verdict, with an overturned belief
+mirrored under Corrections — so the class survives `--summarize`.
+
 Ticket candidates get everything truth candidates get: the authoritative
 session-id override, the `ticket:` source citations derived from the session's
 commits, scope routing by the declared `scope:` (gated on `truths/<scope>/`,

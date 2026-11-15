@@ -53,6 +53,21 @@ Look for:
 
 Format: `**<what changed>** — <old understanding> → <new understanding>. Reason: <why>.`
 
+### Measurements
+
+Bullet list. Moments where the session measured its own output — its diffs, commits, generated files, review rounds, test runs — to answer a question or test an explanation: diff stats, file comparisons, line or comment counts, before/after sizes. Include a measurement a subagent or side query took and the session relayed. Skip routine test passes and status checks that tested nothing.
+
+Keep each one as a single unit, never split across sections or reduced to its numbers:
+
+- **Question** — what was asked or believed beforehand, the explanation the measurement was meant to test. If the user asked it, keep their wording.
+- **Commands** — every command or tool the input shows or names for it, with the files it ran over (`git diff --numstat`, `cmp <a> <b>`, `grep -c`), verbatim where the input gives the command line.
+- **Numbers** — every number it produced, exactly as stated: counts, totals, percentages, sizes.
+- **Conclusion** — what the numbers showed, and a verdict on the question's belief: `overturned` or `confirmed`. A question the numbers answered "no" to — "is X the cause?" when X was not — is `overturned`.
+
+Every `overturned` entry also goes under Corrections as `<old belief> → <what the measurement showed>`.
+
+Format: `**<short label>** — Question: <...>. Commands: <...>. Numbers: <...>. Conclusion: <...>. Verdict: overturned | confirmed.`
+
 ### Decisions
 
 Bullet list. Choices made during the session with their rationale. Only include decisions where the "why" is stated — skip decisions that were just "do this" without reasoning.
@@ -65,6 +80,7 @@ Brief list of the most significant tool calls and their results — the ones tha
 - Grep results that confirmed or denied a hypothesis
 - Error outputs that drove root-cause analysis
 - Stat/diff results that revealed a discrepancy
+- The commands behind each entry under Measurements, even past 100 chars
 
 Format: `**<tool>(<args summary>)** → <key result in ≤100 chars>`
 
