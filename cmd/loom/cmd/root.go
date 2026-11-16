@@ -70,6 +70,11 @@ var rootCmd = &cobra.Command{
 	Short:   "Session ingest, summarization, and dashboard",
 	Long:    helpText,
 	Version: version.String(),
+	// Execute is the one printer: it owns the exit code and errReported, and
+	// adds usage only for an invocation cobra rejected before the command ran.
+	// Silenced here, cobra's own copy is off for every subcommand.
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
 func init() {
@@ -89,10 +94,40 @@ func init() {
 // format, so a reader parsing that stream sees nothing else on it.
 var errReported = errors.New("reported on stderr")
 
+// runStarted records that a command's Run or RunE was entered, set by the
+// wrappers markRuns installs.
+var runStarted bool
+
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	markRuns(rootCmd)
+	cmd, err := rootCmd.ExecuteC()
+	if err != nil {
 		printError(os.Stderr, err)
+		if !runStarted {
+			fmt.Fprint(os.Stderr, cmd.UsageString())
+		}
 		os.Exit(1)
+	}
+}
+
+// markRuns wraps every Run and RunE in the tree so Execute can tell a failure
+// of the work from a malformed invocation. cobra validates args, flags,
+// required flags and flag groups before Run, interleaved with the PreRun
+// hooks, so reaching Run is the only point that separates the two.
+func markRuns(c *cobra.Command) {
+	if run := c.RunE; run != nil {
+		c.RunE = func(cmd *cobra.Command, args []string) error {
+			runStarted = true
+			return run(cmd, args)
+		}
+	} else if run := c.Run; run != nil {
+		c.Run = func(cmd *cobra.Command, args []string) {
+			runStarted = true
+			run(cmd, args)
+		}
+	}
+	for _, sub := range c.Commands() {
+		markRuns(sub)
 	}
 }
 
