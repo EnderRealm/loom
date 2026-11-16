@@ -236,9 +236,10 @@ type Metrics struct {
 	// HookSignals is the stop_hook rows: a hook told the agent to continue.
 	// Soft, and not a failure.
 	HookSignals int `json:"hook_signals"`
-	// HumanInteractions is the root's by construction: a descendant's user
-	// messages are the dispatching agent's prompts, so descendants report 0
-	// and total equals parent.
+	// HumanInteractions is the root's by construction: the human turns in its
+	// span plus each human execution a producer declared under it. A
+	// descendant's user messages are the dispatching agent's prompts, so
+	// descendants report 0 and total equals parent.
 	HumanInteractions int `json:"human_interactions"`
 	// Models, Efforts and CLIVersions are the distinct values the metered
 	// turns carried, in first-seen order. ConditionsCoverage says how many
@@ -602,7 +603,9 @@ func (b *builder) walk(n *runs.Node, placement string) error {
 // not settle, so it is listed and metered but not counted.
 func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 	u := &unit{node: n, placement: placement, attributed: true, counted: true, startIdx: math.MinInt, endIdx: math.MaxInt}
-	if placement == PlacementUnresolved && n.Source == nil {
+	// A human execution off the root is a rejected declaration, not an
+	// interaction the run had.
+	if placement == PlacementUnresolved && (n.Source == nil || n.Kind == runs.KindHuman) {
 		u.attributed, u.counted = false, false
 		b.gap(fmt.Sprintf("execution %s is unresolved; not counted", n.ExecutionID))
 	}
@@ -639,7 +642,7 @@ func (b *builder) unitOf(n *runs.Node, placement string) (*unit, error) {
 	}
 	if n.Transcript == nil {
 		u.transcriptless = n == b.run.Root && b.run.TranscriptBasis == runs.BasisNone
-		if u.counted && n != b.run.Root && n.Kind != runs.KindCommand {
+		if u.counted && n != b.run.Root && n.Kind != runs.KindCommand && n.Kind != runs.KindHuman {
 			b.gap(fmt.Sprintf("execution %s has no transcript", n.ExecutionID))
 		}
 		return u, nil
@@ -887,7 +890,9 @@ func (b *builder) report() *Report {
 		own.add(u, true)
 		if u.attributed {
 			total.add(u, u.counted)
-			if n == run.Root {
+			// A human execution is a fact about the run's parent, as the
+			// root's own human turns are, so it lands in the parent scope.
+			if n == run.Root || n.Kind == runs.KindHuman {
 				parent.add(u, u.counted)
 			} else {
 				descendants.add(u, u.counted)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -115,8 +116,8 @@ func TestFixtureBuildsOneHierarchy(t *testing.T) {
 	st := openStore(t, filepath.Join(t.TempDir(), "summaries.db"))
 	defer st.Close()
 	counts := importFile(t, st, testdata("executions.jsonl"))
-	if counts.Runs != 2 || counts.Executions != 8 || counts.Diagnostics != 0 {
-		t.Fatalf("counts = %+v, want runs=2 executions=8 diagnostics=0", counts)
+	if counts.Runs != 2 || counts.Executions != 9 || counts.Diagnostics != 0 {
+		t.Fatalf("counts = %+v, want runs=2 executions=9 diagnostics=0", counts)
 	}
 
 	run, err := Load(st.DB(), fixtureRun)
@@ -137,8 +138,8 @@ func TestFixtureBuildsOneHierarchy(t *testing.T) {
 	if run.ReportingCutoff != "2026-09-10T17:40:00Z" || run.Producer != "warp/work@1.4.0" {
 		t.Errorf("run cutoff = %q producer = %q", run.ReportingCutoff, run.Producer)
 	}
-	if run.Source == nil || run.Source.Line != 10 {
-		t.Errorf("run source = %+v, want line 10", run.Source)
+	if run.Source == nil || run.Source.Line != 11 {
+		t.Errorf("run source = %+v, want line 11", run.Source)
 	}
 	if len(run.Unresolved) != 0 || len(run.Diagnostics) != 0 {
 		t.Errorf("unresolved = %v diagnostics = %v, want none", run.Unresolved, run.Diagnostics)
@@ -150,7 +151,7 @@ func TestFixtureBuildsOneHierarchy(t *testing.T) {
 	}
 	wantLine(t, root, 2)
 	wantTranscript(t, root, "claude-code", "195f819e-1e11-4e08-8c16-a340f512f892")
-	want := []string{"agent-a0e0c89b977fd6273", "lens-security-r1-a1", "stage-work-1-1", "stage-work-1-2", "stage-review-1-1"}
+	want := []string{"agent-a0e0c89b977fd6273", "lens-security-r1-a1", "stage-work-1-1", "stage-work-1-2", "stage-review-1-1", "human-1"}
 	if got := childIDs(root); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("root children = %v, want %v (started_at order)", got, want)
 	}
@@ -197,6 +198,11 @@ func TestFixtureBuildsOneHierarchy(t *testing.T) {
 	wantLine(t, review, 8)
 	if review.Stage != "review" || review.Outcome != "stopped" {
 		t.Errorf("review attempt = %+v", review)
+	}
+	human := child(t, root, "human-1")
+	wantLine(t, human, 10)
+	if human.Kind != KindHuman || human.Transcript != nil || human.Outcome != "completed" || len(human.Children) != 0 {
+		t.Errorf("human = %+v", human)
 	}
 }
 
@@ -878,6 +884,164 @@ func TestCyclicParentsAreUnresolved(t *testing.T) {
 	}
 	if _, err := json.Marshal(run); err != nil {
 		t.Errorf("marshal run: %v", err)
+	}
+}
+
+// A human execution carries no transcript and keeps a parent, judged on the
+// row a merge would leave: a record breaking either is skipped with
+// invalid_value naming the field, and the stored row is untouched.
+func TestHumanExecutionShapeIsEnforcedAcrossMerges(t *testing.T) {
+	st := openStore(t, filepath.Join(t.TempDir(), "summaries.db"))
+	defer st.Close()
+
+	records := strings.Join([]string{
+		`{"v":1,"kind":"run","run_id":"run-human","ticket":"loom/human-0011","runtime":"weft","root_transcript":"none","started_at":"2026-09-10T12:00:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-human","run_id":"run-human","execution_kind":"root","started_at":"2026-09-10T12:00:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-agent","run_id":"run-human","parent_execution_id":"root-human","execution_kind":"human","agent":"claude-code","started_at":"2026-09-10T12:01:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-session","run_id":"run-human","parent_execution_id":"root-human","execution_kind":"human","session_id":"sess-human","started_at":"2026-09-10T12:01:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-orphan","run_id":"run-human","execution_kind":"human","started_at":"2026-09-10T12:01:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-ok","run_id":"run-human","parent_execution_id":"root-human","execution_kind":"human","started_at":"2026-09-10T12:02:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-ok","run_id":"run-human","agent":"claude-code","session_id":"sess-late"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-ok","run_id":"run-human","ended_at":"2026-09-10T12:03:00Z","outcome":"completed"}`,
+		`{"v":1,"kind":"execution","execution_id":"sub-transcript","run_id":"run-human","parent_execution_id":"root-human","execution_kind":"subagent","agent":"claude-code","session_id":"sess-sub","started_at":"2026-09-10T12:04:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"sub-transcript","run_id":"run-human","execution_kind":"human"}`,
+	}, "\n") + "\n"
+	path := filepath.Join(t.TempDir(), "executions.jsonl")
+	if err := os.WriteFile(path, []byte(records), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	counts := importFile(t, st, path)
+	if counts.Executions != 4 || counts.Diagnostics != 5 {
+		t.Errorf("counts = %+v, want executions=4 diagnostics=5", counts)
+	}
+
+	rows, err := st.DB().Query(`SELECT source_line, code, detail, execution_id FROM execution_diagnostics ORDER BY source_line`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var (
+			line                 int
+			code, detail, execID string
+		)
+		if err := rows.Scan(&line, &code, &detail, &execID); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%d %s %s %s", line, code, execID, detail))
+	}
+	want := []string{
+		"3 invalid_value human-agent kind=execution field=agent",
+		"4 invalid_value human-session kind=execution field=session_id",
+		"5 invalid_value human-orphan kind=execution field=parent_execution_id",
+		"7 invalid_value human-ok kind=execution field=agent",
+		"10 invalid_value sub-transcript kind=execution field=execution_kind",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("diagnostics =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	run, err := Load(st.DB(), "run-human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := childIDs(run.Root); strings.Join(got, ",") != "human-ok,sub-transcript" {
+		t.Fatalf("root children = %v, want human-ok,sub-transcript", got)
+	}
+	human := child(t, run.Root, "human-ok")
+	if human.Kind != KindHuman || human.Transcript != nil || human.EndedAt != "2026-09-10T12:03:00Z" || human.Outcome != "completed" {
+		t.Errorf("human-ok = %+v, want the terminal record merged and no transcript attached", human)
+	}
+	sub := child(t, run.Root, "sub-transcript")
+	if sub.Kind != KindSubagent {
+		t.Errorf("sub-transcript kind = %q, want subagent kept", sub.Kind)
+	}
+}
+
+// A human execution hangs only under the run's root. One whose parent is
+// another execution of the run — a stage, a second root — is unresolved with
+// invalid_parent; one whose parent is not yet declared is unresolved_parent
+// until it is, and then invalid_parent unless that parent is the root.
+func TestHumanExecutionHangsOnlyUnderTheRoot(t *testing.T) {
+	st := openStore(t, filepath.Join(t.TempDir(), "summaries.db"))
+	defer st.Close()
+
+	records := strings.Join([]string{
+		`{"v":1,"kind":"run","run_id":"run-hang","ticket":"loom/hang-0012","runtime":"weft","root_transcript":"none","started_at":"2026-09-10T12:00:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-early","run_id":"run-hang","parent_execution_id":"root-hang","execution_kind":"human","started_at":"2026-09-10T11:59:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-hang","run_id":"run-hang","execution_kind":"root","started_at":"2026-09-10T12:00:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"stage-hang","run_id":"run-hang","parent_execution_id":"root-hang","execution_kind":"stage","stage":"work","stage_occurrence":1,"attempt":1,"started_at":"2026-09-10T12:01:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-under-stage","run_id":"run-hang","parent_execution_id":"stage-hang","execution_kind":"human","started_at":"2026-09-10T12:02:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-before-second","run_id":"run-hang","parent_execution_id":"root-second","execution_kind":"human","started_at":"2026-09-10T12:02:30Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"root-second","run_id":"run-hang","execution_kind":"root","started_at":"2026-09-10T12:03:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-under-second","run_id":"run-hang","parent_execution_id":"root-second","execution_kind":"human","started_at":"2026-09-10T12:04:00Z"}`,
+		`{"v":1,"kind":"execution","execution_id":"human-waiting","run_id":"run-hang","parent_execution_id":"stage-later","execution_kind":"human","started_at":"2026-09-10T12:05:00Z"}`,
+	}, "\n") + "\n"
+	path := filepath.Join(t.TempDir(), "executions.jsonl")
+	if err := os.WriteFile(path, []byte(records), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importFile(t, st, path)
+
+	run, err := Load(st.DB(), "run-hang")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Loaded before the root, the early human still finds it.
+	if run.Root == nil || run.Root.ExecutionID != "root-hang" {
+		t.Fatalf("root = %+v, want root-hang", run.Root)
+	}
+	if got := childIDs(run.Root); strings.Join(got, ",") != "human-early,stage-hang" {
+		t.Errorf("root children = %v, want human-early,stage-hang", got)
+	}
+	if got := childIDs(child(t, run.Root, "stage-hang")); len(got) != 0 {
+		t.Errorf("stage-hang children = %v, want none", got)
+	}
+	var unresolved []string
+	for _, n := range run.Unresolved {
+		unresolved = append(unresolved, n.ExecutionID)
+	}
+	// A human loaded before the second root it names is still listed.
+	if strings.Join(unresolved, ",") != "human-under-stage,human-before-second,root-second,human-under-second,human-waiting" {
+		t.Errorf("unresolved = %v", unresolved)
+	}
+	var diags []string
+	for _, d := range run.Diagnostics {
+		diags = append(diags, d.Code+" "+d.ExecutionID+" "+d.Detail)
+	}
+	wantDiags := []string{
+		summaries.DiagUnresolvedParent + " human-waiting parent_execution_id=stage-later execution_id=human-waiting",
+		DiagInvalidParent + " human-under-stage parent_execution_id=stage-hang parent_kind=stage",
+		DiagInvalidParent + " human-before-second parent_execution_id=root-second parent_kind=root",
+		DiagUnresolvedRoot + " root-second execution_kind=root",
+		DiagInvalidParent + " human-under-second parent_execution_id=root-second parent_kind=root",
+	}
+	if strings.Join(diags, "\n") != strings.Join(wantDiags, "\n") {
+		t.Errorf("diagnostics =\n%s\nwant\n%s", strings.Join(diags, "\n"), strings.Join(wantDiags, "\n"))
+	}
+
+	// The waiting human's parent arrives as a stage: still not the root.
+	later := filepath.Join(t.TempDir(), "executions.jsonl")
+	if err := os.WriteFile(later, []byte(`{"v":1,"kind":"execution","execution_id":"stage-later","run_id":"run-hang","parent_execution_id":"root-hang","execution_kind":"stage","stage":"review","stage_occurrence":1,"attempt":1,"started_at":"2026-09-10T12:06:00Z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importFile(t, st, later)
+	run, err = Load(st.DB(), "run-hang")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waiting []string
+	for _, d := range run.Diagnostics {
+		if d.ExecutionID == "human-waiting" {
+			waiting = append(waiting, d.Code)
+		}
+	}
+	if strings.Join(waiting, ",") != DiagInvalidParent {
+		t.Errorf("human-waiting diagnostics = %v, want %s alone once its parent resolves to a stage", waiting, DiagInvalidParent)
+	}
+	if got := childIDs(child(t, run.Root, "stage-later")); len(got) != 0 {
+		t.Errorf("stage-later children = %v, want none", got)
 	}
 }
 

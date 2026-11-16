@@ -44,8 +44,8 @@ func TestSweepImportsExecutionRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if run.Root == nil || len(run.Root.Children) != 5 {
-		t.Fatalf("root = %+v, want five children", run.Root)
+	if run.Root == nil || len(run.Root.Children) != 6 {
+		t.Fatalf("root = %+v, want six children", run.Root)
 	}
 	if run.Source == nil || run.Source.Path != path {
 		t.Errorf("run source = %+v, want %s", run.Source, path)
@@ -73,8 +73,8 @@ func TestSweepImportsExecutionRegistry(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 8 {
-		t.Errorf("executions rows after second sweep = %d, want 8", n)
+	if n != 9 {
+		t.Errorf("executions rows after second sweep = %d, want 9", n)
 	}
 }
 

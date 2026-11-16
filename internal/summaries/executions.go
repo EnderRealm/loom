@@ -30,6 +30,10 @@ const (
 	recordKindExecution = "execution"
 )
 
+// executionKindHuman is the execution a producer writes to declare one human
+// interaction with a run: no transcript, parented on the run's root.
+const executionKindHuman = "human"
+
 // maxRecordBytes caps one line. A record is a few hundred bytes; the cap only
 // has to keep a runaway line from being read as a record, and a line over it
 // is skipped with a diagnostic so the file stays importable.
@@ -50,7 +54,7 @@ const (
 var (
 	runtimes       = map[string]bool{"claude-code": true, "codex-cli": true, "cursor-cli": true, "weft": true}
 	outcomes       = map[string]bool{"completed": true, "failed": true, "stopped": true}
-	executionKinds = map[string]bool{"root": true, "subagent": true, "lens": true, "stage": true, "command": true}
+	executionKinds = map[string]bool{"root": true, "subagent": true, "lens": true, "stage": true, "command": true, executionKindHuman: true}
 	// rootTranscripts: a run's declaration that its root has no transcript
 	// by construction, as opposed to having lost one.
 	rootTranscripts = map[string]bool{"none": true}
@@ -329,14 +333,37 @@ func (imp *importer) execution(line int, rec executionRecord) error {
 	// An execution_id belongs to the run that first declared it. A record
 	// naming it under another run is rejected whole rather than merged, or
 	// the execution would move runs while keeping the first run's fields.
-	var existingRunID string
+	var (
+		existingRunID                                                string
+		existingKind, existingAgent, existingSession, existingParent sql.NullString
+	)
 	err := imp.tx.QueryRowContext(imp.ctx,
-		`SELECT run_id FROM executions WHERE execution_id = ?`, rec.ExecutionID).Scan(&existingRunID)
+		`SELECT run_id, execution_kind, agent, session_id, parent_execution_id FROM executions WHERE execution_id = ?`,
+		rec.ExecutionID).Scan(&existingRunID, &existingKind, &existingAgent, &existingSession, &existingParent)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("lookup execution: %w", err)
 	}
 	if err == nil && existingRunID != rec.RunID {
 		return imp.diagnostic(line, DiagIdentityConflict, rec.RunID, rec.ExecutionID, "existing_run_id="+existingRunID)
+	}
+	// A human execution is judged as the row the merge would leave: a later
+	// record must not attach a transcript to a stored one, nor turn a
+	// transcript-carrying row into one, and it must keep a parent.
+	kind := rec.ExecutionKind
+	if kind == "" {
+		kind = existingKind.String
+	}
+	if kind == executionKindHuman {
+		switch {
+		case rec.Agent != "":
+			return invalid("agent")
+		case rec.SessionID != "":
+			return invalid("session_id")
+		case existingAgent.String != "" || existingSession.String != "":
+			return invalid("execution_kind")
+		case rec.ParentExecutionID == "" && existingParent.String == "":
+			return invalid("parent_execution_id")
+		}
 	}
 	_, err = imp.tx.ExecContext(imp.ctx, `
 		INSERT INTO executions (

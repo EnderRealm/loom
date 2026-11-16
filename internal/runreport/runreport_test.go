@@ -26,7 +26,8 @@ import (
 // fixtureRun is the run docs/execution-records.md and
 // internal/runs/testdata/executions.jsonl describe: a Claude root, a Claude
 // subagent with a Codex child under it, a routed Codex lens, two Weft work
-// attempts and a review attempt, and a command with no transcript.
+// attempts and a review attempt, a command with no transcript, and a human
+// interaction Weft declared.
 const (
 	fixtureRun     = "0f4c3a6e-2d1b-4b7e-9c8a-5e2f1d0a9b31"
 	fixtureTicket  = "loom/persist-execution-identities-2149"
@@ -486,7 +487,7 @@ func TestReportCoversTheMixedRuntimeFixture(t *testing.T) {
 		t.Errorf("run = %+v", rep.Run)
 	}
 	want := []string{"root-195f819e", "agent-a0e0c89b977fd6273", "codex-01a0029b", "lens-security-r1-a1",
-		"stage-work-1-1", "stage-work-1-2", "cmd-go-test-1", "stage-review-1-1"}
+		"stage-work-1-1", "stage-work-1-2", "cmd-go-test-1", "stage-review-1-1", "human-1"}
 	if got := ids(rep.Executions); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("executions = %v, want depth-first %v", got, want)
 	}
@@ -497,14 +498,14 @@ func TestReportCoversTheMixedRuntimeFixture(t *testing.T) {
 	}
 
 	parent, desc, total := rep.Metrics.Parent, rep.Metrics.Descendants, rep.Metrics.Total
-	if parent.Executions != 1 || parent.Transcripts != 1 || parent.Turns != 3 {
-		t.Errorf("parent = %d executions %d transcripts %d turns, want 1/1/3 (the invocation's span, not the whole session)", parent.Executions, parent.Transcripts, parent.Turns)
+	if parent.Executions != 2 || parent.Transcripts != 1 || parent.Turns != 3 {
+		t.Errorf("parent = %d executions %d transcripts %d turns, want 2/1/3 (the root and its human interaction; the invocation's span, not the whole session)", parent.Executions, parent.Transcripts, parent.Turns)
 	}
 	if desc.Executions != 7 || desc.Transcripts != 5 || desc.Turns != 5 {
 		t.Errorf("descendants = %d executions %d transcripts %d turns, want 7/5/5", desc.Executions, desc.Transcripts, desc.Turns)
 	}
-	if total.Executions != 8 || total.Transcripts != 6 || total.Turns != 8 {
-		t.Errorf("total = %d executions %d transcripts %d turns, want 8/6/8", total.Executions, total.Transcripts, total.Turns)
+	if total.Executions != 9 || total.Transcripts != 6 || total.Turns != 8 {
+		t.Errorf("total = %d executions %d transcripts %d turns, want 9/6/8", total.Executions, total.Transcripts, total.Turns)
 	}
 	if parent.ToolCalls != 3 || parent.ToolCallsByKind["read"] != 1 || parent.ToolCallsByKind["task"] != 1 || parent.ToolCallsByKind["bash"] != 1 {
 		t.Errorf("parent tool calls = %d %v, want 3 read/task/bash", parent.ToolCalls, parent.ToolCallsByKind)
@@ -570,7 +571,7 @@ func TestReportCoversTheMixedRuntimeFixture(t *testing.T) {
 	}
 
 	// The tree, unresolved list and diagnostics render with [] for empty lists.
-	if rep.Tree == nil || rep.Tree.ExecutionID != "root-195f819e" || len(rep.Tree.Children) != 5 {
+	if rep.Tree == nil || rep.Tree.ExecutionID != "root-195f819e" || len(rep.Tree.Children) != 6 {
 		t.Fatalf("tree = %+v", rep.Tree)
 	}
 	raw, err := json.Marshal(rep)
@@ -593,8 +594,8 @@ func TestLoadEscapesURIDelimiters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if rep.Run.RunID != fixtureRun || len(rep.Executions) != 8 {
-		t.Fatalf("Load = run %q with %d executions, want %s with 8", rep.Run.RunID, len(rep.Executions), fixtureRun)
+	if rep.Run.RunID != fixtureRun || len(rep.Executions) != 9 {
+		t.Fatalf("Load = run %q with %d executions, want %s with 9", rep.Run.RunID, len(rep.Executions), fixtureRun)
 	}
 	truncated := filepath.Join(dir, "summaries")
 	if _, err := os.Stat(truncated); !errors.Is(err, os.ErrNotExist) {
@@ -665,10 +666,10 @@ func TestTotalsReconcileAndGapsAreExplicit(t *testing.T) {
 	if tel.State != StatePartial || tel.RootSpan != SpanInvocation {
 		t.Errorf("telemetry = %+v, want partial over the invocation span", tel)
 	}
-	if tel.ExecutionsTotal != 8 || tel.ExecutionsWithTranscript != 7 || tel.TranscriptsCounted != 6 {
+	if tel.ExecutionsTotal != 9 || tel.ExecutionsWithTranscript != 7 || tel.TranscriptsCounted != 6 {
 		t.Errorf("telemetry counts = %+v", tel)
 	}
-	if !reflect.DeepEqual(tel.ExecutionsWithoutTranscript, []string{"cmd-go-test-1"}) {
+	if !reflect.DeepEqual(tel.ExecutionsWithoutTranscript, []string{"cmd-go-test-1", "human-1"}) {
 		t.Errorf("without transcript = %v", tel.ExecutionsWithoutTranscript)
 	}
 	gaps := strings.Join(tel.Gaps, "\n")
@@ -782,10 +783,10 @@ func TestLegacyActiveMsIsLabelled(t *testing.T) {
 		t.Errorf("wall = %v %q, want 2269000 started_at→ended_at", tm.WallMs, tm.WallBasis)
 	}
 	// Every timed execution but the root, which never got a terminal record.
-	if tm.ExecutionTimeMs != 202000+150000+200000+250000+520000+120000+17000 {
+	if tm.ExecutionTimeMs != 202000+150000+200000+250000+520000+120000+17000+155000 {
 		t.Errorf("execution_time_ms = %d", tm.ExecutionTimeMs)
 	}
-	if rep.Metrics.Total.ExecutionTimeCoverage != (Coverage{Timed: 7, Untimed: 1}) {
+	if rep.Metrics.Total.ExecutionTimeCoverage != (Coverage{Timed: 8, Untimed: 1}) {
 		t.Errorf("execution time coverage = %+v", rep.Metrics.Total.ExecutionTimeCoverage)
 	}
 	// The top-level figure is the parent span's, comparable to cost-report's
@@ -817,8 +818,8 @@ func TestFailuresConditionsAndHumanCoverage(t *testing.T) {
 	if rep.Metrics.Total.Failures.Tool != 2 || rep.Metrics.Total.Failures.API != 1 || rep.Metrics.Total.HookSignals != 1 {
 		t.Errorf("total failures = %+v hooks %d", rep.Metrics.Total.Failures, rep.Metrics.Total.HookSignals)
 	}
-	if p.HumanInteractions != 1 {
-		t.Errorf("human_interactions = %d, want 1: the typed turn, not the invocation or the notification", p.HumanInteractions)
+	if p.HumanInteractions != 2 {
+		t.Errorf("human_interactions = %d, want 2: the typed turn and the declared human-1, not the invocation or the notification", p.HumanInteractions)
 	}
 	if !reflect.DeepEqual(p.Models, []string{claudeModel}) || !reflect.DeepEqual(p.Efforts, []string{"high"}) || !reflect.DeepEqual(p.CLIVersions, []string{"2.1.0"}) {
 		t.Errorf("conditions = %v %v %v", p.Models, p.Efforts, p.CLIVersions)
@@ -1334,6 +1335,100 @@ func TestDeclaredRootOtherGapStaysPartial(t *testing.T) {
 	}
 	if !rep.Metrics.Total.TokenUsageUnavailable || rep.Metrics.Parent.TokenUsageUnavailable {
 		t.Errorf("availability: parent %v total %v, want the parent measured as zero and the total unavailable for the unfolded session", rep.Metrics.Parent.TokenUsageUnavailable, rep.Metrics.Total.TokenUsageUnavailable)
+	}
+}
+
+// humanRecord is the execution a producer writes for one human interaction
+// with the run, parented on parentID.
+func humanRecord(runID, executionID, parentID string) string {
+	return `{"v":1,"kind":"execution","run_id":"` + runID + `","execution_id":"` + executionID + `","parent_execution_id":"` + parentID + `","execution_kind":"human","producer":"weft@0.9.0","started_at":"2026-09-10T12:10:30Z","ended_at":"2026-09-10T12:10:50Z","outcome":"completed"}`
+}
+
+// A hosted answer reaches the run through no transcript, so the producer
+// declares it. The declared run reports exactly one more human interaction,
+// in the parent and total scopes, and nothing else moves: no turn, token,
+// cost or gap.
+func TestDeclaredHumanInteractionCountsOnce(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st, weftRun("run-quiet", true)...)
+	writeWeftStages(t, st, "run-quiet")
+	importLines(t, st, weftRun("run-asked", true, humanRecord("run-asked", "human-asked", "root-run-asked"))...)
+	writeWeftStages(t, st, "run-asked")
+
+	quiet, asked := build(t, st, "run-quiet"), build(t, st, "run-asked")
+	for _, c := range []struct {
+		scope         string
+		without, with Metrics
+		more          int
+	}{
+		{"parent", quiet.Metrics.Parent, asked.Metrics.Parent, 1},
+		{"descendants", quiet.Metrics.Descendants, asked.Metrics.Descendants, 0},
+		{"total", quiet.Metrics.Total, asked.Metrics.Total, 1},
+	} {
+		if c.with.HumanInteractions != c.without.HumanInteractions+c.more {
+			t.Errorf("%s human_interactions = %d with the record, %d without, want %d more", c.scope, c.with.HumanInteractions, c.without.HumanInteractions, c.more)
+		}
+		if c.with.Turns != c.without.Turns || c.with.TotalTokens != c.without.TotalTokens || c.with.Transcripts != c.without.Transcripts || c.with.ToolCalls != c.without.ToolCalls {
+			t.Errorf("%s with the record = %d turns %d tokens %d transcripts %d calls, without = %d/%d/%d/%d", c.scope,
+				c.with.Turns, c.with.TotalTokens, c.with.Transcripts, c.with.ToolCalls,
+				c.without.Turns, c.without.TotalTokens, c.without.Transcripts, c.without.ToolCalls)
+		}
+		if c.with.CostUSD == nil || c.without.CostUSD == nil || *c.with.CostUSD != *c.without.CostUSD || c.with.TokenUsageUnavailable {
+			t.Errorf("%s cost = %v with the record, %v without, want equal and priced", c.scope, deref(c.with.CostUSD), deref(c.without.CostUSD))
+		}
+	}
+	if quiet.Metrics.Total.HumanInteractions != 0 {
+		t.Errorf("run without the record reports %d human interactions, want 0: a transcriptless root has no turns", quiet.Metrics.Total.HumanInteractions)
+	}
+	if asked.Telemetry.State != StateComplete || len(asked.Telemetry.Gaps) != 0 {
+		t.Errorf("telemetry = %+v, want complete: a human execution has no transcript by construction", asked.Telemetry)
+	}
+	human := execution(t, asked, "human-asked")
+	if human.Placement != PlacementTree || !human.Counted || human.Transcript != nil {
+		t.Errorf("human = placement %q counted %v transcript %+v, want counted in the tree with none", human.Placement, human.Counted, human.Transcript)
+	}
+	if m := human.Metrics; m.HumanInteractions != 1 || m.Turns != 0 || m.Transcripts != 0 || len(m.TokensByRuntime) != 0 || m.CostUSD == nil || *m.CostUSD != 0 {
+		t.Errorf("human metrics = %+v, want one interaction and nothing metered", m)
+	}
+}
+
+// A human record that breaks its shape is rejected with a validation code
+// and not counted: one carrying a transcript is skipped at import, one hung
+// off a stage instead of the root is unresolved with invalid_parent and named
+// as a gap.
+func TestMalformedHumanInteractionIsNotCounted(t *testing.T) {
+	st, _ := openStore(t)
+	importLines(t, st, weftRun("run-transcript", true,
+		`{"v":1,"kind":"execution","run_id":"run-transcript","execution_id":"human-transcript","parent_execution_id":"root-run-transcript","execution_kind":"human","agent":"claude-code","session_id":"sess-work-run-transcript","started_at":"2026-09-10T12:10:30Z","ended_at":"2026-09-10T12:10:50Z","outcome":"completed"}`,
+	)...)
+	writeWeftStages(t, st, "run-transcript")
+	importLines(t, st, weftRun("run-misparented", true, humanRecord("run-misparented", "human-misparented", "stage-work-run-misparented"))...)
+	writeWeftStages(t, st, "run-misparented")
+
+	transcript := build(t, st, "run-transcript")
+	if transcript.Metrics.Total.HumanInteractions != 0 || len(transcript.Executions) != 3 {
+		t.Errorf("transcript-carrying human: %d interactions over %v, want 0 and the record not stored", transcript.Metrics.Total.HumanInteractions, ids(transcript.Executions))
+	}
+	if len(transcript.Diagnostics) != 1 || transcript.Diagnostics[0].Code != summaries.DiagInvalidValue ||
+		transcript.Diagnostics[0].ExecutionID != "human-transcript" || transcript.Diagnostics[0].Detail != "kind=execution field=agent" {
+		t.Errorf("diagnostics = %+v, want %s on agent", transcript.Diagnostics, summaries.DiagInvalidValue)
+	}
+
+	misparented := build(t, st, "run-misparented")
+	for scope, m := range map[string]Metrics{"parent": misparented.Metrics.Parent, "descendants": misparented.Metrics.Descendants, "total": misparented.Metrics.Total} {
+		if m.HumanInteractions != 0 {
+			t.Errorf("%s human_interactions = %d, want 0 for a human hung off a stage", scope, m.HumanInteractions)
+		}
+	}
+	human := execution(t, misparented, "human-misparented")
+	if human.Placement != PlacementUnresolved || human.Counted {
+		t.Errorf("misparented human = placement %q counted %v, want unresolved and not counted", human.Placement, human.Counted)
+	}
+	if len(misparented.Diagnostics) != 1 || misparented.Diagnostics[0].Code != runs.DiagInvalidParent || misparented.Diagnostics[0].ExecutionID != "human-misparented" {
+		t.Errorf("diagnostics = %+v, want %s", misparented.Diagnostics, runs.DiagInvalidParent)
+	}
+	if want := []string{"execution human-misparented is unresolved; not counted"}; !reflect.DeepEqual(misparented.Telemetry.Gaps, want) {
+		t.Errorf("gaps = %v, want %v", misparented.Telemetry.Gaps, want)
 	}
 }
 

@@ -101,10 +101,10 @@ func TestRunReportPrintsJSON(t *testing.T) {
 	if rep.Metrics.Parent.Turns != 1 || rep.Metrics.Parent.ToolCalls != 1 || rep.Metrics.Parent.TotalTokens != 140 {
 		t.Fatalf("parent = %+v", rep.Metrics.Parent)
 	}
-	if rep.Metrics.Total.Executions != 8 || rep.Telemetry.State != runreport.StatePartial {
+	if rep.Metrics.Total.Executions != 9 || rep.Telemetry.State != runreport.StatePartial {
 		t.Fatalf("total executions = %d telemetry = %+v", rep.Metrics.Total.Executions, rep.Telemetry)
 	}
-	if rep.Tree == nil || len(rep.Tree.Children) != 5 || len(rep.Executions) != 8 || len(rep.Stages) != 2 {
+	if rep.Tree == nil || len(rep.Tree.Children) != 6 || len(rep.Executions) != 9 || len(rep.Stages) != 2 {
 		t.Fatalf("tree children = %d executions = %d stages = %d", len(rep.Tree.Children), len(rep.Executions), len(rep.Stages))
 	}
 	// Every empty list renders as [], so a UI can index it without a null check.

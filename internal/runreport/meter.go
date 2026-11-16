@@ -287,6 +287,10 @@ func (m *meter) add(u *unit, transcript bool) {
 		m.priced = false
 		m.m.TokenUsageUnavailable = true
 		m.m.ToolTimeUnavailable = true
+	case u.node.Kind == runs.KindHuman:
+		// A producer's declaration that a person acted on the run: one
+		// interaction, and no transcript to meter by construction.
+		m.m.HumanInteractions++
 	case u.data == nil && u.node.Kind != runs.KindCommand && !u.transcriptless:
 		m.p.Warn(u.node.ExecutionID + ": no transcript")
 		m.priced = false

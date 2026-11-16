@@ -1,7 +1,7 @@
 // Package runs reads the run hierarchy out of summaries.db: every /work
 // invocation (or Weft run) as one Run, with the executions attributable to it
-// — subagents, routed lenses, stage attempts, commands — as a tree under its
-// root execution.
+// — subagents, routed lenses, stage attempts, commands, human interactions a
+// producer declared — as a tree under its root execution.
 //
 // Two origins feed it. A run declared through execution records
 // (docs/execution-records.md) is built from the runs and executions tables
@@ -43,6 +43,9 @@ const (
 	KindSubagent = "subagent"
 	KindLens     = "lens"
 	KindCommand  = "command"
+	// KindHuman: a producer's declaration of one human interaction with the
+	// run. It has no transcript and hangs directly off the run's root.
+	KindHuman = "human"
 )
 
 // TranscriptBasis values: how a run came by its Transcript. Empty when the
@@ -84,6 +87,9 @@ const (
 	// than one /work invocation of its runtime names its ticket and spans its
 	// start. It belongs to one of them, and nothing says which; no join.
 	DiagAmbiguousJoin = "ambiguous_join"
+	// DiagInvalidParent: a human execution whose parent exists in the run
+	// but is not its root. It is not hung there, so it is never counted.
+	DiagInvalidParent = "invalid_parent"
 )
 
 // SourceRef locates the record a row was last written from.
@@ -606,13 +612,14 @@ func loadExecutions(db *sql.DB, runID string) ([]*Node, error) {
 }
 
 // attach builds the tree. The root is the first parentless node of kind root;
-// every other node hangs under its parent when that parent exists. Whatever
-// the root cannot reach — a node whose parent nobody declared, a second root,
-// a parentless node of another kind, a cycle — is listed in Unresolved by its
-// topmost node, never guessed onto the root. A node whose parent chain returns
-// to it gets no child pointer and is its own top, so the tree holds no
-// back-reference. Diagnostics are appended, so the importer's must already be
-// loaded.
+// every other node hangs under its parent when that parent exists, save a
+// human node, which hangs only under the root. Whatever the root cannot reach
+// — a node whose parent nobody declared, a second root, a parentless node of
+// another kind, a human node under anything but the root, a cycle — is listed
+// in Unresolved by its topmost node, never guessed onto the root. A node
+// whose parent chain returns to it gets no child pointer and is its own top,
+// so the tree holds no back-reference. Diagnostics are appended, so the
+// importer's must already be loaded.
 func attach(run *Run, nodes []*Node) {
 	byID := make(map[string]*Node, len(nodes))
 	for _, n := range nodes {
@@ -631,9 +638,19 @@ func attach(run *Run, nodes []*Node) {
 			p, ok = byID[p.ParentExecutionID]
 		}
 	}
+	// The root is known before any edge is drawn: a human node's parent is
+	// checked against it, and may precede it in load order.
+	var root *Node
+	for _, n := range nodes {
+		if n.ParentExecutionID == "" && n.Kind == KindRoot {
+			root = n
+			break
+		}
+	}
+	detached := map[string]bool{}
 	for _, n := range nodes {
 		if n.ParentExecutionID == "" {
-			if run.Root == nil && n.Kind == KindRoot {
+			if n == root {
 				run.Root = n
 				continue
 			}
@@ -656,7 +673,19 @@ func attach(run *Run, nodes []*Node) {
 			})
 			continue
 		}
-		if p, ok := byID[n.ParentExecutionID]; ok {
+		p, ok := byID[n.ParentExecutionID]
+		if ok && n.Kind == KindHuman && p != root {
+			detached[n.ExecutionID] = true
+			run.Diagnostics = append(run.Diagnostics, Diagnostic{
+				Code:        DiagInvalidParent,
+				Detail:      fmt.Sprintf("parent_execution_id=%s parent_kind=%s", n.ParentExecutionID, p.Kind),
+				RunID:       run.RunID,
+				ExecutionID: n.ExecutionID,
+				Source:      n.Source,
+			})
+			continue
+		}
+		if ok {
 			p.Children = append(p.Children, n)
 		}
 	}
@@ -668,10 +697,11 @@ func attach(run *Run, nodes []*Node) {
 		if placed[n.ExecutionID] {
 			continue
 		}
-		// Walk up to the top of this detached chain. A cyclic node has no
-		// parent in the tree, so it is the top of whatever hangs under it.
+		// Walk up to the top of this detached chain. A cyclic node, or a
+		// human refused its parent, has no parent in the tree, so it is the
+		// top of whatever hangs under it.
 		top := n
-		for !cyclic[top.ExecutionID] {
+		for !cyclic[top.ExecutionID] && !detached[top.ExecutionID] {
 			p, ok := byID[top.ParentExecutionID]
 			if !ok || placed[p.ExecutionID] {
 				break

@@ -56,13 +56,46 @@ starts, and again when it ends.
 | `execution_id` | Unique across all runs. Required. |
 | `run_id` | The run this execution belongs to. Required. |
 | `parent_execution_id` | The execution that created this one. Absent on the run's root execution and nowhere else. |
-| `execution_kind` | `root` (the run's own session), `subagent` (a dispatched agent), `lens` (a review lens), `stage` (a Weft stage attempt) or `command` (a process with no transcript, such as a test gate). |
-| `agent`, `session_id` | The transcript this execution *is*, when it has one. A `command` has none. |
+| `execution_kind` | `root` (the run's own session), `subagent` (a dispatched agent), `lens` (a review lens), `stage` (a Weft stage attempt), `command` (a process with no transcript, such as a test gate) or `human` (one human interaction with the run — see below). |
+| `agent`, `session_id` | The transcript this execution *is*, when it has one. A `command` has none; a `human` must not carry one. |
 | `dispatch_id` | The parent's tool call that created this execution — Claude's `tool_use_id`, Codex's `call_id`, Cursor's `toolCallId`. Optional. |
 | `stage`, `stage_occurrence` | For a `stage`: which stage (`work`, `review`) and which pass through it, counting from 1. |
 | `lens`, `round` | For a `lens`: which lens and which review round, counting from 1. |
 | `attempt` | Which try this is at the same stage occurrence or lens round, counting from 1. A retry is a new execution with the next attempt. |
 | `started_at`, `ended_at`, `outcome`, `producer`, `recorded_at` | As for `run`. |
+
+### `human` executions
+
+A human interaction that reaches the run outside any transcript — a hosted
+answer to a parked question travels client → host → answer file → a fresh
+agent's prompt, and no session records it as a person's turn — is declared by
+the producer that observed it, as one `execution` record per interaction:
+
+| Field | Value |
+| --- | --- |
+| `execution_id`, `run_id` | As for any execution. Required. |
+| `parent_execution_id` | The run's root execution id. Required. |
+| `execution_kind` | `human`. |
+| `started_at`, `ended_at` | RFC 3339: when the interaction was asked for and when the person answered. |
+| `outcome` | `completed`. Without it the execution reads as still pending, as any execution does. |
+| `producer`, `recorded_at` | As for `run`. |
+| `agent`, `session_id` | Forbidden. A `human` execution has no transcript. |
+
+The record can be written once, after the answer, carrying every field.
+`loom run-report` counts each `human` execution as one `human_interactions`
+in the parent and total scopes, beside the root transcript's own human turns,
+and the descendant scope stays at zero. It adds no turns, tokens or cost, and
+its missing transcript is no telemetry gap. Like a `command`, it counts as an
+execution and its span adds to execution time.
+
+A `human` record carrying `agent` or `session_id`, or merging into a row that
+holds a transcript, or leaving the row with no `parent_execution_id`, is
+rejected with `invalid_value` naming the field (`agent`, `session_id`,
+`execution_kind` or `parent_execution_id`) and nothing is stored. One whose
+parent is in the run but is not its root is stored and listed unresolved with
+an `invalid_parent` diagnostic; one whose parent is not yet declared is
+unresolved as any execution is. Neither is counted, and the run-report names
+it as a gap.
 
 ## Ids and merging
 
@@ -167,15 +200,15 @@ its own metrics, `counted: false` and `excluded:
 started_after_reporting_cutoff`, and added to no scope; that is not a gap.
 
 **Rejected records.** A record with an unknown `v`, an unknown `kind`, a
-missing required id, a value outside an enum, or a timestamp that is not RFC
-3339 is skipped and a diagnostic written to `execution_diagnostics` with the
-codes `unsupported_version`, `unsupported_kind`, `missing_id`,
-`invalid_value` or, for a line that is not JSON, `malformed_json`. An
-`execution` record reusing an `execution_id` under a different `run_id` is
-skipped with `identity_conflict`, whose detail names the run that holds it. A
-diagnostic carries the source path, the 1-based line number, the ids and
-kinds the record named and the field at fault — never a field's value and
-never the record.
+missing required id, a value outside an enum, a timestamp that is not RFC
+3339, or a `human` execution breaking its shape is skipped and a diagnostic
+written to `execution_diagnostics` with the codes `unsupported_version`,
+`unsupported_kind`, `missing_id`, `invalid_value` or, for a line that is not
+JSON, `malformed_json`. An `execution` record reusing an `execution_id` under
+a different `run_id` is skipped with `identity_conflict`, whose detail names
+the run that holds it. A diagnostic carries the source path, the 1-based line
+number, the ids and kinds the record named and the field at fault — never a
+field's value and never the record.
 
 **Unresolved associations.** An execution naming a `run_id` no `run` record
 declared, or a `parent_execution_id` no `execution` in the same run declared,
@@ -187,17 +220,20 @@ it can arrive later, from any file; the diagnostics are recomputed on every
 import and clear once it does. A parentless execution the run cannot take as
 its root — a second `root`, or a parentless execution of another kind — is
 likewise listed unresolved, with an `unresolved_root` diagnostic the reader
-adds when it builds the tree. An execution naming itself as parent is skipped
-with `invalid_value`; executions whose `parent_execution_id` chain returns to
-them are each listed unresolved as their own top, with a `cyclic_parent`
-diagnostic, so the tree never holds a back-reference.
+adds when it builds the tree, and so is a `human` execution whose parent is
+another execution of the run than its root, with `invalid_parent`. An
+execution naming itself as parent is skipped with `invalid_value`; executions
+whose `parent_execution_id` chain returns to them are each listed unresolved
+as their own top, with a `cyclic_parent` diagnostic, so the tree never holds
+a back-reference.
 
 ## Example
 
 One Claude `/work` run under Weft: the orchestrating session, a subagent it
 dispatched, a Codex child that subagent spawned, the routed security lens,
 Weft's stage attempts — the work stage failing once before it completes, the
-review stage stopped — and a command gate with no transcript. The `run`
+review stage stopped — a command gate with no transcript, and a human
+answering a question the run parked, which Weft declares. The `run`
 record appears twice, at the start and at the end. This block is
 `internal/runs/testdata/executions.jsonl` verbatim; the tests import it from
 here, so it cannot drift from what the importer accepts.
@@ -212,6 +248,7 @@ here, so it cannot drift from what the importer accepts.
 {"v":1,"kind":"execution","execution_id":"stage-work-1-2","run_id":"0f4c3a6e-2d1b-4b7e-9c8a-5e2f1d0a9b31","parent_execution_id":"root-195f819e","execution_kind":"stage","stage":"work","stage_occurrence":1,"attempt":2,"agent":"claude-code","session_id":"3c8e5d2f-9a4b-4f6c-8e7d-2b3c4d5e6f7a","producer":"weft@0.3.0","started_at":"2026-09-10T17:25:00Z","ended_at":"2026-09-10T17:33:40Z","outcome":"completed","recorded_at":"2026-09-10T17:33:40Z"}
 {"v":1,"kind":"execution","execution_id":"stage-review-1-1","run_id":"0f4c3a6e-2d1b-4b7e-9c8a-5e2f1d0a9b31","parent_execution_id":"root-195f819e","execution_kind":"stage","stage":"review","stage_occurrence":1,"attempt":1,"agent":"claude-code","session_id":"4d9f6e3a-0b5c-4a7d-9f8e-3c4d5e6f7a8b","producer":"weft@0.3.0","started_at":"2026-09-10T17:34:00Z","ended_at":"2026-09-10T17:36:00Z","outcome":"stopped","recorded_at":"2026-09-10T17:36:00Z"}
 {"v":1,"kind":"execution","execution_id":"cmd-go-test-1","run_id":"0f4c3a6e-2d1b-4b7e-9c8a-5e2f1d0a9b31","parent_execution_id":"stage-work-1-2","execution_kind":"command","producer":"weft@0.3.0","started_at":"2026-09-10T17:33:41Z","ended_at":"2026-09-10T17:33:58Z","outcome":"completed","recorded_at":"2026-09-10T17:33:58Z"}
+{"v":1,"kind":"execution","execution_id":"human-1","run_id":"0f4c3a6e-2d1b-4b7e-9c8a-5e2f1d0a9b31","parent_execution_id":"root-195f819e","execution_kind":"human","producer":"weft@0.3.0","started_at":"2026-09-10T17:36:10Z","ended_at":"2026-09-10T17:38:45Z","outcome":"completed","recorded_at":"2026-09-10T17:38:45Z"}
 {"v":1,"kind":"run","run_id":"0f4c3a6e-2d1b-4b7e-9c8a-5e2f1d0a9b31","ended_at":"2026-09-10T17:40:00Z","outcome":"completed","reporting_cutoff":"2026-09-10T17:40:00Z","producer":"warp/work@1.4.0","recorded_at":"2026-09-10T17:40:00Z"}
 ```
 
