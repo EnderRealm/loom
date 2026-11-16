@@ -3,6 +3,7 @@ package summaries
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,8 +33,18 @@ func TestLoadSessionsForTicketRejectsAnOutdatedSchema(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadSessionsForTicket = nil error, want a failure on a pre-commits schema")
 	}
-	if !strings.Contains(err.Error(), "--rebuild") {
-		t.Fatalf("error %v doesn't say how to fix it", err)
+	// The fixture still holds the commits table under a downgraded marker, so
+	// the error reports the versions it read and not a table it never checked.
+	msg := err.Error()
+	want := fmt.Sprintf("records schema 3, need %d", commitsSchemaVersion)
+	if !strings.Contains(msg, want) {
+		t.Fatalf("error %q doesn't report the recorded and required versions (%q)", msg, want)
+	}
+	if strings.Contains(msg, "predates the commits table") {
+		t.Fatalf("error %q claims the commits table is absent", msg)
+	}
+	if !strings.Contains(msg, "loom summarize --rebuild") {
+		t.Fatalf("error %q doesn't say how to fix it", msg)
 	}
 }
 

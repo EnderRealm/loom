@@ -363,7 +363,7 @@ func LoadSessionsForTickets(ticketIDs []string) ([]SessionSource, error) {
 	defer db.Close()
 
 	if v := schemaVersionOf(db); v < commitsSchemaVersion {
-		return nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, commitsSchemaVersion)
+		return nil, fmt.Errorf("summaries.db records schema %d, need %d — run `loom summarize --rebuild`", v, commitsSchemaVersion)
 	}
 
 	// A Claude subagent's commit is read as its parent's, and not at all when
@@ -529,7 +529,7 @@ func LoadSessionsAndCommits() ([]SessionSpan, []SessionCommit, error) {
 // $LOOM_HOME's.
 func SessionsAndCommits(db *sql.DB) ([]SessionSpan, []SessionCommit, error) {
 	if v := schemaVersionOf(db); v < commitsSchemaVersion {
-		return nil, nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, commitsSchemaVersion)
+		return nil, nil, fmt.Errorf("summaries.db records schema %d, need %d — run `loom summarize --rebuild`", v, commitsSchemaVersion)
 	}
 
 	rows, err := db.Query(`

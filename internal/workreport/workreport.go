@@ -161,7 +161,7 @@ func Load(dbPath string, since, until time.Time) (*Report, error) {
 	defer db.Close()
 
 	if v := SchemaVersionOf(db); v < requiredSchemaVersion {
-		return nil, fmt.Errorf("summaries.db is at schema %d and predates the commits table (want %d) — run `loom summarize --rebuild`", v, requiredSchemaVersion)
+		return nil, fmt.Errorf("summaries.db records schema %d, need %d — run `loom summarize --rebuild`", v, requiredSchemaVersion)
 	}
 	if v := SchemaVersionOf(db); v < lensSchemaVersion {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the lens_responses table (want %d) — run `loom summarize --rebuild`", v, lensSchemaVersion)
