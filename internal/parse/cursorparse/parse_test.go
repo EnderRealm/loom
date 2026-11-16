@@ -385,6 +385,72 @@ func TestUserShapeAndSnapshotDiagnostics(t *testing.T) {
 	}
 }
 
+// Fields 9 (dynamic_tool_names) and 10 (user_message_id) were observed on
+// real agent turns; the shapes here follow the retained journals.
+func TestAgentTurnObservedFields(t *testing.T) {
+	raw, err := os.ReadFile("testdata/parent.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Parse(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := map[string]bool{}
+	for _, u := range want.Unknown {
+		baseline[u.Type+":"+u.Subtype] = true
+	}
+	str := func(num int, s string) []byte {
+		out := binary.AppendUvarint(nil, uint64(num<<3|2))
+		out = binary.AppendUvarint(out, uint64(len(s)))
+		return append(out, s...)
+	}
+	observed := append(append(append(str(9, "GenerateImage"), str(9, "CreateGoal")...), str(9, "UpdateGoal")...),
+		str(10, "0b6f3c1e-8a52-4d7e-9c1f-2e4a6b8d0f13")...)
+	unrelated := binary.AppendUvarint(binary.AppendUvarint(nil, 99<<3), 1)
+	wrongWire := binary.AppendUvarint(binary.AppendUvarint(nil, 9<<3), 1)
+	for _, tc := range []struct {
+		name  string
+		extra []byte
+		diags []string
+	}{
+		{"observed", observed, nil},
+		{"unrelated", append(append([]byte(nil), observed...), unrelated...), []string{"agent_turn:field_99"}},
+		{"wrong_wire", append(append([]byte(nil), observed...), wrongWire...), []string{"agent_turn:field_9_wire_0"}},
+	} {
+		mutated := mutateBlob(t, raw, func(data []byte) ([]byte, bool) {
+			wrapper, ok := decodeWire(data)
+			if !ok || len(wrapper) != 1 || wrapper[0].num != 1 || wrapper[0].wire != 2 {
+				return nil, false
+			}
+			tf, ok := decodeWire(wrapper[0].data)
+			if !ok || len(fieldBytes(tf, 1)) != 1 || len(fieldBytes(tf, 2)) == 0 || firstString(tf, 3) == "" {
+				return nil, false
+			}
+			payload := append(append([]byte(nil), wrapper[0].data...), tc.extra...)
+			out := binary.AppendUvarint([]byte{1<<3 | 2}, uint64(len(payload)))
+			return append(out, payload...), true
+		})
+		got, err := Parse(bytes.NewReader(mutated))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var added []string
+		for _, u := range got.Unknown {
+			if d := u.Type + ":" + u.Subtype; !baseline[d] {
+				added = append(added, d)
+			}
+		}
+		if !reflect.DeepEqual(added, tc.diags) {
+			t.Errorf("%s: added diagnostics = %v, want %v", tc.name, added, tc.diags)
+		}
+		got.Unknown = want.Unknown
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: summary changed beyond diagnostics", tc.name)
+		}
+	}
+}
+
 func TestNestedMessageShapeDiagnostics(t *testing.T) {
 	raw, err := os.ReadFile("testdata/parent.jsonl")
 	if err != nil {

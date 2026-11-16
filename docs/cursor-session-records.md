@@ -55,6 +55,27 @@ fields and conflicting tool evidence appear in `unknown_records`. Run-report
 surfaces Cursor parser diagnostics as telemetry gaps. Unsupported shell-only
 conversation turns are diagnosed rather than interpreted as user work.
 
+`AgentConversationTurnStructure` fields 9 and 10 are recognized without a
+diagnostic and are not summarized. Installed CLIs 2026.09.26-dd393fe,
+2026.10.22-27dcf5f and 2026.11.05-86047df all declare field 9 as
+`dynamic_tool_names` (repeated string) and field 10 as `user_message_id`
+(optional string); the later two extend the message to field 17. Retained
+journals agree with that shape. Every agent turn of the warp
+`/work` acceptance session `78684110-607b-4d01-a854-9064ebb966f4` and of
+`52fd2d38-362c-4bd3-a09f-c3c2401d1b44` carries field 9 three times, wire type
+2, with the tool names `GenerateImage`, `CreateGoal` and `UpdateGoal`. The
+Cursor journals in the 2026-09-18 work-eval baseline carry field 9 with other
+tool names (for example `AwaitShell`, `SwitchMode`, `WebFetch`, `TodoWrite`)
+and field 10, wire type 2, always a 36-character UUID string. On every one of
+those turns the value equals the referenced `UserMessage`'s `message_id`
+(field 2), and also its `thread_id` (field 17).
+
+The acceptance run used 2026.09.15-d2fe57e, which is no longer installed; its
+mapping is inferred from the next available build and the observed shape.
+Fields 8 and 11–17 are declared but unobserved, so they still diagnose, as
+does field 9 or 10 arriving with another wire type. Recognizing these fields
+leaves Cursor billing usage unavailable.
+
 ## Measurements and joins
 
 The observed source records context-window `used_tokens` and `max_tokens`.

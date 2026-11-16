@@ -491,7 +491,9 @@ func (st *state) foldTurn(id string) {
 		st.addUnknown("protobuf", "agent_turn", st.s.StartTime)
 		return
 	}
-	st.checkFields("agent_turn", tf, map[int]int{1: 2, 2: 2, 3: 2, 4: 2, 5: 0, 6: -1, 7: 2})
+	// Fields 9 (dynamic_tool_names) and 10 (user_message_id) are recognized
+	// but not summarized; see docs/cursor-session-records.md.
+	st.checkFields("agent_turn", tf, map[int]int{1: 2, 2: 2, 3: 2, 4: 2, 5: 0, 6: -1, 7: 2, 9: 2, 10: 2})
 	t := summary.Turn{Idx: len(st.s.Turns), TurnID: id, Model: firstString(tf, 7)}
 	st.seenSteps = map[string]bool{}
 	if userRefs := fieldBytes(tf, 1); len(userRefs) > 0 {
