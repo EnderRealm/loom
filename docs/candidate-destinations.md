@@ -94,6 +94,45 @@ appends to its own entry as `, K ticket candidates` when there are any.
 The decision extractor is unchanged: its artifacts have one destination, the
 type itself.
 
+### Contradicting a validated truth
+
+A measured truth can falsify a validated one, as one falsified the standing
+belief that ticket scope drove diff size. The measured truth supersedes it.
+
+The measured candidate names the truths it falsifies in its `contradicts:`
+list. On a candidate that list already holds validated artifact ids:
+`linkContradictions` in `internal/knowledge/knowledge.go` links each id both
+ways (`Conflicts` on the candidate, `ContradictedBy` on the truth), warns on an
+id that resolves to no validated artifact, and the knowledge view in the TUI and
+`loom knowledge conflicts` surface the conflict. A measured candidate's
+`contradicts:` ids are its supersede targets; no new key is added. The
+`file`/`claim`/`status` doc-override entries under `contradicts:` are what
+validated truths carry, per the store's `truths/_schema.md`; `verify.py` and
+`sweep.py` skip those indented entries rather than read them.
+
+When the measured truth is promoted in the TUI, each validated truth its
+`contradicts:` names goes to `deprecated` on a human's confirmation, through
+`sweep.py`'s `demoted_text`. In place of `demotion_section`'s sweep record of
+the commands that ran, the demotion writes its own section naming the
+successor's id and quoting its `## Measurement` section. The old entry stays in
+the store; `extract.py` already leaves deprecated truths out of its input.
+
+Decided 2026-11-15, not yet implemented: promotion demotes nothing until
+loom/supersede-validated-truth-947b lands. Supersede was chosen over merge and
+stand-alone because:
+
+- **Measured is the strongest evidence.** A measured truth carries a runnable
+  command and a number, which no other class in the store does.
+- **The link already exists.** Candidate `contradicts:` ids are resolved,
+  warned on and shown in the TUI today; superseding acts on that link rather
+  than adding a second one.
+- **Demotion already keeps provenance.** The path exists, and the old claim
+  survives as written, with the reason it fell recorded on it.
+- **Merge rewrites validated text.** A model editing a validated truth blurs
+  what the original claim said and who stood behind it.
+- **Standing alone accumulates contradictions.** Two validated truths saying
+  opposite things is the problem this rule exists to stop.
+
 ## Review: filing a ticket candidate
 
 `p` on a ticket candidate files it rather than promoting it, in three steps.
