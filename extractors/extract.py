@@ -1446,7 +1446,12 @@ def main():
         if not raw_path and args.json_out:
             raw_path = args.json_out.replace(".json", ".raw.txt")
         if raw_path:
-            sum_path = raw_path.replace(".raw.txt", ".summary.txt")
+            # Appending when the suffix is absent keeps the summary from landing
+            # on raw_path, which the raw output overwrites below.
+            if raw_path.endswith(".raw.txt"):
+                sum_path = raw_path.removesuffix(".raw.txt") + ".summary.txt"
+            else:
+                sum_path = raw_path + ".summary.txt"
             Path(sum_path).write_text(summary_text)
             print(f"[extract] intermediate summary saved to {sum_path}", file=sys.stderr)
 
