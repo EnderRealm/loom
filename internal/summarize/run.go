@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"loom/internal/config"
 	"loom/internal/extract"
 	"loom/internal/parse/claudeparse"
 	"loom/internal/parse/codexparse"
@@ -669,17 +670,9 @@ func readMetaSidecar(jsonlPath string) (cwd, gitRemote string) {
 }
 
 func DefaultReceivedDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/loom-received"
-	}
-	return filepath.Join(home, ".loom", "received")
+	return filepath.Join(config.Home(), "received")
 }
 
 func DefaultDBPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/loom-summaries.db"
-	}
-	return filepath.Join(home, ".loom", "summaries.db")
+	return filepath.Join(config.Home(), "summaries.db")
 }

@@ -32,6 +32,13 @@ func TestLoomProcess(t *testing.T) {
 // empty trees rather than on real state.
 func runLoom(t *testing.T, home string, args ...string) (string, string, int) {
 	t.Helper()
+	return runLoomEnv(t, home, nil, args...)
+}
+
+// runLoomEnv is runLoom with env appended after the isolating defaults; the
+// last value for a key wins, so a test can pin one (e.g. HOME) to inspect it.
+func runLoomEnv(t *testing.T, home string, env []string, args ...string) (string, string, int) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=^TestLoomProcess$", "--"}, args...)...)
@@ -43,6 +50,7 @@ func runLoom(t *testing.T, home string, args ...string) (string, string, int) {
 		"TK_STORE_ROOT="+t.TempDir(),
 		"HOME="+t.TempDir(),
 	)
+	cmd.Env = append(cmd.Env, env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
