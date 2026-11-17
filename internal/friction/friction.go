@@ -145,14 +145,7 @@ func Load(dbPath string, since time.Time) ([]Event, error) {
 		return nil, fmt.Errorf("summaries.db is at schema %d and predates the friction table (want %d) — run `loom summarize --rebuild`", v, schemaVersion)
 	}
 
-	q := `SELECT session_id, kind, signature, ts FROM friction`
-	var args []any
-	if !since.IsZero() {
-		q += ` WHERE ts >= ?`
-		args = append(args, since.UTC().Format(time.RFC3339Nano))
-	}
-	q += ` ORDER BY ts, session_id, seq`
-	rows, err := db.Query(q, args...)
+	rows, err := db.Query(`SELECT session_id, kind, signature, ts FROM friction ORDER BY ts, session_id, seq`)
 	if err != nil {
 		return nil, fmt.Errorf("load friction: %w", err)
 	}
@@ -167,6 +160,12 @@ func Load(dbPath string, since time.Time) ([]Event, error) {
 		}
 		if ts.Valid {
 			e.Time, _ = time.Parse(time.RFC3339Nano, ts.String)
+		}
+		// since filters here rather than in SQL: RFC3339Nano drops a zero
+		// fraction, so "…00.2Z" sorts before "…00Z" as a string though the
+		// instant is after it. A row with no time is outside any bound.
+		if !since.IsZero() && (e.Time.IsZero() || e.Time.Before(since)) {
+			continue
 		}
 		events = append(events, e)
 	}

@@ -178,6 +178,41 @@ func TestLoadReadsRowsAndHonoursSince(t *testing.T) {
 	}
 }
 
+// TestLoadSinceKeepsSubSecondEventAtBound seeds an event 200ms into the
+// bound's own second. Stored as RFC3339Nano it reads "…00.2Z", which sorts
+// before the bound's "…00Z" as a string though the instant is after it.
+func TestLoadSinceKeepsSubSecondEventAtBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "summaries.db")
+	st, err := summaries.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+	at := bound.Add(200 * time.Millisecond)
+	sum := &summary.SessionSummary{
+		SessionID: "5b1c2d7e-0f3a-4c8e-9d21-6a7b8c9d0e1f",
+		Agent:     summary.AgentClaude,
+		Cwd:       "/Users/steve/code/warp",
+		StartTime: at,
+		EndTime:   at.Add(time.Minute),
+		Friction: []summary.FrictionEvent{
+			{Time: at, Kind: parsefriction.KindToolError, Signature: "Grep: ripgrep not found on PATH", Tool: "Grep"},
+		},
+	}
+	if err := st.WriteSummary(context.Background(), sum, summaries.SourceInfo{Project: "warp"}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	events, err := Load(path, bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || !events[0].Time.Equal(at) {
+		t.Fatalf("Load since %s = %+v, want the event at %s", bound.Format(time.RFC3339Nano), events, at.Format(time.RFC3339Nano))
+	}
+}
+
 // TestLoadEscapesURIDelimiters pins that a path carrying '#' or '?' is read
 // as the file it names: no query is lost and no database appears at the
 // prefix a file: URI would otherwise cut the path down to.
