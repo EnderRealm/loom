@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // The catalog every cross-project case here runs against: Root activated,
@@ -314,5 +316,98 @@ func TestForeignChildCompletionMovesTheEpicWithoutTouchingItsFile(t *testing.T) 
 	}
 	if string(before) != string(after) {
 		t.Errorf("the epic's file changed while only its children were written:\n--- before\n%s\n--- after\n%s", before, after)
+	}
+}
+
+// A ticket in testing has landed and is not finished: it is counted and listed
+// with the open work, under a label and a colour no other status has, and
+// reaches the activity view's closed list only once it is done.
+func TestTicketViewsShowTestingAsUnfinished(t *testing.T) {
+	// lipgloss emits no colour off a terminal, which would leave every status
+	// styled alike.
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+
+	root, ms := newCentralStore(t, crossProjectCatalog, "_root", "loom", "warp")
+	repo := t.TempDir()
+	registerRepo(t, root, "loom", repo)
+	mustCreate(t, ms,
+		mkTicket("loom/working-0001", ticket.TypeFeature, ticket.StatusOpen, ""),
+		mkTicket("loom/landed-0002", ticket.TypeBug, ticket.StatusOpen, ""),
+		mkTicket("loom/queued-0003", ticket.TypeFeature, ticket.StatusReady, ""),
+		mkTicket("loom/later-0004", ticket.TypeFeature, ticket.StatusBacklog, ""),
+		mkTicket("loom/shipped-0005", ticket.TypeFeature, ticket.StatusDone, ""),
+	)
+	setStatus(t, ms, "loom/landed-0002", ticket.StatusTesting)
+
+	since := time.Now().Add(-24 * time.Hour)
+	snap := mustSnapshot(t)
+	summary := ticketSummaryFrom(snap, repo)
+	if summary == nil || summary.Status["testing"] != 1 {
+		t.Fatalf("summary = %+v, want one ticket in testing", summary)
+	}
+	listed := map[string]bool{}
+	for _, tk := range summary.OpenTop {
+		listed[tk.ID] = true
+	}
+	if len(listed) != 3 || !listed["loom/working-0001"] || !listed["loom/landed-0002"] || !listed["loom/queued-0003"] {
+		t.Errorf("OpenTop = %v, want the open, testing and ready tickets", listed)
+	}
+	if _, closed := findChange(ticketActivityFrom(snap, since).Closed, "loom/landed-0002"); closed {
+		t.Error("activity closes a ticket that is in testing")
+	}
+
+	project := Project{Slug: "loom", Name: "loom", Path: repo, Tickets: summary}
+	if row := stripANSI(dashboardModel{width: 200}.renderRow(project, false)); !strings.Contains(row, "5 (3 open)") {
+		t.Errorf("dashboard row = %q, want the testing ticket in its open figure", row)
+	}
+	label := lipgloss.NewStyle().Foreground(colorBlue).Render("testing")
+	view := newDetailModel(&project, 120, 40).view()
+	if want := "open:1 · testing:1 · ready:1 · backlog:1 · done:1"; !strings.Contains(stripANSI(view), want) {
+		t.Errorf("detail has no status line %q:\n%s", want, stripANSI(view))
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if !strings.Contains(line, "Ticket ") {
+			continue
+		}
+		if got, want := strings.Contains(line, label), strings.Contains(line, "landed-0002"); got != want {
+			t.Errorf("row %q: testing label = %v, want %v", stripANSI(line), got, want)
+		}
+	}
+	for status, color := range ticketStatusColors {
+		if status != "testing" && color == ticketStatusColors["testing"] {
+			t.Errorf("testing shares its colour with %s", status)
+		}
+	}
+
+	setStatus(t, ms, "loom/landed-0002", ticket.StatusDone)
+	snap = mustSnapshot(t)
+	if summary := ticketSummaryFrom(snap, repo); summary.Status["testing"] != 0 || len(summary.OpenTop) != 2 {
+		t.Errorf("counts = %v with %d listed, want nothing in testing and the passed ticket off the list", summary.Status, len(summary.OpenTop))
+	}
+	if _, closed := findChange(ticketActivityFrom(snap, since).Closed, "loom/landed-0002"); !closed {
+		t.Error("activity does not close the ticket once it is done")
+	}
+}
+
+// A row's label comes out of its title's width, so a long title in testing
+// ends where one in open does and neither wraps.
+func TestDetailTestingRowKeepsItsWidth(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	project := Project{Slug: "loom", Tickets: &TicketSummary{OpenTop: []*ticket.Ticket{
+		{ID: "loom/a-0001", Status: ticket.StatusOpen, Title: long},
+		{ID: "loom/b-0002", Status: ticket.StatusTesting, Title: long},
+	}}}
+	for _, width := range []int{40, 120} {
+		var ends []int
+		for _, line := range strings.Split(stripANSI(newDetailModel(&project, width, 40).view()), "\n") {
+			if i := strings.Index(line, "xx…"); i >= 0 {
+				ends = append(ends, i)
+			}
+		}
+		if len(ends) != 2 || ends[0] != ends[1] {
+			t.Errorf("width %d: titles end at %v, want both rows ending together", width, ends)
+		}
 	}
 }

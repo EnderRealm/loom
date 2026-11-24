@@ -3,7 +3,7 @@ module loom
 go 1.26
 
 require (
-	github.com/EnderRealm/ticket/v8 v8.6.0
+	github.com/EnderRealm/ticket/v8 v8.13.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.6

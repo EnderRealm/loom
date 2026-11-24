@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/EnderRealm/ticket/v8/pkg/ticket"
+
 	"loom/internal/parse/summary"
 	"loom/internal/summaries"
 	"loom/internal/summarize"
@@ -214,6 +216,102 @@ func TestProjectStateRebuiltByTheFold(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(out), &one); err != nil || one.CommitsInWindow != 1 || one.WindowSeconds != int64(36*time.Hour/time.Second) {
 		t.Fatalf("alpha after failed rebuilds = %+v, want the 36h rows kept", one)
+	}
+}
+
+// A ticket in testing is still open work and nothing has closed: the count and
+// the last-closed time move when it is done. The tickets are written through
+// tk's library, which decides what a status change stamps, and the stand-in tk
+// prints them by `tk query`'s rule — closed only where ClosedAt has a time.
+func TestProjectStateCountsTestingAsOpen(t *testing.T) {
+	const day = 24 * time.Hour
+	tkStoreFor(t, "alpha", t.TempDir())
+	tickets := filepath.Join(os.Getenv("TK_STORE_ROOT"), "tickets")
+	knowledge := t.TempDir()
+	t.Setenv("LOOM_KNOWLEDGE_ROOT", knowledge)
+	for _, d := range []string{filepath.Join(tickets, "alpha"), filepath.Join(knowledge, "truths", "alpha")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tkDir := fakeTK(t, "", nil)
+	home := t.TempDir()
+	t.Setenv("LOOM_HOME", home)
+	db := filepath.Join(home, "summaries.db")
+	captureLog(t)
+
+	ms := ticket.NewMultiStore(tickets)
+	earlier := time.Now().UTC().Add(-10 * day).Truncate(time.Second)
+	for _, tk := range []*ticket.Ticket{
+		{ID: "alpha/landed-0001", Type: ticket.TypeFeature, Status: ticket.StatusOpen, Priority: 2,
+			Created: earlier, Title: "Landed", Body: "\n"},
+		{ID: "alpha/earlier-0002", Type: ticket.TypeFeature, Status: ticket.StatusDone, Priority: 2,
+			Created: earlier, Completed: earlier, Title: "Earlier", Body: "\n"},
+	} {
+		if err := ms.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// rebuilt moves the landed ticket to status, rebuilds project state from
+	// the store and returns alpha's row with the ticket's own closed time.
+	rebuilt := func(status ticket.Status) (summaries.ProjectState, time.Time) {
+		t.Helper()
+		if _, err := ticket.Mutate(ms, "alpha/landed-0001", func(tk *ticket.Ticket) error {
+			tk.Status = status
+			return nil
+		}); err != nil {
+			t.Fatalf("to %s: %v", status, err)
+		}
+		snap, err := ms.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var jsonl bytes.Buffer
+		enc := json.NewEncoder(&jsonl)
+		for _, tk := range snap.Tickets {
+			row := map[string]string{"id": tk.ID, "status": string(tk.Status), "type": string(tk.Type), "title": tk.Title,
+				"created": tk.Created.UTC().Format(time.RFC3339), "updated": tk.Updated.UTC().Format(time.RFC3339)}
+			if closed := tk.ClosedAt(); !closed.IsZero() {
+				row["closed"] = closed.UTC().Format(time.RFC3339)
+			}
+			if err := enc.Encode(row); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(tkDir, "query.jsonl"), jsonl.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		foldOnce(t, db, 30*day)
+		out, err := runProjectState(t, "--project", "alpha", "--json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var st summaries.ProjectState
+		if err := json.Unmarshal([]byte(out), &st); err != nil {
+			t.Fatal(err)
+		}
+		landed, ok := snap.Get("alpha/landed-0001")
+		if !ok || landed.Status != status {
+			t.Fatalf("landed ticket = %+v, want %s in the store", landed, status)
+		}
+		return st, landed.ClosedAt()
+	}
+
+	for _, status := range []ticket.Status{ticket.StatusOpen, ticket.StatusTesting} {
+		st, _ := rebuilt(status)
+		if st.OpenTickets != 1 || st.TicketsClosedInWindow != 1 ||
+			st.LastTicketClosedAt == nil || !st.LastTicketClosedAt.Equal(earlier) {
+			t.Errorf("%s: state = %+v last closed %v, want one open and last closed %v", status, st, st.LastTicketClosedAt, earlier)
+		}
+	}
+	st, closed := rebuilt(ticket.StatusDone)
+	if closed = closed.Truncate(time.Second); !closed.After(earlier) {
+		t.Fatalf("done ticket closed at %v, want after %v", closed, earlier)
+	}
+	if st.OpenTickets != 0 || st.TicketsClosedInWindow != 2 ||
+		st.LastTicketClosedAt == nil || !st.LastTicketClosedAt.Equal(closed) {
+		t.Errorf("done: state = %+v last closed %v, want none open and last closed %v", st, st.LastTicketClosedAt, closed)
 	}
 }
 

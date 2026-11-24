@@ -42,11 +42,12 @@ func agentColor(agent string) lipgloss.Color {
 	return colorWhite
 }
 
-// Status colors mirror the ticket TUI so the two dashboards read the same.
+// Status colors. Only backlog and closed, neither of them in flight, share one.
 var ticketStatusColors = map[string]lipgloss.Color{
 	"backlog": colorGray,
 	"ready":   colorCyan,
 	"open":    colorYellow,
+	"testing": colorBlue,
 	"done":    colorGreen,
 	"closed":  colorGray,
 }

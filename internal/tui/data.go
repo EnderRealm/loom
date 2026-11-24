@@ -620,11 +620,12 @@ func ticketSummaryFrom(snap *ticket.Snapshot, projectPath string) *TicketSummary
 		s.Type[string(t.Type)]++
 		s.Priority[t.Priority]++
 	}
-	// Top-N open/ready tickets, by priority asc then Created asc.
-	// Mirrors the Inbox() ordering used by the ticket TUI.
+	// Top-N open/testing/ready tickets, by priority asc then Created asc:
+	// ticket.Inbox's order. A testing ticket has landed but is unfinished until
+	// a person passes it.
 	var open []*ticket.Ticket
 	for _, t := range tickets {
-		if t.Status == ticket.StatusOpen || t.Status == ticket.StatusReady {
+		if t.Status == ticket.StatusOpen || t.Status == ticket.StatusTesting || t.Status == ticket.StatusReady {
 			open = append(open, t)
 		}
 	}

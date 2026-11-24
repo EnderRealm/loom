@@ -6,6 +6,17 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The `tk` module is v8.13.0, whose `testing` status is a landed ticket that
+  waits on a person. Loom reads it as unfinished: project state counts it
+  open and moves `last_ticket_closed_at` only when it is done, `loom escapes`
+  ignores a bug in it until then, and the TUI gives it its own color and
+  label, counts it in the dashboard's open figure and lists it among a
+  project's open tickets.
+- The TUI's activity view dates an abandoned epic by its abandon where tk
+  recorded one, rather than by its last child's finish alone.
+
 ## [1.14.0] — 2026-11-14 — Boot-time daemons and host metric samples
 
 ### Upgrade

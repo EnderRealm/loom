@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -149,7 +150,16 @@ func (m detailModel) view() string {
 				b.WriteString("  ")
 				b.WriteString(StyleDim.Render(ticketIDSuffix(tk.ID)))
 				b.WriteString("  ")
-				b.WriteString(truncate(tk.Title, titleWidth))
+				rowWidth := titleWidth
+				// Rows carry no status otherwise. A testing one is labelled
+				// because it waits on a person rather than on work.
+				if tk.Status == ticket.StatusTesting {
+					status := string(tk.Status)
+					b.WriteString(lipgloss.NewStyle().Foreground(ticketStatusColors[status]).Render(status))
+					b.WriteString("  ")
+					rowWidth -= len(status) + 2
+				}
+				b.WriteString(truncate(tk.Title, rowWidth))
 				b.WriteString("\n")
 			}
 		}
@@ -178,7 +188,7 @@ func statRow(label, value string) string {
 }
 
 func renderStatusLine(counts map[string]int) string {
-	order := []string{"open", "ready", "backlog", "done", "closed"}
+	order := []string{"open", "testing", "ready", "backlog", "done", "closed"}
 	var parts []string
 	for _, s := range order {
 		if n, ok := counts[s]; ok && n > 0 {

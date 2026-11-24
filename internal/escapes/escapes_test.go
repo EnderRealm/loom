@@ -262,6 +262,52 @@ func TestEveryBugClassifiedOnce(t *testing.T) {
 	}
 }
 
+// TestEscapesIgnoreBugInTesting runs the pipeline over a stand-in tk before and
+// after a bug passes testing: landed is not done, so the bug is no escape
+// candidate until a person passes it.
+func TestEscapesIgnoreBugInTesting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("TK_STORE_ROOT", t.TempDir())
+	db := filepath.Join(t.TempDir(), "summaries.db")
+	st, err := summaries.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	bin := t.TempDir()
+	query := filepath.Join(bin, "query.jsonl")
+	script := "#!/bin/sh\n[ \"$*\" = \"query --all-projects\" ] || exit 2\ncat \"" + query + "\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "tk"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	recorded := func(status ticket.Status) string {
+		t.Helper()
+		rows := `{"id":"proj/fixed-0001","status":"done","type":"bug"}` + "\n" +
+			`{"id":"proj/landed-0002","status":"` + string(status) + `","type":"bug"}` + "\n"
+		if err := os.WriteFile(query, []byte(rows), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := Run(db, testWriter{t})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, r := range rep.Records {
+			ids = append(ids, r.Ticket)
+		}
+		return strings.Join(ids, ",")
+	}
+	if got := recorded(ticket.StatusTesting); got != "proj/fixed-0001" {
+		t.Errorf("records = %s, want the bug in testing left out", got)
+	}
+	if got := recorded(ticket.StatusDone); got != "proj/fixed-0001,proj/landed-0002" {
+		t.Errorf("records = %s, want the bug counted once it is done", got)
+	}
+}
+
 // testWriter sends the pipeline's diagnostics to the test log.
 type testWriter struct{ t *testing.T }
 

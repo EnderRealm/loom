@@ -360,7 +360,7 @@ func (m dashboardModel) renderRow(p Project, selected bool) string {
 
 	var tickets string
 	if p.Tickets != nil {
-		open := p.Tickets.Status["open"] + p.Tickets.Status["ready"]
+		open := p.Tickets.Status["open"] + p.Tickets.Status["testing"] + p.Tickets.Status["ready"]
 		tickets = selBg.Foreground(colorWhite).Render(fmt.Sprintf("%d", p.Tickets.Total)) +
 			selBg.Foreground(colorMuted).Render(fmt.Sprintf(" (%d open)", open))
 	} else {
