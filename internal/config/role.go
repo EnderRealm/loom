@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,15 +32,26 @@ func validRole(s string) bool {
 // missing, unreadable, or holds an unrecognized token. Callers treat ""
 // as "no role set" and fall back to legacy whole-machine expectations.
 func ReadRole() string {
+	role, _ := LoadRole()
+	return role
+}
+
+// LoadRole is ReadRole for a caller that must tell a machine with no role
+// from one whose marker can't be read: a missing marker is "" with no error,
+// an unreadable one or an unrecognized token is "" with an error.
+func LoadRole() (string, error) {
 	data, err := os.ReadFile(rolePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
 	if err != nil {
-		return ""
+		return "", err
 	}
 	role := strings.TrimSpace(string(data))
 	if !validRole(role) {
-		return ""
+		return "", fmt.Errorf("invalid role %q in %s", role, rolePath())
 	}
-	return role
+	return role, nil
 }
 
 // WriteRole validates role and persists it as the trimmed token in the

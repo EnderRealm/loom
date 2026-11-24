@@ -607,14 +607,29 @@ func (c *Config) httpClient(timeout time.Duration) *http.Client {
 // ---------- notifier helpers ----------
 
 func refreshPending(state *notify.State) {
+	// Best effort: what could be listed replaces the last count, and only a
+	// staging dir that can't be read at all leaves it standing.
+	if pending, _ := pendingSessions(); pending != nil {
+		state.PendingSessions = pending
+	}
+}
+
+// pendingSessions returns the staged sessions not fully shipped. A non-nil
+// error means the set is not a measurement: an agent whose staging could not
+// be listed is missing from it, a session whose size or ship cursor could not
+// be read is in it on no evidence, and it is nil when the staging dir itself
+// could not be listed.
+func pendingSessions() (map[string]bool, error) {
 	pending := map[string]bool{}
 	agents, err := staging.AgentDirs()
 	if err != nil {
-		return
+		return nil, err
 	}
+	var errs []error
 	for _, agent := range agents {
 		entries, err := staging.List(agent)
 		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
 		occurrences := map[string]int{}
@@ -624,12 +639,15 @@ func refreshPending(state *notify.State) {
 		for _, e := range entries {
 			size, sizeErr := source.Size(e.Path)
 			shipOff, cursorErr := cursor.Read(cursor.KindShip, agent, e.Key())
+			if err := errors.Join(sizeErr, cursorErr); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", notify.SessionKey(agent, e.Key()), err))
+			}
 			if sizeErr != nil || cursorErr != nil || shipOff != size || occurrences[e.Key()] > 1 {
 				pending[notify.SessionKey(agent, e.Key())] = true
 			}
 		}
 	}
-	state.PendingSessions = pending
+	return pending, errors.Join(errs...)
 }
 
 func maybeNotify(cfg *Config, state *notify.State, ev notify.Event) {
@@ -702,6 +720,39 @@ func LastSync() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return state.LastSuccessTS, true
+}
+
+// SyncHealth is the last sync, backlog and outstanding failure PrintHealth
+// reports. A nil UnshippedSessions or FailureActive could not be read. A nil
+// LastSuccess is no successful sync recorded, or unreadable when FailureActive
+// is nil too: both come from the notify state.
+type SyncHealth struct {
+	LastSuccess       *time.Time
+	UnshippedSessions *int
+	FailureActive     *bool
+}
+
+// ReadSyncHealth returns what could be read beside an error naming what could
+// not. Unlike PrintHealth it never reports a count it could not measure.
+func ReadSyncHealth() (SyncHealth, error) {
+	var h SyncHealth
+	state, stateErr := notify.LoadState()
+	if stateErr != nil {
+		stateErr = fmt.Errorf("read notify state: %w", stateErr)
+	} else {
+		h.FailureActive = &state.FailureActive
+		if !state.LastSuccessTS.IsZero() {
+			h.LastSuccess = &state.LastSuccessTS
+		}
+	}
+	pending, pendingErr := pendingSessions()
+	if pendingErr != nil {
+		pendingErr = fmt.Errorf("count unshipped sessions: %w", pendingErr)
+	} else {
+		n := len(pending)
+		h.UnshippedSessions = &n
+	}
+	return h, errors.Join(stateErr, pendingErr)
 }
 
 // ---------- health printer ----------

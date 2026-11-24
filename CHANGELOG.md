@@ -6,6 +6,15 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `loom status --json` prints one object with each component's launchd state,
+  last exit and last activity time, and the last successful sync time,
+  unshipped session count and active failure, so a program reads them without
+  parsing the plain report, which is unchanged. A reading that could not be
+  taken carries an `error` beside a null or an `unknown` state, never a zero,
+  and the exit code stays 0. See "`loom status --json`" in the README.
+
 ### Changed
 
 - The `tk` module is v8.13.0, whose `testing` status is a landed ticket that

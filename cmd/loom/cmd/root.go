@@ -53,7 +53,8 @@ Lifecycle:
   install <component>          Install a launchd agent for the running loom binary
                                  server | receiver | summarizer | shipper
   uninstall                    Remove all loom launchd agents (state preserved)
-  status                       Show component status + sync health
+  status [--json]              Show component status + sync health; --json
+                                 prints both as one JSON object
 
 Global flags:
   -h, --help                   Show help

@@ -541,9 +541,30 @@ rm -f ~/.local/bin/loom
 | `loom ui`                     | Interactive dashboard (alias: `loom tui`); `--run <id>` opens a run's detail. |
 | `loom install <component>`    | Components: `server` / `remote` / `receiver` / `summarizer` / `extractor` / `shipper`. `server`/`remote` also record the machine role. |
 | `loom uninstall`              | Remove every loom launchd agent. State preserved.                           |
-| `loom status`                 | Launchctl state per component + sync health + config presence.              |
+| `loom status`                 | Launchctl state per component + sync health + config presence; `--json` prints the component states and sync health as one object. |
 
 **`./install.sh`** is a transitional forwarder (`--install-X` → `loom install X`); use the loom binary directly going forward.
+
+### `loom status --json`
+
+One object on stdout, for a program that must not parse the plain report. Times are RFC 3339. Run it as the user whose `$LOOM_HOME` the components use: logs and sync state are read from there.
+
+| Field | Meaning |
+| ----- | ------- |
+| `role`, `role_error` | The machine role, null when none is set; `role_error` when the marker can't be read or holds no known role. |
+| `components.<name>` | Always all of `receiver`, `summarizer`, `extractor`, `shipper`, `updater`. |
+| `….installed`, `….expected` | Whether the plist exists, and whether the role expects the component (false with no role). Null when unknown. |
+| `….state` | launchd's own state (`running`, `not running`, `spawn scheduled`, …), or `not-installed`, `not-loaded`, or `unknown` when it could not be read. |
+| `….last_exit_code`, `….last_exit_signal`, `….last_exit_reason` | How the last process ended. launchd reports a signal (`Killed: 9`) or a reason (a jetsam kill) in place of a code. All null with no `error` means it has never exited, or is not loaded or not installed. |
+| `….last_activity` | When the log was last written; null when there is no log, or the component is not installed. |
+| `….error` | What could not be read about the component, null when everything was. |
+| `sync` | Null when the shipper is not installed, in either launchd domain. |
+| `sync.last_success` | Last tick that reached the receiver; null when none has. |
+| `sync.unshipped_sessions` | Staged sessions not fully shipped. |
+| `sync.failure_active` | Whether the last notification sent was a failure. It is set by sending one, so with `notify_on_failure` off it does not change. |
+| `sync.error` | What could not be read; the values it covers are null. |
+
+A reading that could not be taken is reported in the object, as an `error` beside a null or `unknown`, and the exit code stays 0. A non-zero exit means no object was printed.
 
 ---
 

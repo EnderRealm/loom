@@ -25,6 +25,10 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show loom component status",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+			return printStatusJSON(cmd.OutOrStdout())
+		}
+
 		self, _ := os.Executable()
 		printBinaryStatus(cmd.OutOrStdout(), self, time.Now())
 
@@ -41,72 +45,39 @@ var statusCmd = &cobra.Command{
 		}
 
 		role := config.ReadRole()
-		// Mirror dev.go's math: the updater counts toward the expected set
-		// only when its plist is installed, so brew machines without a
-		// source checkout don't flag a missing updater.
-		expected := map[string]bool{}
-		for _, label := range expectedDaemons(role, plistInstalled(updater.AgentLabel)) {
-			expected[label] = true
+		for _, r := range agentReports(role) {
+			switch r.label {
+			case receiver.AgentLabel:
+				r.interval = "n/a (HTTP server)"
+			case summarizerLabel:
+				r.interval = fmt.Sprintf("%s (sweep ticker)", summarizerInterval)
+			case extract.AgentLabel:
+				// The extractor shells out to extract.py from a loom checkout, which
+				// the release tarball doesn't carry; surface whether it resolves so a
+				// silently no-op agent is visible here and not only in its log. The
+				// settings are the agent's own resolution (persisted tunables, then
+				// defaults) rather than whatever this shell happens to export.
+				es := extract.CurrentSettings()
+				scriptNote := "script    = " + filepath.Join(es.ExtractorsDir, "extract.py")
+				if script, err := extract.ScriptPath(); err == nil {
+					scriptNote = "script    = " + script
+				} else {
+					scriptNote += " (MISSING — set LOOM_EXTRACTORS_DIR)"
+				}
+				r.interval = fmt.Sprintf("%s (sweep ticker)", extract.DefaultInterval)
+				r.notes = []string{
+					scriptNote,
+					fmt.Sprintf("model     = %s:%s", es.Provider, es.Model),
+					fmt.Sprintf("min-turns = %d", es.MinTurns),
+					"knowledge = " + es.KnowledgeRoot,
+				}
+			case shipper.AgentLabel:
+				r.interval = shipperInterval
+			case updater.AgentLabel:
+				r.interval = fmt.Sprintf("%dm (release poll)", updater.DefaultIntervalMinutes)
+			}
+			printAgent(r)
 		}
-
-		printAgent(agentReport{
-			human:    "loom-receiver",
-			label:    receiver.AgentLabel,
-			logPath:  filepath.Join(config.Home(), "receiver.log"),
-			interval: "n/a (HTTP server)",
-			role:     role,
-			expected: expected[receiver.AgentLabel],
-		})
-		printAgent(agentReport{
-			human:    "loom-summarizer",
-			label:    summarizerLabel,
-			logPath:  filepath.Join(config.Home(), "summarizer.log"),
-			interval: fmt.Sprintf("%s (sweep ticker)", summarizerInterval),
-			role:     role,
-			expected: expected[summarizerLabel],
-		})
-		// The extractor shells out to extract.py from a loom checkout, which
-		// the release tarball doesn't carry; surface whether it resolves so a
-		// silently no-op agent is visible here and not only in its log. The
-		// settings are the agent's own resolution (persisted tunables, then
-		// defaults) rather than whatever this shell happens to export.
-		es := extract.CurrentSettings()
-		scriptNote := "script    = " + filepath.Join(es.ExtractorsDir, "extract.py")
-		if script, err := extract.ScriptPath(); err == nil {
-			scriptNote = "script    = " + script
-		} else {
-			scriptNote += " (MISSING — set LOOM_EXTRACTORS_DIR)"
-		}
-		printAgent(agentReport{
-			human:    "loom-extractor",
-			label:    extract.AgentLabel,
-			logPath:  extract.LogPath(),
-			interval: fmt.Sprintf("%s (sweep ticker)", extract.DefaultInterval),
-			notes: []string{
-				scriptNote,
-				fmt.Sprintf("model     = %s:%s", es.Provider, es.Model),
-				fmt.Sprintf("min-turns = %d", es.MinTurns),
-				"knowledge = " + es.KnowledgeRoot,
-			},
-			role:     role,
-			expected: expected[extract.AgentLabel],
-		})
-		printAgent(agentReport{
-			human:    "loom-shipper",
-			label:    shipper.AgentLabel,
-			logPath:  filepath.Join(config.TransportDir(), "shipper.log"),
-			interval: shipperInterval,
-			role:     role,
-			expected: expected[shipper.AgentLabel],
-		})
-		printAgent(agentReport{
-			human:    "loom-updater",
-			label:    updater.AgentLabel,
-			logPath:  updater.LogPath(),
-			interval: fmt.Sprintf("%dm (release poll)", updater.DefaultIntervalMinutes),
-			role:     role,
-			expected: expected[updater.AgentLabel],
-		})
 		// Extraction is gated on truths/<scope>/ existing, and a project with no
 		// directory accumulates nothing while its skipped sessions are visible
 		// only in the extractor's log — which is what makes non-use of the
@@ -223,39 +194,86 @@ func printScopeReport(w io.Writer, rep extract.ScopeReport) {
 }
 
 type agentReport struct {
-	human    string
+	name     string // component name, e.g. "receiver"
 	label    string
 	logPath  string
 	interval string
 	notes    []string // optional extra lines, e.g. resolved external dependencies
 	role     string   // machine role, for the not-installed marker
-	expected bool     // whether this role expects the component installed
+	expected bool     // whether a set role expects the component installed
+}
+
+// agentReports returns every component status reports on, in display order,
+// carrying what the plain and JSON reports share.
+func agentReports(role string) []agentReport {
+	// The updater counts toward the expected set only when its plist is
+	// installed, in either domain, so brew machines without a source checkout
+	// don't flag a missing updater.
+	expected := map[string]bool{}
+	if role != "" {
+		_, _, updaterInstalled, _ := agentPlist(updater.AgentLabel)
+		for _, label := range expectedDaemons(role, updaterInstalled) {
+			expected[label] = true
+		}
+	}
+	reports := []agentReport{
+		{name: "receiver", label: receiver.AgentLabel, logPath: filepath.Join(config.Home(), "receiver.log")},
+		{name: "summarizer", label: summarizerLabel, logPath: filepath.Join(config.Home(), "summarizer.log")},
+		{name: "extractor", label: extract.AgentLabel, logPath: extract.LogPath()},
+		{name: "shipper", label: shipper.AgentLabel, logPath: filepath.Join(config.TransportDir(), "shipper.log")},
+		{name: "updater", label: updater.AgentLabel, logPath: updater.LogPath()},
+	}
+	for i := range reports {
+		reports[i].role = role
+		reports[i].expected = expected[reports[i].label]
+	}
+	return reports
+}
+
+// agentPlist resolves the launchd domain label is reported from and whether
+// its plist is there. A boot-time daemon is reported from the system domain; a
+// component is installed in one domain or the other. A non-nil err means a
+// stat failed for a reason other than absence, so neither the domain nor
+// installed can be relied on.
+func agentPlist(label string) (d launchd.Domain, path string, installed bool, err error) {
+	path = systemPlistPath(label)
+	_, sysErr := os.Stat(path)
+	if sysErr == nil {
+		return launchd.System, path, true, nil
+	}
+	if errors.Is(sysErr, os.ErrNotExist) {
+		sysErr = nil
+	}
+	path, err = launchd.PlistPath(label)
+	if err != nil {
+		return launchd.User, "", false, errors.Join(sysErr, err)
+	}
+	_, userErr := os.Stat(path)
+	installed = userErr == nil
+	if errors.Is(userErr, os.ErrNotExist) {
+		userErr = nil
+	}
+	return launchd.User, path, installed, errors.Join(sysErr, userErr)
 }
 
 func printAgent(r agentReport) {
-	// A boot-time daemon is reported from the system domain; a component is
-	// installed in one domain or the other.
-	d := launchd.User
-	if _, err := os.Stat(launchd.SystemPlistPath(r.label)); err == nil {
-		d = launchd.System
-	}
-	plistPath, _ := d.PlistPath(r.label)
+	d, plistPath, installed, _ := agentPlist(r.label)
 	if plistPath == "" {
 		return
 	}
-	if _, err := os.Stat(plistPath); err != nil {
+	if !installed {
 		// A component a set role expects but that isn't installed gets an
 		// explicit marker rather than a silent skip, so the gap is visible.
 		// Components outside the role, and every component on a no-role
 		// machine, stay silently skipped (the legacy behavior).
-		if r.role != "" && r.expected {
-			fmt.Printf("=== %s ===\n", r.human)
+		if r.expected {
+			fmt.Printf("=== loom-%s ===\n", r.name)
 			fmt.Printf("  not installed (expected for %s role)\n", r.role)
 			fmt.Println()
 		}
 		return
 	}
-	fmt.Printf("=== %s ===\n", r.human)
+	fmt.Printf("=== loom-%s ===\n", r.name)
 	out, loaded, _ := d.Status(r.label)
 	if !loaded {
 		fmt.Println("  installed but not loaded")
@@ -357,5 +375,6 @@ func formatAgo(d time.Duration) string {
 }
 
 func init() {
+	statusCmd.Flags().Bool("json", false, "print component states and sync health as one JSON object")
 	rootCmd.AddCommand(statusCmd)
 }

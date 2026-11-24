@@ -8,6 +8,7 @@ package launchd
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -370,11 +371,85 @@ func Status(label string) (output string, loaded bool, err error) {
 
 // Status is Status for a job in d.
 func (d Domain) Status(label string) (output string, loaded bool, err error) {
-	out, runErr := exec.Command("launchctl", "print", d.target(label)).CombinedOutput()
-	if runErr != nil {
+	output, loaded, _ = d.Print(label)
+	return output, loaded, nil
+}
+
+// printNotFound is `launchctl print`'s exit code for a service the domain
+// does not hold. Its other failures (112 for a missing domain, 64 for a bad
+// target) are not an answer about the service.
+const printNotFound = 113
+
+// Print is Status for a caller that must tell a job launchd does not hold
+// (loaded false, nil err) from one launchctl could not report on (non-nil
+// err).
+func (d Domain) Print(label string) (output string, loaded bool, err error) {
+	target := d.target(label)
+	out, runErr := exec.Command("launchctl", "print", target).CombinedOutput()
+	if runErr == nil {
+		return string(out), true, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(runErr, &exit) && exit.ExitCode() == printNotFound {
 		return "", false, nil
 	}
-	return string(out), true, nil
+	return "", false, fmt.Errorf("launchctl print %s: %w: %s", target, runErr, strings.TrimSpace(string(out)))
+}
+
+// Job is the run state launchd reports for a loaded job. All three exit
+// fields are empty for a job that has never exited; a job killed by a signal
+// or by the kernel has no exit code, only the field naming what ended it.
+type Job struct {
+	State          string
+	LastExitCode   *int
+	LastExitSignal string // e.g. "Killed: 9", in place of an exit code
+	LastExitReason string // e.g. a jetsam reason, in place of an exit code
+}
+
+// neverExited is launchd's exit code value for a job with no exit to report.
+const neverExited = "(never exited)"
+
+// JobFromPrint parses `launchctl print` output into a Job. An error names
+// every field that could not be read; the fields that could be are still set.
+func JobFromPrint(out string) (Job, error) {
+	var j Job
+	var errs []error
+	var ok bool
+	if j.State, ok = jobField(out, "state"); !ok {
+		errs = append(errs, errors.New("launchd: no state in launchctl print output"))
+	}
+	code, hasCode := jobField(out, "last exit code")
+	j.LastExitSignal, _ = jobField(out, "last terminating signal")
+	j.LastExitReason, _ = jobField(out, "last exit reason")
+	switch {
+	case hasCode && code != neverExited:
+		// sysexits codes carry their name: "78: EX_CONFIG".
+		num, _, _ := strings.Cut(code, ":")
+		n, err := strconv.Atoi(num)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("launchd: bad last exit code %q", code))
+			break
+		}
+		j.LastExitCode = &n
+	case !hasCode && j.LastExitSignal == "" && j.LastExitReason == "":
+		errs = append(errs, errors.New("launchd: no last exit in launchctl print output"))
+	}
+	return j, errors.Join(errs...)
+}
+
+// jobField returns the value of one of the job's own fields in `launchctl
+// print` output, which are indented by exactly one tab. Unlike printField it
+// never falls through to a nested block, whose "state = active" would stand
+// in for a state launchd did not report.
+func jobField(out, key string) (string, bool) {
+	prefix := "\t" + key + " = "
+	for line := range strings.SplitSeq(out, "\n") {
+		if v, ok := strings.CutPrefix(line, prefix); ok {
+			v = strings.TrimSpace(v)
+			return v, v != ""
+		}
+	}
+	return "", false
 }
 
 // StartTolerance is the slack allowed when comparing a process's start time

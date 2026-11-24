@@ -87,6 +87,17 @@ func TestPrintScopeReportNamesCollidingScopes(t *testing.T) {
 func runStatus(t *testing.T) string {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	return captureStdout(t, func(w io.Writer) error {
+		statusCmd.SetOut(w)
+		defer statusCmd.SetOut(nil)
+		return statusCmd.RunE(statusCmd, nil)
+	})
+}
+
+// captureStdout returns what run printed to the process's stdout, which it is
+// also handed as a writer, and fails the test if run does.
+func captureStdout(t *testing.T, run func(w io.Writer) error) string {
+	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -99,13 +110,11 @@ func runStatus(t *testing.T) string {
 		b, _ := io.ReadAll(r)
 		out <- string(b)
 	}()
-	statusCmd.SetOut(w)
-	defer statusCmd.SetOut(nil)
-	runErr := statusCmd.RunE(statusCmd, nil)
+	runErr := run(w)
 	w.Close()
 	os.Stdout = orig
 	if runErr != nil {
-		t.Fatalf("status: %v", runErr)
+		t.Fatalf("run: %v", runErr)
 	}
 	return <-out
 }
