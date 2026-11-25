@@ -6,8 +6,17 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-11-25 — Machine-readable status
+
+### Upgrade
+
+- No schema version change; `summaries.db` stays at schema 12.
+
 ### Added
 
+- Execution kind `human`: a transcriptless execution parented on the run's
+  root, counted as one human interaction in the run report's parent and total
+  scopes. See `docs/execution-records.md`.
 - `loom status --json` prints one object with each component's launchd state,
   last exit and last activity time, and the last successful sync time,
   unshipped session count and active failure, so a program reads them without
@@ -25,6 +34,23 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   project's open tickets.
 - The TUI's activity view dates an abandoned epic by its abandon where tk
   recorded one, rather than by its last child's finish alone.
+- A command that fails prints its error once, with usage only when the command
+  line itself was malformed.
+- A measured process finding is extracted as a `kind: measured` truth, which
+  must carry its hypothesis, its measurement and what it applies beyond. The
+  extractor runs from a checkout, not from the release tarball.
+
+### Fixed
+
+- `loom summarize` resolves its default paths through `LOOM_HOME` rather than
+  always using `~/.loom`.
+- `loom friction --since` keeps sub-second events in the bound's own second.
+- `loom retrospect` reports the recorded and required schema without claiming
+  that the commits table is missing.
+- `extract.py --summarize` no longer overwrites its intermediate summary when
+  `--raw-out` lacks the `.raw.txt` suffix.
+- Cursor `agent_turn` fields `dynamic_tool_names` and `user_message_id` are
+  recognized rather than reported as telemetry gaps.
 
 ## [1.14.0] — 2026-11-14 — Boot-time daemons and host metric samples
 
