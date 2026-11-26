@@ -6,6 +6,13 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The release workflow runs `go test ./...` before GoReleaser, so a tag whose
+  tests fail publishes no release. The three `internal/escapes` fixture tests
+  that read the operator's tk store and project checkouts are skipped there.
+  See `docs/releasing.md`.
+
 ## [1.15.0] — 2026-11-25 — Machine-readable status
 
 ### Upgrade

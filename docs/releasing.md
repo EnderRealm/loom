@@ -9,7 +9,10 @@ git push origin v1.2.0
 ```
 
 The `Release` workflow (`.github/workflows/release.yml`) fires on any
-`v*` tag and runs `goreleaser release --clean`, which:
+`v*` tag and runs `go test ./...` first, so a tag whose suite fails
+publishes nothing (the workflow names the few tests it skips because they
+need the operator's tk store). It then runs `goreleaser release --clean`,
+which:
 
 1. Cross-compiles the `loom` binary for darwin/linux × amd64/arm64
    (`CGO_ENABLED=0` — the build is pure Go via `modernc.org/sqlite`).

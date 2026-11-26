@@ -20,6 +20,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Skipped: the internal/escapes fixture tests read the operator's live tk
+      # store (~/.ticket, the tk binary) and the checkouts of every project the
+      # fixture labels, none of which exist on the runner. The rest of that
+      # package's tests run here.
+      - name: Run tests
+        run: go test -skip '^(TestFixtureWellFormed|TestFixtureCommitsResolve|TestPrecisionAgainstFixture)$' ./...
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
         with:
