@@ -376,11 +376,13 @@ The plist runs the loom binary at the absolute path of whichever `loom` was on `
 
 The receiver serves plain HTTP and does not terminate TLS itself. Shippers carry verbatim transcripts and the bearer token, and they refuse a non-loopback `server_url` that is not `https://`, so a server reached from another machine runs a TLS terminator in front of a receiver bound to loopback. Do not open port 8765.
 
-Bind the receiver to loopback in the server's `$LOOM_HOME/config.json`, then reinstall it. Without this it listens on `:8765`, all interfaces, leaving the plaintext port reachable beside the terminator:
+The receiver binds `127.0.0.1:8765` by default, so the plaintext port is reachable only from the server itself and nothing needs setting. A receiver installed without `receiver_addr` has no `--addr` in its plist and takes that default each time it starts, so an older install moves to loopback once it restarts on a release that carries it.
+
+To listen elsewhere, set `receiver_addr` in the server's `$LOOM_HOME/config.json`, then reinstall the receiver. An address off loopback, such as `:8765` (all interfaces), leaves the plaintext port reachable beside the terminator:
 
 ```json
 {
-  "receiver_addr": "127.0.0.1:8765"
+  "receiver_addr": "127.0.0.1:9000"
 }
 ```
 
@@ -424,12 +426,12 @@ For foreground debugging:
 
 ```sh
 LOOM_RECEIVER_TOKEN=<token> loom receiver
-# → listening on :8765, storage=/Users/<you>/.loom/received
+# → loom-receiver listening on 127.0.0.1:8765 storage=/Users/<you>/.loom/received
 ```
 
 | Flag            | Default                          | Purpose                                  |
 | --------------- | -------------------------------- | ---------------------------------------- |
-| `--addr`        | `:8765`                          | Listen address                           |
+| `--addr`        | `127.0.0.1:8765`                 | Listen address                           |
 | `--storage`     | `$LOOM_HOME/received`            | Where to write session files             |
 | `--auth-token`  | (empty; falls back to env)       | Shared bearer token; empty disables auth |
 
@@ -459,7 +461,7 @@ Each machine you want to ship sessions from runs its own loom shipper daemon + c
 | `interval_seconds`            | no       | unset   | Same cadence in seconds; when set it takes precedence over `interval_minutes`. Must be positive.        |
 | `summarizer_interval_seconds` | no       | `30`    | Watch-mode sweep cadence baked into the summarizer plist by `loom install summarizer`. Must be positive. |
 | `allow_plaintext_transcripts_and_token` | no | `false` | Lets the shipper use `http://` to a non-loopback host, exposing transcripts and the token to the network path. See below. |
-| `receiver_addr`               | no       | unset   | Server role: the receiver's listen address, as `host:port`, baked into its plist by `loom install receiver`. Unset keeps `:8765`. |
+| `receiver_addr`               | no       | unset   | Server role: the receiver's listen address, as `host:port`, baked into its plist by `loom install receiver`. Unset keeps `127.0.0.1:8765`, loopback only. |
 | `host_metrics_log`            | no       | unset   | Absolute path of a metric sample log this host writes, shipped as `loom-host-metrics`. Unset ships none. See [`docs/host-metrics.md`](./docs/host-metrics.md). |
 
 The seconds fields and `receiver_addr` are the only ones the server role reads: a server has no `server_url`, and `loom install summarizer` reads `summarizer_interval_seconds` from `$LOOM_HOME/config.json` when the file exists, falling back to `30` when it does not. A zero or negative value in either seconds field is rejected rather than defaulted.
@@ -528,7 +530,7 @@ rm -f ~/.local/bin/loom
 | `loom shipper daemon`         | Long-lived shipper; capture+ship on `interval_minutes`. The launchd target. |
 | `loom shipper once`           | Single pass; ship any new bytes and exit. Manual debugging.                 |
 | `loom shipper health`         | Last-sync, pending count, uncaptured bytes per project.                     |
-| `loom receiver`               | Run the ingest server (`:8765` by default).                                 |
+| `loom receiver`               | Run the ingest server (`127.0.0.1:8765` by default).                        |
 | `loom summarize [--watch]`    | Fold received sessions into `~/.loom/summaries.db`.                         |
 | `loom summarize --rebuild`    | Drop and re-fold the summary DB; the upgrade path for schema bumps.         |
 | `loom summarize --strict`     | One-shot sweep that exits non-zero when any session errored; the form a ticket `verify:` line uses. |

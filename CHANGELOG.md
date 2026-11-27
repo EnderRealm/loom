@@ -6,8 +6,19 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Upgrade
+
+- A receiver installed without `receiver_addr` binds `127.0.0.1:8765` once it
+  restarts on this release; nothing needs setting. Its plist carries no
+  `--addr`, so the new default applies without a reinstall. A receiver with
+  `receiver_addr` set keeps that address.
+
 ### Changed
 
+- The receiver listens on `127.0.0.1:8765` by default instead of `:8765` on
+  every interface, so its plaintext port is reachable only from the server and
+  remote shippers come in through the TLS terminator. `receiver_addr` and
+  `--addr` still override it.
 - The release workflow runs `go test ./...` before GoReleaser, so a tag whose
   tests fail publishes no release. The three `internal/escapes` fixture tests
   that read the operator's tk store and project checkouts are skipped there.

@@ -14,7 +14,7 @@ import (
 var receiverCmd = &cobra.Command{
 	Use:   "receiver",
 	Short: "Run the loom ingest receiver",
-	Long:  "Listens on -addr (default :8765) and persists session deltas to <storage>/<agent>/<project>/<session_id>.jsonl.",
+	Long:  "Listens on -addr (default 127.0.0.1:8765) and persists session deltas to <storage>/<agent>/<project>/<session_id>.jsonl.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := receiver.Options{}
 		opts.Addr, _ = cmd.Flags().GetString("addr")

@@ -32,14 +32,16 @@ import (
 // path can name its plist consistently.
 const AgentLabel = "com.loom.receiver"
 
-// DefaultAddr is the listen address when none is configured.
-const DefaultAddr = ":8765"
+// DefaultAddr is the listen address when none is configured. It is loopback:
+// the receiver serves plaintext HTTP, so remote shippers reach it only through
+// a TLS terminator on the same host.
+const DefaultAddr = "127.0.0.1:8765"
 
-// Options configures Run. Zero values follow flag defaults: bind :8765,
+// Options configures Run. Zero values follow flag defaults: bind 127.0.0.1:8765,
 // storage at $LOOM_HOME/received, auth from $LOOM_RECEIVER_TOKEN or the
 // persisted ~/.loom/receiver-token if Token is empty.
 type Options struct {
-	Addr    string // listen address (default ":8765")
+	Addr    string // listen address (default "127.0.0.1:8765")
 	Storage string // storage root (default $LOOM_HOME/received)
 	Token   string // bearer token; empty falls back to env then the persisted token file
 }

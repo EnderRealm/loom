@@ -3,6 +3,7 @@ package receiver
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -286,5 +287,20 @@ func TestIngestExecutionRegistryLandsUnderItsAgent(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "executions.meta.json")); !os.IsNotExist(err) {
 		t.Errorf("identity sidecar written for a registry with no project identity: %v", err)
+	}
+}
+
+// The receiver serves plaintext HTTP; with no address configured it must not
+// be reachable from off the host.
+func TestDefaultAddrIsLoopback(t *testing.T) {
+	host, port, err := net.SplitHostPort(DefaultAddr)
+	if err != nil {
+		t.Fatalf("DefaultAddr %q: %v", DefaultAddr, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		t.Errorf("DefaultAddr host = %q, want a loopback IP", host)
+	}
+	if port != "8765" {
+		t.Errorf("DefaultAddr port = %q, want 8765", port)
 	}
 }
